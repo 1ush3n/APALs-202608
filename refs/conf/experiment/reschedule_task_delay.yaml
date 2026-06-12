@@ -1,0 +1,17 @@
+# APAL 预测-反应式重调度训练配置：以初始计划为 baseline，只注入工序延迟开始扰动。
+# 用法：
+# python train.py --config conf/experiment/reschedule_task_delay.yaml
+defaults:
+  - ../model/hb_gat_pn.yaml
+  - ../env/apal_default.yaml
+  - ../env/reschedule_task_delay.yaml
+  - ../reward/default.yaml
+  - ../train/ppo_default.yaml
+  - ../rollout/fastpath.yaml
+  - ../hardware/windows_4060.yaml
+
+experiment:
+  experiment_name: reschedule_task_delay
+  checkpoint_root: checkpoints
+  lr: 1.0e-4
+  actor_lr_multiplier: 1.0

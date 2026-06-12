@@ -1,0 +1,10 @@
+rollout:
+  use_rollout_snapshot_fastpath: true
+  enable_rollout_profiler: true
+  rollout_profile_interval: 10
+  rollout_profile_cuda_sync: false
+  enable_shadow_mask_verification: false
+  enable_gpu_batch_rebuild: true
+  enable_gpu_tensor_masking: true
+  use_compile: false
+  use_gradient_checkpointing: false

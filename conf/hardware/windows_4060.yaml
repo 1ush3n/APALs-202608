@@ -1,0 +1,6 @@
+hardware:
+  num_envs_windows: 2
+  vector_env_start_method: auto
+  log_dir: tf-logs
+  report_dir: results/reports
+  generate_report_every_episodes: 100

@@ -1,0 +1,10 @@
+hardware:
+  num_envs_windows: 2
+  vector_env_start_method: auto
+  vector_env_worker_threads: auto
+  log_dir: tf-logs
+  report_dir: results/reports
+  generate_report_every_episodes: 100
+
+train:
+  batch_size: 4

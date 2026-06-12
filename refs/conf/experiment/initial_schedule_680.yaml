@@ -1,0 +1,14 @@
+defaults:
+  - ../model/hb_gat_pn.yaml
+  - ../env/apal_default.yaml
+  - ../env/initial_schedule.yaml
+  - ../env/initial_bucket_680.yaml
+  - ../reward/default.yaml
+  - ../train/ppo_default.yaml
+  - ../train/batch_16.yaml
+  - ../rollout/fastpath.yaml
+  - ../hardware/linux_server.yaml
+
+experiment:
+  experiment_name: initial_schedule_680
+  checkpoint_root: checkpoints

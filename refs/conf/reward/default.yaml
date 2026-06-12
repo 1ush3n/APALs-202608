@@ -1,0 +1,14 @@
+reward:
+  r_coef_makespan: 1.0
+  r_coef_std: 0.5
+  reward_scale: 0.005
+  deadlock_penalty_multiplier: 1.5
+  deadlock_penalty_constant: 50.0
+  use_dense_progress_reward: false
+  r_coef_progress: 2.0
+  enable_cpm_reward: false
+  enable_resource_wait_penalty: false
+  r_coef_wait: 0.05
+  r_coef_idle: 0.02
+  enable_worker_queue_mask: false
+  max_worker_queue_ratio: 10.0

@@ -1,0 +1,135 @@
+# -*- coding: utf-8 -*-
+"""验证分层 YAML 配置加载保持旧 Config 单例兼容。"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from configs import Config, load_config_files
+from train import PROJECT_ROOT, resolve_checkpoint_paths, resolve_tensorboard_log_root, write_best_model_meta
+
+
+def test_layered_yaml_config_loads_into_flat_config() -> None:
+    cfg = Config()
+    load_config_files([str(PROJECT_ROOT / "conf" / "experiment" / "default.yaml")], target=cfg)
+
+    assert cfg.use_input_layer_norm is True
+    assert cfg.use_gat_layer_norm is False
+    assert cfg.use_head_layer_norm is False
+    assert cfg.use_rollout_snapshot_fastpath is True
+    assert cfg.n_m == 5
+    assert cfg.batch_size == 32
+
+
+def test_later_yaml_overrides_earlier_yaml(tmp_path: Path) -> None:
+    override = tmp_path / "override.yaml"
+    override.write_text(
+        "train:\n"
+        "  batch_size: 8\n"
+        "model:\n"
+        "  use_head_layer_norm: true\n",
+        encoding="utf-8",
+    )
+
+    cfg = Config()
+    load_config_files(
+        [
+            str(PROJECT_ROOT / "conf" / "experiment" / "default.yaml"),
+            str(override),
+        ],
+        target=cfg,
+    )
+
+    assert cfg.batch_size == 8
+    assert cfg.use_head_layer_norm is True
+
+
+def test_nested_train_override_preserves_other_ppo_fields(tmp_path: Path) -> None:
+    ppo_path = tmp_path / "ppo.yaml"
+    ppo_path.write_text(
+        "train:\n"
+        "  batch_size: 32\n"
+        "  update_every_episodes: 1\n"
+        "  eval_freq: 1\n",
+        encoding="utf-8",
+    )
+    batch_path = tmp_path / "batch.yaml"
+    batch_path.write_text(
+        "train:\n"
+        "  batch_size: 64\n",
+        encoding="utf-8",
+    )
+    experiment_path = tmp_path / "experiment.yaml"
+    experiment_path.write_text(
+        "defaults:\n"
+        "  - ppo.yaml\n"
+        "  - batch.yaml\n",
+        encoding="utf-8",
+    )
+
+    cfg = Config()
+    load_config_files([str(experiment_path)], target=cfg)
+
+    assert cfg.batch_size == 64
+    assert cfg.update_every_episodes == 1
+    assert cfg.eval_freq == 1
+
+
+def test_initial_schedule_config_disables_dynamic_events_but_keeps_training_randomization() -> None:
+    cfg = Config()
+    load_config_files([str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule.yaml")], target=cfg)
+
+    assert cfg.experiment_name == "initial_schedule"
+    assert cfg.checkpoint_root == "checkpoints"
+    assert cfg.enable_dynamic_events is False
+    assert cfg.enable_station_breakdown is False
+    assert cfg.enable_material_delay is False
+    assert cfg.enable_online_duration_perturb is False
+    assert cfg.enable_worker_fatigue is False
+    assert cfg.prob_worker_absent_base == 0.0
+    assert cfg.prob_worker_absent_max == 0.0
+    assert cfg.prob_station_breakdown_base == 0.0
+    assert cfg.prob_station_breakdown_max == 0.0
+    assert cfg.prob_material_delay_base == 0.0
+    assert cfg.prob_material_delay_max == 0.0
+    assert cfg.online_perturb_prob_per_step == 0.0
+    assert cfg.randomize_durations is True
+    assert cfg.dur_random_range == 0.2
+
+
+def test_experiment_checkpoint_paths_and_best_model_meta_are_isolated(tmp_path: Path) -> None:
+    cfg = Config()
+    cfg.experiment_name = "initial_schedule_test"
+    cfg.checkpoint_root = str(tmp_path / "checkpoints")
+    cfg.config_paths = ("conf/experiment/initial_schedule.yaml",)
+    cfg.data_file_path = "data/283.csv"
+    cfg.train_data_path_or_dir = "data/generated/initial_283"
+
+    paths = resolve_checkpoint_paths(cfg)
+
+    assert paths["checkpoint_path"] == tmp_path / "checkpoints" / "initial_schedule_test" / "latest_checkpoint.pth"
+    assert paths["best_model_path"] == tmp_path / "checkpoints" / "initial_schedule_test" / "bestmodel" / "best_model.pth"
+    assert paths["checkpoint_path"] != tmp_path / "checkpoints" / "latest_checkpoint.pth"
+
+    write_best_model_meta(paths["best_model_meta_path"], episode=7, eval_makespan=123.4, config_obj=cfg)
+    meta_text = paths["best_model_meta_path"].read_text(encoding="utf-8")
+
+    assert '"episode": 7' in meta_text
+    assert '"eval_makespan": 123.4' in meta_text
+    assert "conf/experiment/initial_schedule.yaml" in meta_text
+
+
+def test_tensorboard_log_root_is_platform_specific(monkeypatch) -> None:
+    cfg = Config()
+    cfg.log_dir = "tf-logs"
+
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+    assert resolve_tensorboard_log_root(cfg) == Path("/root/tf-logs")
+
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    assert resolve_tensorboard_log_root(cfg) == PROJECT_ROOT / "tf-logs"
