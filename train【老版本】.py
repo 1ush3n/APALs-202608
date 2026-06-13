@@ -38,14 +38,6 @@ from baselines.heuristic.baseline_ga import GeneticAlgorithmScheduler
 from utils.visualization import plot_gantt
 import random
 from utils.vector_env import VectorEnv, EnvCreator
-from utils.reschedule import (
-    calculate_reschedule_composite_score,
-    calculate_stability_metrics,
-    load_baseline_schedule,
-    load_reschedule_scenarios,
-    sample_task_delay_scenario,
-    save_reschedule_scenarios,
-)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -78,35 +70,18 @@ def resolve_checkpoint_paths(config_obj=configs) -> dict[str, Path]:
     }
 
 
-def resolve_tensorboard_log_root(config_obj=configs) -> Path:
-    """按平台解析 TensorBoard 根目录；Linux 服务器固定写入 /root/tf-logs。"""
-    import platform
-
-    if platform.system() == "Linux":
-        return Path("/root/tf-logs")
-    return resolve_workspace_path(getattr(config_obj, "log_dir", "tf-logs"))
-
-
 def write_best_model_meta(
     meta_path: Path,
     *,
     episode: int,
     eval_makespan: float,
-    selection_metric: str = "eval_makespan",
-    best_score: float | None = None,
-    score_terms: dict[str, float] | None = None,
-    constraint_metrics: dict[str, float] | None = None,
     config_obj=configs,
 ) -> None:
     """保存 best model 的可追溯元数据，方便服务器和本机定位模型来源。"""
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     meta = {
         "episode": int(episode),
-        "selection_metric": selection_metric,
         "eval_makespan": float(eval_makespan),
-        "best_score": None if best_score is None else float(best_score),
-        "score_terms": score_terms or {},
-        "constraint_metrics": constraint_metrics or {},
         "config_paths": list(getattr(config_obj, "config_paths", ())),
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "experiment_name": sanitize_experiment_name(getattr(config_obj, "experiment_name", "default")),
@@ -115,107 +90,6 @@ def write_best_model_meta(
     }
     with meta_path.open("w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
-
-
-def ensure_reschedule_baseline_available(config_obj=configs) -> Path | None:
-    """重调度训练前确保 baseline CSV 存在；不存在时用初始模型生成一次。"""
-    if not getattr(config_obj, "enable_reschedule_mode", False):
-        return None
-    baseline_path = resolve_workspace_path(getattr(config_obj, "reschedule_baseline_schedule_path", "results/final_schedule.csv"))
-    if baseline_path.exists():
-        return baseline_path
-    model_path = resolve_workspace_path(getattr(config_obj, "reschedule_baseline_model_path", "checkpoints/initial_schedule/bestmodel/best_model.pth"))
-    if not model_path.exists():
-        raise FileNotFoundError(f"重调度 baseline 不存在，且找不到用于生成 baseline 的初始模型: {model_path}")
-
-    backup = {
-        "enable_reschedule_mode": getattr(config_obj, "enable_reschedule_mode", False),
-        "task_feat_dim": getattr(config_obj, "task_feat_dim", 18),
-        "randomize_durations": getattr(config_obj, "randomize_durations", False),
-        "enable_dynamic_events": getattr(config_obj, "enable_dynamic_events", False),
-    }
-    try:
-        setattr(config_obj, "enable_reschedule_mode", False)
-        setattr(config_obj, "task_feat_dim", 18)
-        setattr(config_obj, "randomize_durations", False)
-        setattr(config_obj, "enable_dynamic_events", False)
-        from scripts.generate_schedule import generate_schedule
-
-        df = generate_schedule(model_path=str(model_path))
-        baseline_path.parent.mkdir(parents=True, exist_ok=True)
-        if baseline_path != PROJECT_ROOT / "results" / "final_schedule.csv":
-            df.to_csv(baseline_path, index=False)
-    finally:
-        for key, value in backup.items():
-            setattr(config_obj, key, value)
-    if not baseline_path.exists():
-        raise FileNotFoundError(f"baseline 自动生成后仍未找到: {baseline_path}")
-    return baseline_path
-
-
-def load_warm_start_weights_with_input_expansion(model: torch.nn.Module, model_path: Path, device: torch.device) -> dict[str, int]:
-    """加载初始调度模型；当 task 输入维度扩展时复制旧权重的已有列。"""
-    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-    source_state = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-    target_state = model.state_dict()
-    loaded_exact = 0
-    loaded_expanded = 0
-    skipped = 0
-
-    for key, target_tensor in target_state.items():
-        source_tensor = source_state.get(key) if isinstance(source_state, dict) else None
-        if source_tensor is None:
-            skipped += 1
-            continue
-        if tuple(source_tensor.shape) == tuple(target_tensor.shape):
-            target_state[key] = source_tensor.to(target_tensor.device, dtype=target_tensor.dtype)
-            loaded_exact += 1
-            continue
-        if (
-            source_tensor.ndim == target_tensor.ndim == 2
-            and source_tensor.shape[0] == target_tensor.shape[0]
-            and source_tensor.shape[1] <= target_tensor.shape[1]
-        ):
-            patched = target_tensor.clone()
-            patched[:, : source_tensor.shape[1]] = source_tensor.to(target_tensor.device, dtype=target_tensor.dtype)
-            target_state[key] = patched
-            loaded_expanded += 1
-            continue
-        skipped += 1
-
-    model.load_state_dict(target_state, strict=True)
-    return {"loaded_exact": loaded_exact, "loaded_expanded": loaded_expanded, "skipped": skipped}
-
-
-def ensure_reschedule_eval_scenarios_available(config_obj=configs) -> Path | None:
-    """确保重调度验证使用固定场景文件，而不是每次临时随机生成。"""
-    if not getattr(config_obj, "enable_reschedule_mode", False):
-        return None
-    scenario_path = resolve_workspace_path(getattr(config_obj, "reschedule_eval_scenario_path", "results/reschedule_eval_scenarios.csv"))
-    if scenario_path.exists():
-        return scenario_path
-
-    baseline_path = ensure_reschedule_baseline_available(config_obj)
-    if baseline_path is None:
-        return None
-    baseline = load_baseline_schedule(baseline_path)
-    num_scenarios = max(1, int(getattr(config_obj, "reschedule_eval_num_scenarios", 4)))
-    seed = int(getattr(config_obj, "reschedule_eval_scenario_seed", 30300))
-    scenarios = []
-    for idx in range(num_scenarios):
-        scenario = sample_task_delay_scenario(
-            baseline,
-            rng=np.random.RandomState(seed + idx),
-            min_start_ratio=float(getattr(config_obj, "reschedule_start_time_min_ratio", 0.15)),
-            max_start_ratio=float(getattr(config_obj, "reschedule_start_time_max_ratio", 0.65)),
-            task_prob=float(getattr(config_obj, "reschedule_delay_task_prob", 0.08)),
-            delay_min=float(getattr(config_obj, "reschedule_delay_min", 5.0)),
-            delay_max=float(getattr(config_obj, "reschedule_delay_max", 30.0)),
-        )
-        scenarios.append((f"eval_{idx:03d}", scenario))
-    save_reschedule_scenarios(scenario_path, scenarios)
-    print(f"固定重调度验证场景已生成: {scenario_path}")
-    return scenario_path
 
 # 设置全局随机种子
 def set_seed(seed=42):
@@ -351,8 +225,6 @@ def compute_apal_rollout_diagnostics(env_proxy, snapshot: dict, masks) -> dict:
 
     return {
         "schedulable_tasks": schedulable_tasks,
-        "avg_worker_wait_h": avg_worker_wait_h,
-        "avg_station_wait_h": avg_station_wait_h,
         "avg_resource_wait_h": avg_worker_wait_h + avg_station_wait_h,
         "station_slot_vacancy_ratio": station_slot_vacancy_ratio,
         "worker_idle_ratio": worker_idle_ratio,
@@ -593,323 +465,6 @@ def evaluate_model(env, agent, num_runs=1, temperature=None, writer=None, curren
     
     return avg_makespan, avg_balance, avg_reward, best_sch, avg_duration, avg_w_util, avg_s_util
 
-
-def _compute_assignment_utilization(env, final_makespan: float) -> tuple[float, float]:
-    worker_busy_time = 0.0
-    station_busy_time = np.zeros(env.num_stations)
-    for _tid, sid, team, start, end in env.assigned_tasks:
-        dur = max(0.0, float(end) - float(start))
-        worker_busy_time += dur * len(team)
-        if sid >= 0:
-            station_busy_time[sid] += dur
-    worker_util = worker_busy_time / (env.num_workers * final_makespan) if final_makespan > 0 else 0.0
-    max_slots = getattr(configs, 'max_slots_per_station', 3)
-    station_util = np.sum(station_busy_time) / (env.num_stations * max_slots * final_makespan) if final_makespan > 0 else 0.0
-    return float(worker_util), float(station_util)
-
-
-def _compute_reschedule_constraint_metrics(env) -> dict[str, float]:
-    baseline = getattr(env, "baseline_schedule", None)
-    start_time = float(getattr(env, "reschedule_start_time", 0.0))
-    assigned_by_task = {int(item[0]): item for item in env.assigned_tasks}
-    metrics = {
-        "frozen_violation_count": 0.0,
-        "release_violation_count": 0.0,
-        "precedence_violation_count": 0.0,
-        "worker_overlap_violation_count": 0.0,
-        "station_slot_violation_count": 0.0,
-        "skill_violation_count": 0.0,
-        "demand_violation_count": 0.0,
-        "duplicate_task_count": 0.0,
-        "missing_task_count": 0.0,
-        "takt_h": 0.0,
-        "takt_violation_h": 0.0,
-        "lower_bound_h": float(getattr(env, "reschedule_lower_bound", 0.0)),
-        "takt_feasible": float(bool(getattr(env, "reschedule_takt_feasible", True))),
-        "start_deviation_mean_h": 0.0,
-        "station_change_rate": 0.0,
-        "team_change_rate": 0.0,
-    }
-
-    task_ids = [int(item[0]) for item in env.assigned_tasks]
-    metrics["duplicate_task_count"] = float(len(task_ids) - len(set(task_ids)))
-    metrics["missing_task_count"] = float(max(0, env.num_tasks - len(set(task_ids))))
-
-    if baseline is not None:
-        metrics["takt_h"] = float(baseline.makespan)
-        final_makespan = float(np.max(env.station_wall_clock)) if len(env.station_wall_clock) > 0 else 0.0
-        metrics["takt_violation_h"] = max(0.0, final_makespan - float(baseline.makespan))
-        stability = calculate_stability_metrics(baseline, env.assigned_tasks, current_time=start_time)
-        metrics["start_deviation_mean_h"] = float(stability["start_deviation_mean_h"])
-        metrics["station_change_rate"] = float(stability["station_change_rate"])
-        metrics["team_change_rate"] = float(stability["team_change_rate"])
-
-        for task_id, base_task in baseline.tasks.items():
-            if base_task.start > start_time + 1e-9:
-                continue
-            assigned = assigned_by_task.get(int(task_id))
-            if assigned is None:
-                metrics["frozen_violation_count"] += 1.0
-                continue
-            _tid, sid, team, start, end = assigned
-            if (
-                int(sid) != int(base_task.station_id)
-                or set(int(w) for w in team) != set(base_task.team)
-                or abs(float(start) - float(base_task.start)) > 1e-5
-                or abs(float(end) - float(base_task.end)) > 1e-5
-            ):
-                metrics["frozen_violation_count"] += 1.0
-
-    if hasattr(env, "task_material_ready"):
-        for task_id, _sid, _team, start, _end in env.assigned_tasks:
-            release_time = float(env.task_material_ready[int(task_id)])
-            if release_time > float(start) + 1e-5:
-                metrics["release_violation_count"] += 1.0
-
-    if hasattr(env, "raw_data") and "precedence_edges" in env.raw_data:
-        edges = env.raw_data["precedence_edges"]
-        if hasattr(edges, "detach"):
-            edges_np = edges.detach().cpu().numpy()
-        else:
-            edges_np = np.asarray(edges)
-        for src, dst in edges_np.T:
-            pred = assigned_by_task.get(int(src))
-            succ = assigned_by_task.get(int(dst))
-            if pred is None or succ is None:
-                continue
-            if float(pred[4]) > float(succ[3]) + 1e-5:
-                metrics["precedence_violation_count"] += 1.0
-
-    intervals_by_worker: dict[int, list[tuple[float, float]]] = {}
-    intervals_by_station: dict[int, list[tuple[float, float]]] = {}
-    for task_id, sid, team, start, end in env.assigned_tasks:
-        duration = float(end) - float(start)
-        if duration <= 1e-8:
-            continue
-        demand = max(1, int(env.task_static_feat[int(task_id), 2].item()))
-        if len(team) < demand:
-            metrics["demand_violation_count"] += 1.0
-        skill_id = int(env.task_static_feat[int(task_id), 1].item())
-        for worker_id in team:
-            if worker_id < 0 or worker_id >= env.num_workers or env.worker_skill_matrix[int(worker_id), skill_id] < 0.5:
-                metrics["skill_violation_count"] += 1.0
-            intervals_by_worker.setdefault(int(worker_id), []).append((float(start), float(end)))
-        if sid >= 0:
-            intervals_by_station.setdefault(int(sid), []).append((float(start), float(end)))
-
-    for intervals in intervals_by_worker.values():
-        intervals.sort()
-        for (_, prev_end), (next_start, _) in zip(intervals, intervals[1:]):
-            if prev_end > next_start + 1e-5:
-                metrics["worker_overlap_violation_count"] += 1.0
-
-    max_slots = int(getattr(configs, "max_slots_per_station", 3))
-    for intervals in intervals_by_station.values():
-        events: list[tuple[float, int]] = []
-        for start, end in intervals:
-            events.append((start, 1))
-            events.append((end, -1))
-        events.sort(key=lambda item: (item[0], item[1]))
-        active = 0
-        for _time_point, delta in events:
-            active += delta
-            if active > max_slots:
-                metrics["station_slot_violation_count"] += 1.0
-                break
-
-    return metrics
-
-
-def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=None, current_ep=0):
-    """
-    专用于 APAL 预测-反应式重调度的评估。
-    只评估工序延迟开始场景，不混入旧的工时噪声、工人扰动和动态事件评估。
-    """
-    if temperature is None:
-        temperature = getattr(configs, 'eval_temperature', 0.0)
-
-    agent.policy.eval()
-    backups = {
-        'enable_dynamic_events': getattr(configs, 'enable_dynamic_events', False),
-        'enable_station_breakdown': getattr(configs, 'enable_station_breakdown', False),
-        'enable_material_delay': getattr(configs, 'enable_material_delay', False),
-        'enable_online_duration_perturb': getattr(configs, 'enable_online_duration_perturb', False),
-        'enable_worker_fatigue': getattr(configs, 'enable_worker_fatigue', False),
-        'randomize_durations': getattr(configs, 'randomize_durations', False),
-    }
-    setattr(configs, 'enable_dynamic_events', False)
-    setattr(configs, 'enable_station_breakdown', False)
-    setattr(configs, 'enable_material_delay', False)
-    setattr(configs, 'enable_online_duration_perturb', False)
-    setattr(configs, 'enable_worker_fatigue', False)
-
-    makespans, balances, rewards, durations = [], [], [], []
-    worker_utils, station_utils = [], []
-    schedules = []
-    constraint_rows = []
-    score_rows = []
-    scenario_path = ensure_reschedule_eval_scenarios_available(configs)
-    if scenario_path is None:
-        scenario_items = []
-    else:
-        scenario_items = load_reschedule_scenarios(scenario_path)
-    if num_runs is not None:
-        scenario_items = scenario_items[: max(1, int(num_runs))]
-
-    try:
-        base_seed = int(getattr(configs, "reschedule_eval_scenario_seed", 30300))
-        for idx, (scenario_id, scenario) in enumerate(scenario_items):
-            setattr(env, "_forced_reschedule_scenario", scenario)
-            state = env.reset(randomize_duration=False, randomize_workers=False, seed=base_seed + idx)
-            done = False
-            total_reward = 0.0
-            invalid_step_count = 0
-            start_wall = time.time()
-
-            for _ in range(env.num_tasks * 3):
-                if done:
-                    break
-                task_mask, station_mask, worker_mask = env.get_masks()
-                if task_mask.all():
-                    if env.try_wait_for_resources():
-                        state = refresh_env_observation(env)
-                        continue
-                    break
-
-                action_ret = agent.select_action(
-                    state.to(agent.device),
-                    mask_task=task_mask.to(agent.device),
-                    mask_station_matrix=station_mask.to(agent.device),
-                    mask_worker=worker_mask.to(agent.device),
-                    deterministic=(temperature == 0.0),
-                    temperature=temperature,
-                    is_eval=True,
-                )
-                if action_ret[0] is None:
-                    break
-                action, _, _, _, is_invalid = action_ret
-                if getattr(configs, 'ablation_no_mask', False) and is_invalid:
-                    break
-                state, reward, done, info = env.step(action)
-                total_reward += float(reward)
-                if info.get("invalid_action", False):
-                    invalid_step_count += 1
-                    break
-
-            elapsed = time.time() - start_wall
-            complete = len(env.assigned_tasks) == env.num_tasks
-            if complete:
-                final_makespan = float(np.max(env.station_wall_clock))
-                balance = float(np.std(env.station_loads))
-                worker_util, station_util = _compute_assignment_utilization(env, final_makespan)
-                schedule = list(env.assigned_tasks)
-            else:
-                final_makespan = float(env.ideal_makespan * 3.0)
-                balance = float(env.ideal_station_load * 3.0)
-                worker_util, station_util = 0.0, 0.0
-                schedule = []
-
-            constraints = _compute_reschedule_constraint_metrics(env)
-            constraints["scenario_id"] = scenario_id
-            constraints["scenario_index"] = float(idx)
-            constraints["reschedule_start_time"] = float(scenario.start_time)
-            constraints["delayed_task_count"] = float(len(scenario.task_release_times))
-            constraints["invalid_step_count"] = float(invalid_step_count)
-            constraints["complete"] = float(complete)
-            score_result = calculate_reschedule_composite_score(
-                makespan=final_makespan,
-                balance_std=balance,
-                constraint_metrics=constraints,
-                config_obj=configs,
-                ideal_station_load=float(getattr(env, "ideal_station_load", 1.0)),
-            )
-            constraints["eligible"] = float(score_result.eligible)
-            constraints["composite_score"] = float(score_result.score)
-            constraints["selection_score"] = float(score_result.selection_score)
-            constraints.update(score_result.terms)
-            constraint_rows.append(constraints)
-            score_rows.append(score_result)
-            makespans.append(final_makespan)
-            balances.append(balance)
-            rewards.append(total_reward)
-            durations.append(elapsed)
-            worker_utils.append(worker_util)
-            station_utils.append(station_util)
-            schedules.append(schedule)
-    finally:
-        if hasattr(env, "_forced_reschedule_scenario"):
-            delattr(env, "_forced_reschedule_scenario")
-        for key, value in backups.items():
-            setattr(configs, key, value)
-
-    if score_rows:
-        best_idx = int(np.argmin([score.selection_score for score in score_rows]))
-    else:
-        best_idx = int(np.argmin(makespans)) if makespans else 0
-    avg_metrics = {
-        key: float(np.mean([row[key] for row in constraint_rows])) if constraint_rows else 0.0
-        for key in [
-            "frozen_violation_count",
-            "release_violation_count",
-            "precedence_violation_count",
-            "worker_overlap_violation_count",
-            "station_slot_violation_count",
-            "skill_violation_count",
-            "demand_violation_count",
-            "duplicate_task_count",
-            "missing_task_count",
-            "invalid_step_count",
-            "complete",
-            "reschedule_start_time",
-            "delayed_task_count",
-            "takt_h",
-            "takt_violation_h",
-            "lower_bound_h",
-            "takt_feasible",
-            "start_deviation_mean_h",
-            "station_change_rate",
-            "team_change_rate",
-            "eligible",
-            "composite_score",
-            "selection_score",
-            "score_makespan",
-            "score_balance",
-            "score_takt_violation",
-            "score_start_stability",
-            "score_station_change",
-            "score_team_change",
-        ]
-    }
-    avg_metrics["eligible_rate"] = avg_metrics.get("eligible", 0.0)
-
-    avg_makespan = float(np.mean(makespans))
-    avg_balance = float(np.mean(balances))
-    avg_reward = float(np.mean(rewards))
-    avg_duration = float(np.mean(durations))
-    avg_w_util = float(np.mean(worker_utils))
-    avg_s_util = float(np.mean(station_utils))
-    best_sch = schedules[best_idx] if schedules else []
-
-    if writer is not None:
-        writer.add_scalar('RescheduleEval/Makespan', avg_makespan, current_ep)
-        writer.add_scalar('RescheduleEval/Reward', avg_reward, current_ep)
-        writer.add_scalar('RescheduleEval/WorkerUtil', avg_w_util, current_ep)
-        writer.add_scalar('RescheduleEval/StationUtil', avg_s_util, current_ep)
-        writer.add_scalar('RescheduleEval/CompositeScore', avg_metrics.get("composite_score", 0.0), current_ep)
-        writer.add_scalar('RescheduleEval/EligibleRate', avg_metrics.get("eligible_rate", 0.0), current_ep)
-        writer.add_scalar('RescheduleEval/Score_Makespan', avg_metrics.get("score_makespan", 0.0), current_ep)
-        writer.add_scalar('RescheduleEval/Score_Balance', avg_metrics.get("score_balance", 0.0), current_ep)
-        writer.add_scalar('RescheduleEval/Score_TaktViolation', avg_metrics.get("score_takt_violation", 0.0), current_ep)
-        writer.add_scalar('RescheduleEval/Score_StartStability', avg_metrics.get("score_start_stability", 0.0), current_ep)
-        writer.add_scalar('RescheduleEval/Score_StationChange', avg_metrics.get("score_station_change", 0.0), current_ep)
-        writer.add_scalar('RescheduleEval/Score_TeamChange', avg_metrics.get("score_team_change", 0.0), current_ep)
-        for key, value in avg_metrics.items():
-            writer.add_scalar(f'RescheduleEval/{key}', value, current_ep)
-
-    evaluate_reschedule_model.last_metrics = avg_metrics
-    evaluate_reschedule_model.last_scenario_metrics = constraint_rows
-    return avg_makespan, avg_balance, avg_reward, best_sch, avg_duration, avg_w_util, avg_s_util
-
 # ---------------------------------------------------------------------------
 # 训练主循环
 # ---------------------------------------------------------------------------
@@ -926,7 +481,6 @@ def train(args):
             "enable_material_delay": getattr(configs, "enable_material_delay", False),
             "enable_online_duration_perturb": getattr(configs, "enable_online_duration_perturb", False),
             "enable_worker_fatigue": getattr(configs, "enable_worker_fatigue", False),
-            "enable_reschedule_mode": getattr(configs, "enable_reschedule_mode", False),
         }
         print(f"实验名称: {sanitize_experiment_name(getattr(configs, 'experiment_name', 'default'))}")
         print(f"动态扰动开关: {dynamic_flags}")
@@ -946,12 +500,6 @@ def train(args):
         # 接管顶层强化学习伪随机核心
         seed_cfg = configs.seed
         set_seed(seed_cfg)
-        baseline_path = ensure_reschedule_baseline_available(configs)
-        if baseline_path is not None:
-            print(f"重调度 baseline: {baseline_path}")
-        eval_scenario_path = ensure_reschedule_eval_scenarios_available(configs)
-        if eval_scenario_path is not None:
-            print(f"固定重调度验证场景: {eval_scenario_path}")
         
         # 1. 初始化环境
         data_path = resolve_workspace_path(configs.data_file_path if configs.data_file_path else Path("data") / "3182.csv")
@@ -1020,17 +568,6 @@ def train(args):
         
 
         print(f"Agent Initialized. Total Scheduled Updates: {total_updates}")
-        if (
-            getattr(configs, "enable_reschedule_mode", False)
-            and getattr(configs, "reschedule_warm_start", True)
-            and not args.resume
-        ):
-            warm_path = resolve_workspace_path(getattr(configs, "reschedule_baseline_model_path", "checkpoints/initial_schedule/bestmodel/best_model.pth"))
-            if warm_path.exists():
-                warm_stats = load_warm_start_weights_with_input_expansion(agent.policy, warm_path, device)
-                print(f"重调度 warm-start: {warm_path} | {warm_stats}")
-            else:
-                print(f"警告: 启用重调度 warm-start，但未找到初始模型 {warm_path}")
         
         # 3. 断点续训 (Resume Training)
         start_episode = 1
@@ -1078,7 +615,6 @@ def train(args):
         
         # 最佳模型记录
         best_makespan = float('inf')
-        best_reschedule_score = float('inf')
         best_model_dir = checkpoint_paths["best_model_dir"]
         best_model_dir.mkdir(parents=True, exist_ok=True)
         best_model_path = checkpoint_paths["best_model_path"]
@@ -1086,9 +622,7 @@ def train(args):
         
         # 4. TensorBoard 设置
         run_name = f"{sanitize_experiment_name(getattr(configs, 'experiment_name', 'default'))}_ALB_PPO_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        log_root = resolve_tensorboard_log_root(configs)
-        configs.log_dir = str(log_root)
-        log_dir = log_root / run_name
+        log_dir = resolve_workspace_path(configs.log_dir) / run_name
         writer = SummaryWriter(str(log_dir))
         print(f"TensorBoard 日志目录: {log_dir}")
         
@@ -1134,8 +668,6 @@ def train(args):
             prof_step_count = 0
             apal_diag_sums = {
                 "schedulable_tasks": 0.0,
-                "avg_worker_wait_h": 0.0,
-                "avg_station_wait_h": 0.0,
                 "avg_resource_wait_h": 0.0,
                 "station_slot_vacancy_ratio": 0.0,
                 "worker_idle_ratio": 0.0,
@@ -1149,11 +681,6 @@ def train(args):
                 "station_wait_h": 0.0,
                 "worker_idle_ratio_before": 0.0,
                 "station_slot_vacancy_ratio_before": 0.0,
-                "reschedule_takt_violation_h": 0.0,
-                "reschedule_start_deviation_mean_h": 0.0,
-                "reschedule_station_change_rate": 0.0,
-                "reschedule_team_change_rate": 0.0,
-                "reschedule_stability_penalty": 0.0,
             }
             reward_diag_count = 0
             
@@ -1180,32 +707,7 @@ def train(args):
                 for i in active_indices:
                     t_mask, s_mask, w_mask = masks_list[i]
                     if t_mask.all():
-                        wait_start_time = float(getattr(vec_env.envs[i], 'current_time', 0.0))
-                        wait_diag = None
-                        wait_snapshot = None
-                        if use_fast_path and rollout_snapshots is not None:
-                            wait_snapshot = rollout_snapshots[i]
-                        else:
-                            wait_snapshot = vec_env.envs[i].get_state_snapshot()
-                        try:
-                            wait_diag = compute_apal_rollout_diagnostics(vec_env.envs[i], wait_snapshot, masks_list[i])
-                        except Exception:
-                            wait_diag = None
-
                         if vec_env.envs[i].try_wait_for_resources():
-                            wait_end_time = float(getattr(vec_env.envs[i], 'current_time', wait_start_time))
-                            wait_delta_h = max(0.0, wait_end_time - wait_start_time)
-                            if wait_delta_h > 0.0:
-                                station_wait_before = float(wait_diag.get("avg_station_wait_h", 0.0)) if wait_diag else 0.0
-                                worker_wait_before = float(wait_diag.get("avg_worker_wait_h", 0.0)) if wait_diag else 0.0
-                                if station_wait_before > 1e-9:
-                                    reward_diag_sums["station_wait_h"] += wait_delta_h
-                                elif worker_wait_before > 1e-9:
-                                    reward_diag_sums["team_wait_h"] += wait_delta_h
-                                else:
-                                    reward_diag_sums["team_wait_h"] += wait_delta_h
-                                reward_diag_count += 1
-
                             if use_fast_path:
                                 masks_list[i], wait_snapshot = vec_env.envs[i].get_rollout_state()
                                 states[i] = vec_env.envs[i].rebuild_state_from_snapshot(wait_snapshot)
@@ -1436,7 +938,7 @@ def train(args):
                 try:
                     metrics = agent.update(memory, vec_env.envs[0], current_ep=ep)
                     
-                    if not getattr(agent, 'use_schedule_free', getattr(configs, 'use_schedule_free', False)):
+                    if not getattr(configs, 'use_schedule_free', False):
                         progress = min(1.0, ep / configs.max_episodes)
                         min_lr = 1e-6
                         current_lr = configs.lr - progress * (configs.lr - min_lr)
@@ -1478,68 +980,11 @@ def train(args):
             # 定期评估与保存
               # [Validation Strategy]
             if ep % configs.eval_freq == 0:
-                if getattr(configs, "enable_reschedule_mode", False):
-                    makespan, balance, eval_reward, best_sch, eval_duration, w_util, s_util = evaluate_reschedule_model(
-                        eval_env,
-                        agent,
-                        num_runs=max(1, int(getattr(configs, "reschedule_eval_num_scenarios", 4))),
-                        temperature=configs.eval_temperature,
-                        writer=writer,
-                        current_ep=ep,
-                    )
-                    res_metrics = getattr(evaluate_reschedule_model, "last_metrics", {})
-                else:
-                    makespan, balance, eval_reward, best_sch, eval_duration, w_util, s_util = evaluate_model(
-                        eval_env,
-                        agent,
-                        num_runs=1,
-                        temperature=configs.eval_temperature,
-                        writer=writer,
-                        current_ep=ep,
-                    )
-                    res_metrics = {}
+                makespan, balance, eval_reward, best_sch, eval_duration, w_util, s_util = evaluate_model(eval_env, agent, num_runs=1, temperature=configs.eval_temperature, writer=writer, current_ep=ep)
                 
                 reporter.add_record(ep, makespan, balance, w_util, s_util, best_sch, eval_reward)
                 
-                print(f"Epoch {ep:04d} [EVAL] | Mk={makespan:.2f} | Bal={balance:.2f} | WUtil={w_util*100:.1f}% | SUtil={s_util*100:.1f}%")
-                if res_metrics:
-                    scenario_metrics = getattr(evaluate_reschedule_model, "last_scenario_metrics", [])
-                    eligible_count = int(round(res_metrics.get("eligible_rate", 0.0) * max(1, len(scenario_metrics))))
-                    print(
-                        "  [Resched] "
-                        f"score={res_metrics.get('composite_score', 0.0):.4f} "
-                        f"elig={eligible_count}/{len(scenario_metrics)} "
-                        f"takt={res_metrics.get('takt_h', 0.0):.1f} "
-                        f"tv={res_metrics.get('takt_violation_h', 0.0):.2f} "
-                        f"sd={res_metrics.get('start_deviation_mean_h', 0.0):.2f} "
-                        f"sc={res_metrics.get('station_change_rate', 0.0):.3f} "
-                        f"tc={res_metrics.get('team_change_rate', 0.0):.3f} "
-                        f"terms=({res_metrics.get('score_makespan', 0.0):.3f},"
-                        f"{res_metrics.get('score_balance', 0.0):.3f},"
-                        f"{res_metrics.get('score_takt_violation', 0.0):.3f},"
-                        f"{res_metrics.get('score_start_stability', 0.0):.3f},"
-                        f"{res_metrics.get('score_station_change', 0.0):.3f},"
-                        f"{res_metrics.get('score_team_change', 0.0):.3f})"
-                    )
-                    bad_rows = [row for row in scenario_metrics if float(row.get("eligible", 0.0)) < 1.0]
-                    for row in bad_rows[:3]:
-                        print(
-                            "  [BadScenario] "
-                            f"{row.get('scenario_id', '?')} "
-                            f"score={row.get('composite_score', 0.0):.4f} "
-                            f"mk={row.get('makespan', 0.0):.2f} "
-                            f"c={row.get('complete', 0.0):.0f} "
-                            f"viol=fz{row.get('frozen_violation_count', 0.0):.0f}/"
-                            f"rel{row.get('release_violation_count', 0.0):.0f}/"
-                            f"pre{row.get('precedence_violation_count', 0.0):.0f}/"
-                            f"wo{row.get('worker_overlap_violation_count', 0.0):.0f}/"
-                            f"slot{row.get('station_slot_violation_count', 0.0):.0f}/"
-                            f"skill{row.get('skill_violation_count', 0.0):.0f}/"
-                            f"dem{row.get('demand_violation_count', 0.0):.0f}/"
-                            f"dup{row.get('duplicate_task_count', 0.0):.0f}/"
-                            f"miss{row.get('missing_task_count', 0.0):.0f}/"
-                            f"inv{row.get('invalid_step_count', 0.0):.0f}"
-                        )
+                print(f"Epoch {ep:04d} [EVAL] | Makespan: {makespan:.2f} \t| Balance Std: {balance:.2f} \t| W-Util: {w_util*100:.1f}% \t| S-Util: {s_util*100:.1f}%")
                 
                 # 记录 Station Attention Weights
                 # 监控 Critic 的注意力分布 (Gaze Variance)
@@ -1569,45 +1014,16 @@ def train(args):
                 torch.save(save_dict, checkpoint_path)
                 
                 # Save Best
-                if getattr(configs, "enable_reschedule_mode", False):
-                    current_score = float(res_metrics.get("composite_score", float("inf")))
-                    can_save_best = bool(res_metrics.get("eligible_rate", 0.0) >= 1.0 - 1e-9 and current_score < best_reschedule_score)
-                else:
-                    current_score = makespan
-                    can_save_best = bool(makespan < best_makespan)
-
-                if can_save_best:
+                if makespan < best_makespan:
                     best_makespan = makespan
-                    if getattr(configs, "enable_reschedule_mode", False):
-                        best_reschedule_score = current_score
                     torch.save(agent.policy.state_dict(), best_model_path)
                     write_best_model_meta(
                         best_model_meta_path,
                         episode=ep,
                         eval_makespan=best_makespan,
-                        selection_metric="reschedule_composite_score" if getattr(configs, "enable_reschedule_mode", False) else "eval_makespan",
-                        best_score=current_score if getattr(configs, "enable_reschedule_mode", False) else None,
-                        score_terms={
-                            key: float(res_metrics.get(key, 0.0))
-                            for key in [
-                                "score_makespan",
-                                "score_balance",
-                                "score_takt_violation",
-                                "score_start_stability",
-                                "score_station_change",
-                                "score_team_change",
-                            ]
-                        },
-                        constraint_metrics=res_metrics if getattr(configs, "enable_reschedule_mode", False) else {},
                         config_obj=configs,
                     )
-                    if getattr(configs, "enable_reschedule_mode", False):
-                        print(
-                            "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"
-                            f"New Best Reschedule Model Saved! Score: {best_reschedule_score:.6f}, Makespan: {best_makespan:.2f}"
-                        )
-                    else:
-                        print(f"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNew Best Model Saved! Makespan: {best_makespan}")
+                    print(f"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNew Best Model Saved! Makespan: {best_makespan}")
                     
                     # [Real-time Tracer] 实时快照抓拍最好成绩的排单策略
                     trace_dir = model_dir / "eval_traces"
@@ -1660,20 +1076,7 @@ def train(args):
         print("\n>>> [1/2] 开始执行 PPO Agent 的终局推演...")
         # 重新实例环境，避免脏数据
         eval_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)
-        if getattr(configs, "enable_reschedule_mode", False):
-            ppo_makespan, ppo_balance, _, ppo_assigned, ppo_duration, *rest = evaluate_reschedule_model(
-                eval_env,
-                agent,
-                num_runs=max(1, int(getattr(configs, "reschedule_eval_num_scenarios", 4))),
-                temperature=configs.eval_temperature,
-            )
-        else:
-            ppo_makespan, ppo_balance, _, ppo_assigned, ppo_duration, *rest = evaluate_model(
-                eval_env,
-                agent,
-                num_runs=1,
-                temperature=configs.eval_temperature,
-            )
+        ppo_makespan, ppo_balance, _, ppo_assigned, ppo_duration, *rest = evaluate_model(eval_env, agent, num_runs=1, temperature=configs.eval_temperature)
         
         # 配置 GA 基准对抗
         print("\n>>> [2/2] 开始执行 Genetic Algorithm (GA) 基线推演...")

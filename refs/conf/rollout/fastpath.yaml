@@ -3,10 +3,8 @@ rollout:
   enable_rollout_profiler: true
   rollout_profile_interval: 10
   rollout_profile_cuda_sync: false
-  rollout_heartbeat_interval_sec: 0.0
   enable_shadow_mask_verification: false
   enable_gpu_batch_rebuild: true
   enable_gpu_tensor_masking: true
-  enable_tensor_min_stations: false
   use_compile: false
   use_gradient_checkpointing: false

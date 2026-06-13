@@ -1,5 +1,0 @@
-env:
-  data_file_path: data/680.csv
-  train_data_path_or_dir: data/generated/initial_680
-  n_w_min: 100
-  n_w: 100

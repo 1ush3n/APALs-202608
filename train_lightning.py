@@ -34,7 +34,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     num_envs = int(configs.num_envs)
     start_method = str(configs.vector_env_start_method)
     if start_method == "auto":
-        raise RuntimeError("平台硬件配置必须显式指定 vector_env_start_method")
+        start_method = "forkserver" if platform.system() == "Linux" else "spawn"
 
     train_path = resolve_workspace_path(configs.train_data_path_or_dir)
     eval_path = resolve_workspace_path(configs.data_file_path)
@@ -49,6 +49,15 @@ def run(args, *, config_initialized: bool = False) -> None:
     eval_env = AirLineEnv_Graph(eval_path, seed=int(configs.seed) + 10000)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = HBGATPN(configs).to(device)
+    if getattr(configs, 'use_compile', False):
+        try:
+            if platform.system() == 'Windows':
+                print("ℹ️ Windows 环境检测：跳过 torch.compile（需 Linux + Triton）。")
+            else:
+                model = torch.compile(model, dynamic=True)
+                print("🚀 成功激活 torch.compile 图算子融合编译！")
+        except Exception as e:
+            print(f"⚠️ 图编译失败，回退至未编译模式。Err: {e}")
     total_updates = math.ceil(int(configs.max_episodes) / int(configs.update_every_episodes))
     agent = PPOAgent(
         model=model,

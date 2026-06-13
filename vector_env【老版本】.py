@@ -10,22 +10,12 @@ class EnvCreator:
     一个可序列化 (Picklable) 的环境创建器。
     用于规避 Windows 平台 spawn 模式下闭包 (Local Function) 无法被序列化传输至子进程的问题。
     """
-    def __init__(self, data_path_or_dir: str, seed_offset: int = 42, config_overrides: Optional[dict] = None):
+    def __init__(self, data_path_or_dir: str, seed_offset: int = 42):
         self.data_path_or_dir = data_path_or_dir
         self.seed_offset = seed_offset
-        if config_overrides is None:
-            try:
-                from configs import configs
-                config_overrides = configs.to_flat_dict()
-            except Exception:
-                config_overrides = {}
-        self.config_overrides = dict(config_overrides)
 
     def __call__(self, index: int):
-        if self.config_overrides:
-            from configs import configs
-            configs.update_from_dict(self.config_overrides)
-        from environment import AirLineEnv_Graph, _fill_station_macro_features
+        from environment import AirLineEnv_Graph
         return AirLineEnv_Graph(data_path_or_dir=self.data_path_or_dir, seed=self.seed_offset + index)
 
 
@@ -303,7 +293,6 @@ class EnvProxy:
         消除了 PPO 训练更新阶段高频通信带来的带宽和延迟延迟。
         """
         from configs import configs
-        from environment import _fill_station_macro_features
         
         ctx_idx = snapshot.get('dataset_idx', 0)
         ctx = self.dataset_pool[ctx_idx]
@@ -328,20 +317,6 @@ class EnvProxy:
         snap_mat = snapshot.get('task_material_ready', np.zeros(ctx['num_tasks']))
         wait_times_t = np.maximum(0, snap_mat - snapshot['current_time'])
         task_x[:, 17] = torch.log1p(torch.tensor(wait_times_t, dtype=torch.float) / ctx['mean_task_time'])
-        if task_x.size(1) >= 24 and 'baseline_start' in snapshot:
-            snap_num_workers_for_task = len(snapshot['worker_free_time'])
-            takt = max(1e-6, float(snapshot.get('baseline_makespan', 1.0)))
-            task_x[:, 18] = torch.tensor((snapshot['baseline_start'] - snapshot['current_time']) / takt, dtype=torch.float)
-            task_x[:, 19] = torch.tensor((snapshot['baseline_station'] + 1) / max(1, self.dataset_pool[ctx_idx]['base_station_x'].shape[0]), dtype=torch.float)
-            task_x[:, 20] = torch.tensor(snapshot['baseline_team_size'] / max(1, snap_num_workers_for_task), dtype=torch.float)
-            task_x[:, 21] = torch.tensor(snapshot['baseline_frozen'], dtype=torch.float)
-            task_x[:, 22] = torch.tensor((snap_mat > snapshot.get('reschedule_start_time', 0.0) + 1e-9).astype(float), dtype=torch.float)
-            cur_t = float(snapshot['current_time'])
-            snap_status = snapshot['task_status']
-            for task_id in range(task_x.size(0)):
-                base_start = float(snapshot['baseline_start'][task_id])
-                if cur_t > base_start + 1e-9 and snap_status[task_id] != 2:
-                    task_x[task_id, 23] = float(cur_t - base_start) / takt
         
         data['task'].x = task_x
         
@@ -401,7 +376,8 @@ class EnvProxy:
         snap_slots = snapshot.get('station_available_slots', np.full(num_stations, max_slots))
         station_x[:, 7] = torch.tensor(snap_slots, dtype=torch.float) / max_slots
         
-        _fill_station_macro_features(station_x, snap_locks, is_free_bool)
+        global_mobile_count = np.sum(snap_locks == 0)
+        station_x[:, 2] = float(global_mobile_count) / snap_num_workers
         
         # 重建站位槽位释放时间特征 (station_x[s, 4])
         station_finish_lists = [[] for _ in range(num_stations)]
@@ -411,6 +387,12 @@ class EnvProxy:
                 
         import math
         for s in range(num_stations):
+            bound_count = np.sum(snap_locks == s + 1)
+            station_x[s, 1] = float(bound_count) / snap_num_workers
+            
+            free_and_bound = np.sum((snap_locks == s + 1) & is_free_bool)
+            station_x[s, 3] = float(free_and_bound) / snap_num_workers
+            
             # 计算槽位释放时间并应用对数归一化
             lst = station_finish_lists[s]
             lst.sort()

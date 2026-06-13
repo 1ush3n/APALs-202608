@@ -108,22 +108,6 @@ class PPOAgent:
             torch.cuda.empty_cache()
 
     @staticmethod
-    def validate_snapshot_homogeneity(states: List[Any]) -> None:
-        """确保一次 PPO update 只包含同一窄池图和固定工人数。"""
-        snapshot_states = [state for state in states if isinstance(state, dict)]
-        if not snapshot_states:
-            return
-        if len(snapshot_states) != len(states):
-            raise RuntimeError("PPO memory 混合了 snapshot 与 HeteroData 状态")
-        dataset_ids = {int(state.get("dataset_idx", 0)) for state in snapshot_states}
-        worker_counts = {len(state["worker_free_time"]) for state in snapshot_states}
-        if len(dataset_ids) != 1 or len(worker_counts) != 1:
-            raise RuntimeError(
-                "PPO update 要求同质窄池轨迹，"
-                f"dataset_ids={sorted(dataset_ids)}, worker_counts={sorted(worker_counts)}"
-            )
-
-    @staticmethod
     def get_task_demand(task_x: torch.Tensor, task_idx: int) -> int:
         """从 task 特征第 16 列读取 APAL 工序硬性需求人数。"""
         assert task_x.dim() == 2 and task_x.size(1) > 16, f"task_x 形状异常: {tuple(task_x.shape)}"
@@ -522,11 +506,6 @@ class PPOAgent:
 
         batch_size = len(obs_list)
         results = []
-        state_value_tensors = []
-        _decoded_actions = []
-        _m_task_refs = []
-        _m_worker_refs = []
-        _eval_fail_flags = []
 
         with torch.no_grad():
             # 1. 鎵归噺鎵撳寘寮傛瀯鍥捐娴嬫暟鎹苟閫佸叆 GPU锛屼互 O(1) 澶嶆潅搴﹁繍琛?GNN 缂栫爜鍜?Critic 浠峰€肩綉缁?
@@ -695,11 +674,8 @@ class PPOAgent:
                 # 鑻ュ洜杩囧害绔炰簤鎴栨閿侀€変笉澶熷伐浜?
                 if len(team_indices) < demand:
                     if is_eval:
-                        state_value_tensors.append(torch.tensor(0.0))
-                        _decoded_actions.append((0, 0, [], torch.tensor(0.0), None))
-                        _m_task_refs.append(None)
-                        _m_worker_refs.append(None)
-                        _eval_fail_flags.append(True)
+                        # 璇勪及涓ユ牸妯″紡锛氱洿鎺ヨ褰曞け璐ョ姸鎬?
+                        results.append((None, 0.0, 0.0, None, True))
                         continue
                     raise RuntimeError(
                         f"FATAL DEADLOCK: Failed to select enough valid workers (needed {demand}, got {len(team_indices)}).\n"
@@ -707,36 +683,23 @@ class PPOAgent:
                     )
                 
                 total_worker_logprob = sum(worker_logprobs) if worker_logprobs else torch.tensor(0.0).to(self.device)
-                state_value_tensors.append(state_values_batch[i])
-                _decoded_actions.append((t_idx, s_act, team_indices,
-                                         task_logprob + station_logprob + total_worker_logprob,
-                                         specific_station_mask))
-                _m_task_refs.append(m_task)
-                _m_worker_refs.append(m_worker)
-                _eval_fail_flags.append(False)
-        state_values_list = [v.item() for v in state_value_tensors]
-        for i in range(len(_decoded_actions)):
-            if _eval_fail_flags[i]:
-                results.append((None, 0.0, 0.0, None, True))
-                continue
-            t_idx, s_act, team_indices, action_logprob, sp_mask = _decoded_actions[i]
-            action_lp = action_logprob.item()
-            state_v = state_values_list[i]
-
-            is_invalid_action = False
-            m_task = _m_task_refs[i]
-            m_worker = _m_worker_refs[i]
-            if m_task is not None and m_task[t_idx].item():
-                is_invalid_action = True
-            if sp_mask is not None and sp_mask[0, s_act - 1].item():
-                is_invalid_action = True
-            if m_worker is not None:
-                for w_idx in team_indices:
-                    if m_worker[w_idx].item():
-                        is_invalid_action = True
-
-            results.append(((t_idx, s_act - 1, team_indices), action_lp, state_v, sp_mask, is_invalid_action))
-
+                action_logprob = task_logprob + station_logprob + total_worker_logprob
+                state_value = state_values_batch[i].item()
+                action_tuple = (t_idx, station_action.item(), team_indices)
+                
+                # 妫€鏌?action 鏄惁涓烘棤鏁堝姩浣?
+                is_invalid_action = False
+                if m_task is not None and m_task[t_idx].item():
+                    is_invalid_action = True
+                if specific_station_mask is not None and specific_station_mask[0, station_action.item()].item():
+                    is_invalid_action = True
+                if m_worker is not None:
+                    for w_idx in team_indices:
+                        if m_worker[w_idx].item():
+                            is_invalid_action = True
+                
+                results.append((action_tuple, action_logprob.item(), state_value, specific_station_mask, is_invalid_action))
+                
         return results
 
     def update(self, memory: Any, env: Any = None, current_ep: int = 1) -> Dict[str, float]:
@@ -811,8 +774,6 @@ class PPOAgent:
         # Attach targets to Data objects for Batching
         enable_gpu_batch = getattr(configs, 'enable_gpu_batch_rebuild', False) and env is not None
         N_samples = len(memory.states)
-        self.validate_snapshot_homogeneity(memory.states)
-        update_batch_size = max(1, int(self.batch_size))
         gpu_rebuild_fallback_count = 0
         gpu_rebuild_fallback_messages = []
 
@@ -890,12 +851,12 @@ class PPOAgent:
             
             import os
             num_workers = 0 if os.name == 'nt' else 4
-            loader = DataLoader(rebuilt_states, batch_size=update_batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+            loader = DataLoader(rebuilt_states, batch_size=self.batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
             num_batches = len(loader)
-            print(f"PPO Update: BatchSize={update_batch_size}, Total Batches={num_batches} (CPU DataLoader)")
+            print(f"PPO Update: BatchSize={self.batch_size}, Total Batches={num_batches} (CPU DataLoader)")
         else:
-            num_batches = (N_samples + update_batch_size - 1) // update_batch_size
-            print(f"PPO Update: BatchSize={update_batch_size}, Total Batches={num_batches} (GPU In-place Rebuild)")
+            num_batches = (N_samples + self.batch_size - 1) // self.batch_size
+            print(f"PPO Update: BatchSize={self.batch_size}, Total Batches={num_batches} (GPU In-place Rebuild)")
         
         # 3. PPO Optimization Loop
         avg_loss = 0
@@ -940,12 +901,17 @@ class PPOAgent:
                 
             for step_idx, item in enumerate(step_items):
                 if enable_gpu_batch:
-                    start_idx = item * update_batch_size
-                    end_idx = min(start_idx + update_batch_size, N_samples)
+                    start_idx = item * self.batch_size
+                    end_idx = min(start_idx + self.batch_size, N_samples)
                     batch_idx = shuffled_indices[start_idx:end_idx]
                     snapshots_batch = [memory.states[idx] for idx in batch_idx]
                     
-                    batch = _gpu_rebuild_or_cpu_fallback(snapshots_batch, batch_idx)
+                    dataset_ids = [snap.get('dataset_idx', 0) for snap in snapshots_batch]
+                    worker_lens = [len(snap['worker_free_time']) for snap in snapshots_batch]
+                    if len(set(dataset_ids)) > 1 or len(set(worker_lens)) > 1:
+                        batch = _build_cpu_rebuild_batch(batch_idx)
+                    else:
+                        batch = _gpu_rebuild_or_cpu_fallback(snapshots_batch, batch_idx)
 
                 else:
                     batch = item.to(self.device)
@@ -1251,6 +1217,7 @@ class PPOAgent:
         mean_adv = sum(batch_adv_means) / len(batch_adv_means) if batch_adv_means else 0.0
         std_adv = sum(batch_adv_stds) / len(batch_adv_stds) if batch_adv_stds else 0.0
         memory_snapshot = self.get_memory_snapshot()
+        self.clear_device_cache()
         
         metrics = {
             'Loss/Total': avg_loss / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
@@ -1277,7 +1244,6 @@ class PPOAgent:
             'Train/ActorLearningRate': self.optimizer.param_groups[0]['lr'],
             'Train/CriticLearningRate': self.optimizer.param_groups[1]['lr'] if len(self.optimizer.param_groups) > 1 else self.optimizer.param_groups[0]['lr'],
             'Train/ScheduleFreeEnabled': 1.0 if self.use_schedule_free else 0.0,
-            'Train/UpdateBatchSize': float(update_batch_size),
             'Memory/Allocated_GB': memory_snapshot['allocated_gb'],
             'Memory/Reserved_GB': memory_snapshot['reserved_gb'],
         }

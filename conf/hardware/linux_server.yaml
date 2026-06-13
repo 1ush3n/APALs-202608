@@ -1,7 +1,7 @@
 hardware:
   num_envs: 8
   vector_env_start_method: forkserver
-  vector_env_worker_threads: auto
+  vector_env_worker_threads: 1
   vector_env_init_timeout_sec: 180.0
   vector_env_command_timeout_sec: 180.0
   log_dir: /root/tf-logs

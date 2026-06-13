@@ -41,7 +41,7 @@ class Config:
     # ------------------
     # 泛化性与域随机化 (Domain Randomization)
     # ------------------
-    train_data_path_or_dir: str = "data/generated/initial_283"
+    train_data_path_or_dir: str = "data/random_datasets"        # 290+715 混合训练目录
     switch_dataset_every_updates: int = 1                 # 频繁切换以增强泛化能力
     randomize_durations: bool = True                      # 开启随机工时扰动
     dur_random_range: float = 0.2                         # 扰动幅度
@@ -152,7 +152,6 @@ class Config:
     enable_rollout_profiler: bool = True        # 是否开启 Rollout 计时分析器
     rollout_profile_interval: int = 10           # 每 N 个 episode 记录一次性能指标到 TensorBoard
     rollout_profile_cuda_sync: bool = False      # Profiler 中是否强制 CUDA 同步计时（训练时关闭以免拖慢速度）
-    rollout_heartbeat_interval_sec: float = 30.0 # Rollout 阶段长时间无输出时的终端心跳间隔
     
     c_entropy: float = 0.0002                
     c_entropy_end: float = 0.00005            
@@ -173,7 +172,6 @@ class Config:
     
     enable_gpu_batch_rebuild: bool = True  # 是否启用 GPU 预分配 Batch 大图原地特征更新
     enable_gpu_tensor_masking: bool = True # 是否启用 GPU 张量化动作掩码并行计算
-    enable_tensor_min_stations: bool = False # [向量化加速] scatter_reduce 替代 Python for 循环计算 min_stations
     
     kl_early_stop: float = 0.02            
     
@@ -192,7 +190,6 @@ class Config:
     num_envs_linux: int = 8                 # Linux 服务器默认并行环境数
     num_envs_windows: int = 2               # Windows 本机默认并行环境数（低显存）
     vector_env_start_method: str = "auto"   # 多进程启动方式: "auto" / "spawn" / "forkserver"
-    vector_env_worker_threads: str = "auto" # 每个 VectorEnv worker 的 CPU 线程数；auto=总核心数//环境数
 
     # ------------------
     # 日志与监控 (Logging)
@@ -235,11 +232,6 @@ def _parse_yaml_scalar(value: str) -> Any:
         return lower == "true"
     if lower in {"null", "none"}:
         return None
-    if text.startswith("[") and text.endswith("]"):
-        inner = text[1:-1].strip()
-        if not inner:
-            return []
-        return [_parse_yaml_scalar(item.strip()) for item in inner.split(",")]
     try:
         if any(ch in text for ch in [".", "e", "E"]):
             return float(text)
@@ -295,18 +287,6 @@ def _simple_yaml_load(text: str) -> dict:
     return root
 
 
-def _deep_merge_mapping(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
-    """递归合并配置映射，后加载的叶子字段覆盖先加载字段。"""
-    merged: dict[str, Any] = dict(base)
-    for key, value in override.items():
-        existing = merged.get(key)
-        if isinstance(existing, Mapping) and isinstance(value, Mapping):
-            merged[key] = _deep_merge_mapping(existing, value)
-        else:
-            merged[key] = value
-    return merged
-
-
 def _load_yaml_mapping(path: Path, yaml_module: Any, visited: set[Path]) -> dict:
     """加载单个 YAML，并递归展开 defaults 列表。"""
     resolved = path.resolve()
@@ -329,13 +309,10 @@ def _load_yaml_mapping(path: Path, yaml_module: Any, visited: set[Path]) -> dict
         raise ValueError(f"defaults 必须是列表: {path}")
     for item in defaults:
         default_path = path.parent / str(item)
-        merged = _deep_merge_mapping(
-            merged,
-            _load_yaml_mapping(default_path, yaml_module, visited),
-        )
+        merged.update(_load_yaml_mapping(default_path, yaml_module, visited))
 
     body = {key: value for key, value in loaded.items() if key != "defaults"}
-    merged = _deep_merge_mapping(merged, body)
+    merged.update(body)
     visited.remove(resolved)
     return merged
 
@@ -368,7 +345,6 @@ def load_config_files(paths: list[str] | tuple[str, ...], target: Config | None 
         raise KeyError(f"配置文件包含未知字段: {unknown}")
     cfg.update_from_dict({key: value for key, value in merged.items() if hasattr(cfg, key)})
     return cfg
-
 
 # 全局单例实例化，保持向下兼容
 configs = Config()

@@ -8,7 +8,7 @@ defaults:
   - ../reward/default.yaml
   - ../train/ppo_default.yaml
   - ../rollout/fastpath.yaml
-  - ../hardware/linux_server.yaml
+  - ../hardware/windows_4060.yaml
 
 experiment:
   experiment_name: initial_schedule

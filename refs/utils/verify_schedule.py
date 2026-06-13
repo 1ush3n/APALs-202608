@@ -282,7 +282,6 @@ def verify_schedule(data_path, schedule_path):
          print(f"{bcolors.OKGREEN}{bcolors.BOLD}[最终判定] 本调度表 100% 合法，完美无瑕！{bcolors.ENDC}")
     else:
          print(f"{bcolors.FAIL}{bcolors.BOLD}[最终判定] 发现黑幕调度！请查看上报的各类 Error 判定。{bcolors.ENDC}")
-    return all_passed
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="独立的排程合法性检察官")

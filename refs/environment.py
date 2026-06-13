@@ -73,21 +73,19 @@ class AirLineEnv_Graph(gym.Env):
         self.num_workers = configs.n_w
         self.num_stations = configs.n_m
         
-        # [Dataset Pool] 仅加载当前窄规模实验目录，并保证跨平台顺序稳定。
+        # [Dataset Pool] 扫描输入路径，构建图纸骨架池
         self.dataset_pool = []
-
-        data_source = Path(data_path_or_dir)
-        if data_source.is_dir():
-            files = sorted(
-                path for path in data_source.iterdir()
-                if path.suffix.lower() in {".csv", ".xlsx"}
-            )
+        
+        if os.path.isdir(data_path_or_dir):
+            # 扫描目录下所有的 csv 和 xlsx
+            files = [os.path.join(data_path_or_dir, f) for f in os.listdir(data_path_or_dir) 
+                     if f.endswith('.csv') or f.endswith('.xlsx')]
             if not files:
-                raise ValueError(f"目录 {data_source} 中未找到任何 csv 或 xlsx 文件。")
-            for file_path in files:
-                self._load_and_build_context(file_path)
+                raise ValueError(f"目录 {data_path_or_dir} 中未找到任何 csv 或 xlsx 文件。")
+            for f in files:
+                self._load_and_build_context(f)
         else:
-            self._load_and_build_context(data_source)
+            self._load_and_build_context(data_path_or_dir)
             
         # 初始化激活索引
         self.active_dataset_idx = 0
@@ -107,11 +105,7 @@ class AirLineEnv_Graph(gym.Env):
     def _load_and_build_context(self, file_path):
         """预加载并将图骨架打包成上下文字典"""
         raw_data = load_data(file_path)
-        ctx = {
-            'file_path': str(Path(file_path)),
-            'raw_data': raw_data,
-            'num_tasks': raw_data['num_tasks'],
-        }
+        ctx = {'file_path': file_path, 'raw_data': raw_data, 'num_tasks': raw_data['num_tasks']}
         self.dataset_pool.append(ctx)
         
     def switch_dataset(self, idx: int):
@@ -460,7 +454,9 @@ class AirLineEnv_Graph(gym.Env):
         # [Domain Randomization] Worker Pool Sampling
         # ====================
         if randomize_workers:
-            self.num_workers = int(configs.n_w)
+            min_w = configs.n_w_min
+            max_w = configs.n_w
+            self.num_workers = self.np_random.randint(min_w, max_w + 1)
             
             # [P1] 按工序技能需求强制执行工人覆盖保障
             # 原则: demand 绝不能改，必须通过采样保证人数 ≥ max_demand
@@ -490,16 +486,13 @@ class AirLineEnv_Graph(gym.Env):
                 elif len(remaining) > 0:
                     selected.update(remaining)
             else:
-                if len(selected) > self.num_workers:
-                    raise ValueError(
-                        f"固定工人数 {self.num_workers} 无法覆盖技能需求，"
-                        f"至少需要 {len(selected)} 名工人"
-                    )
+                # 强制采样后人数已超过随机目标，以实际人数为准
+                self.num_workers = len(selected)
                 
             w_indices = np.array(list(selected))
             self.np_random.shuffle(w_indices)
         else:
-            self.num_workers = int(configs.n_w)
+            self.num_workers = configs.n_w
             w_indices = np.arange(self.num_workers)
             
         self.worker_efficiency = self.full_worker_efficiency[w_indices]
@@ -655,20 +648,6 @@ class AirLineEnv_Graph(gym.Env):
             self._apply_reschedule_scenario()
             self._advance_time()
         
-        self._obs_task_x = torch.empty_like(self.base_task_x)
-        self._obs_worker_x = torch.empty_like(self.base_worker_x)
-        self._obs_station_x = torch.empty_like(self.base_station_x)
-
-        src_list, dst_list = [], []
-        for t, preds in self.predecessors.items():
-            for p in preds:
-                src_list.append(p)
-                dst_list.append(t)
-        self._pred_edge_index = (
-            torch.tensor([src_list, dst_list], dtype=torch.long)
-            if src_list else torch.empty((2, 0), dtype=torch.long)
-        )
-
         return self._get_observation()
 
     def _topological_sort(self):
@@ -1243,7 +1222,8 @@ class AirLineEnv_Graph(gym.Env):
         """
         data = self.base_data.clone()
         
-        task_x = self._obs_task_x.copy_(self.base_task_x)
+        # 1. Task Features (In-place refresh)
+        task_x = self.base_task_x.clone()
         task_x[:, 1:5] = 0.0 # reset status
         task_x[torch.arange(self.num_tasks), self.task_status + 1] = 1.0 # set status (offset by 1 to skip duration)
         
@@ -1259,7 +1239,7 @@ class AirLineEnv_Graph(gym.Env):
         data['task'].x = task_x
         
         # 2. Worker Features (In-place refresh)
-        worker_x = self._obs_worker_x.copy_(self.base_worker_x)
+        worker_x = self.base_worker_x.clone()
         
         # [Feature Upgrade: 连续时间特征支撑排队决策]
         # 计算工人的预估等待时间: max(0, worker_free_time - current_time) / self.mean_task_time，使用对数归一化
@@ -1283,7 +1263,7 @@ class AirLineEnv_Graph(gym.Env):
         data['worker'].x = worker_x
         
         # 3. Station Features (In-place refresh)
-        station_x = self._obs_station_x.copy_(self.base_station_x)
+        station_x = self.base_station_x.clone()
         # [Scale Invariance] 物理累积负荷基于理论均分值归一化，代替死板的 / 1000.0
         station_x[:, 0] = torch.tensor(self.station_loads, dtype=torch.float) / max(1.0, self.ideal_station_load)
         
@@ -1418,7 +1398,7 @@ class AirLineEnv_Graph(gym.Env):
         data['task'].x = task_x
         
         snap_num_workers = len(snapshot['worker_free_time'])
-        worker_x = torch.as_tensor(snapshot['base_worker_x']).clone()
+        worker_x = snapshot['base_worker_x'].clone()
         
         # [Feature Upgrade: Wait time rebuild]，使用对数归一化
         wait_times_w = np.maximum(0, snapshot['worker_free_time'] - snapshot['current_time'])

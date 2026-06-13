@@ -88,27 +88,13 @@ class ActionMasker:
                 return task_mask, station_mask, worker_mask
                 
         # 1. 判定前驱任务所赋予的最小站位 min_stations
+        min_stations_np = np.zeros(len(ready_indices), dtype=int)
         ready_indices_cpu = ready_indices.cpu().numpy()
-        if getattr(configs, 'enable_tensor_min_stations', False):
-            task_stations = torch.full((env.num_tasks,), -1, dtype=torch.long, device=t_device)
-            for tid, sid in env.task_station_map.items():
-                task_stations[tid] = sid
-
-            if hasattr(env, '_pred_edge_index') and env._pred_edge_index.numel() > 0:
-                pred_edge = env._pred_edge_index.to(t_device)
-                pred_stations = task_stations[pred_edge[0]].clamp(min=0)
-                min_stations_all = torch.zeros(env.num_tasks, dtype=torch.long, device=t_device)
-                min_stations_all.scatter_reduce_(0, pred_edge[1], pred_stations, reduce='amax')
-                min_stations = min_stations_all[ready_indices]
-            else:
-                min_stations = torch.zeros(len(ready_indices), dtype=torch.long, device=t_device)
-        else:
-            min_stations_np = np.zeros(len(ready_indices), dtype=int)
-            for idx, t in enumerate(ready_indices_cpu):
-                preds = env.predecessors[t]
-                if len(preds) > 0:
-                    min_stations_np[idx] = max([env.task_station_map.get(p, -1) for p in preds], default=0)
-            min_stations = torch.from_numpy(min_stations_np).to(device=t_device, dtype=torch.long)
+        for idx, t in enumerate(ready_indices_cpu):
+            preds = env.predecessors[t]
+            if len(preds) > 0:
+                min_stations_np[idx] = max([env.task_station_map.get(p, -1) for p in preds], default=0)
+        min_stations = torch.from_numpy(min_stations_np).to(device=t_device, dtype=torch.long)
         
         fixed = torch.from_numpy(env.fixed_stations[ready_indices_cpu]).to(device=t_device, dtype=torch.long)
         max_allowed = torch.from_numpy(env.max_allowed_stations[ready_indices_cpu]).to(device=t_device, dtype=torch.long)
