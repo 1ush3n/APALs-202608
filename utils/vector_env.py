@@ -1,5 +1,7 @@
 import copy
 import multiprocessing as mp
+import os
+import time
 from typing import Callable, List, Tuple, Any, Optional
 import numpy as np
 import torch
@@ -29,14 +31,46 @@ class EnvCreator:
         return AirLineEnv_Graph(data_path_or_dir=self.data_path_or_dir, seed=self.seed_offset + index)
 
 
-def _worker(conn, make_env_fn: Callable[[int], Any], index: int):
+class VectorEnvWorkerError(RuntimeError):
+    """VectorEnv 子进程启动、通信或执行失败。"""
+
+
+def _snapshot_to_ipc(snapshot: dict) -> dict:
+    """只转换 snapshot 中可能触发 Torch 共享内存传输的张量。"""
+    result = dict(snapshot)
+    base_worker_x = result.get("base_worker_x")
+    if torch.is_tensor(base_worker_x):
+        result["base_worker_x"] = base_worker_x.detach().cpu().numpy()
+    return result
+
+
+def _masks_to_ipc(masks: tuple[torch.Tensor, ...]) -> tuple[np.ndarray, ...]:
+    return tuple(mask.detach().cpu().numpy() for mask in masks)
+
+
+def _worker(
+    conn,
+    make_env_fn: Callable[[int], Any],
+    index: int,
+    worker_threads: int,
+):
     """
     运行在独立子进程中的环境步进循环。
     通过 Pipe 与主进程的 EnvProxy 通信，避免主进程 GIL 争用。
     """
+    worker_threads = max(1, int(worker_threads))
+    os.environ["OMP_NUM_THREADS"] = str(worker_threads)
+    os.environ["MKL_NUM_THREADS"] = str(worker_threads)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(worker_threads)
+    torch.set_num_threads(worker_threads)
+    try:
+        torch.set_num_interop_threads(max(1, min(2, worker_threads)))
+    except RuntimeError:
+        pass
+
     try:
         env = make_env_fn(index)
-    except Exception as e:
+    except Exception:
         import traceback
         tb_str = traceback.format_exc()
         conn.send(("INIT_ERROR", tb_str))
@@ -48,7 +82,14 @@ def _worker(conn, make_env_fn: Callable[[int], Any], index: int):
         'num_tasks': getattr(env, 'num_tasks', None),
         'ideal_makespan': getattr(env, 'ideal_makespan', None),
         'mean_task_time': getattr(env, 'mean_task_time', None),
-        'dataset_pool': getattr(env, 'dataset_pool', None),
+        'dataset_count': int(getattr(env, 'dataset_count', 1)),
+        'active_dataset_idx': int(getattr(env, 'active_dataset_idx', 0)),
+        'dataset_descriptor': env.get_dataset_descriptor(getattr(env, 'active_dataset_idx', 0)),
+        'worker_audit': {
+            'pid': os.getpid(),
+            'torch_num_threads': torch.get_num_threads(),
+            'omp_num_threads': os.environ.get("OMP_NUM_THREADS"),
+        },
     }
     conn.send(("INIT_OK", init_info))
 
@@ -97,11 +138,11 @@ def _worker(conn, make_env_fn: Callable[[int], Any], index: int):
                 
             elif cmd == 'get_masks':
                 masks = env.get_masks()
-                conn.send(("OK", masks))
+                conn.send(("OK", _masks_to_ipc(masks)))
                 
             elif cmd == 'get_rollout_state':
-                masks = env.get_masks()
-                snap = env.get_state_snapshot()
+                masks = _masks_to_ipc(env.get_masks())
+                snap = _snapshot_to_ipc(env.get_state_snapshot())
                 dynamic_info = {
                     'station_wall_clock': getattr(env, 'station_wall_clock', None),
                     'assigned_tasks': getattr(env, 'assigned_tasks', None),
@@ -112,7 +153,7 @@ def _worker(conn, make_env_fn: Callable[[int], Any], index: int):
                 
             elif cmd == 'step_snapshot':
                 if data is None:
-                    snap = env.get_state_snapshot()
+                    snap = _snapshot_to_ipc(env.get_state_snapshot())
                     conn.send(("OK", (snap, 0.0, True, {})))
                 else:
                     old_skip_obs = getattr(env, 'skip_obs_building', False)
@@ -121,7 +162,7 @@ def _worker(conn, make_env_fn: Callable[[int], Any], index: int):
                         _, reward, done, info = env.step(data)
                     finally:
                         env.skip_obs_building = old_skip_obs
-                    snap = env.get_state_snapshot()
+                    snap = _snapshot_to_ipc(env.get_state_snapshot())
                     dynamic_info = {
                         'station_wall_clock': getattr(env, 'station_wall_clock', None),
                         'assigned_tasks': getattr(env, 'assigned_tasks', None),
@@ -142,7 +183,7 @@ def _worker(conn, make_env_fn: Callable[[int], Any], index: int):
                 conn.send(("OK", (res, dynamic_info)))
                 
             elif cmd == 'get_state_snapshot':
-                snap = env.get_state_snapshot()
+                snap = _snapshot_to_ipc(env.get_state_snapshot())
                 conn.send(("OK", snap))
                 
             elif cmd == 'switch_dataset':
@@ -152,7 +193,9 @@ def _worker(conn, make_env_fn: Callable[[int], Any], index: int):
                     'num_tasks': getattr(env, 'num_tasks', None),
                     'ideal_makespan': getattr(env, 'ideal_makespan', None),
                     'mean_task_time': getattr(env, 'mean_task_time', None),
-                    'dataset_pool': getattr(env, 'dataset_pool', None),
+                    'dataset_count': int(getattr(env, 'dataset_count', 1)),
+                    'active_dataset_idx': int(getattr(env, 'active_dataset_idx', 0)),
+                    'dataset_descriptor': env.get_dataset_descriptor(data),
                     'station_wall_clock': getattr(env, 'station_wall_clock', None),
                     'assigned_tasks': getattr(env, 'assigned_tasks', None),
                     'task_status': getattr(env, 'task_status', None),
@@ -167,11 +210,7 @@ def _worker(conn, make_env_fn: Callable[[int], Any], index: int):
                 
             elif cmd == 'initialize_dataset_context':
                 idx = data
-                ctx = env.dataset_pool[idx]
-                if 'base_data' not in ctx:
-                    env._build_static_context(ctx)
-                # 将序列化后的完整静态 ctx 缓存传回主进程
-                conn.send(("OK", ctx))
+                conn.send(("OK", env.export_dataset_context(idx)))
                 
             elif cmd == 'close':
                 conn.send(("OK", None))
@@ -179,8 +218,9 @@ def _worker(conn, make_env_fn: Callable[[int], Any], index: int):
                 break
             else:
                 conn.send(("ERROR", ValueError(f"Unknown command: {cmd}")))
-        except Exception as e:
-            conn.send(("ERROR", e))
+        except Exception:
+            import traceback
+            conn.send(("ERROR", traceback.format_exc()))
 
 
 class EnvProxy:
@@ -188,15 +228,19 @@ class EnvProxy:
     用于多进程 VectorEnv 的环境代理类。
     对主进程表现得与单环境一模一样，通过本地属性影子缓存实现超低延迟的同步属性查询。
     """
-    def __init__(self, conn, idx: int):
+    def __init__(self, conn, process: mp.Process, idx: int, command_timeout_sec: float):
         self._conn = conn
+        self._process = process
         self._idx = idx
+        self._command_timeout_sec = float(command_timeout_sec)
         
         # 1. 静态属性缓存 (在初始化或切换数据集时写入)
         self.num_tasks: Optional[int] = None
         self.ideal_makespan: Optional[float] = None
         self.mean_task_time: Optional[float] = None
-        self.dataset_pool: Optional[List[dict]] = None
+        self.dataset_count: int = 0
+        self.active_dataset_idx: int = 0
+        self.dataset_pool: List[Optional[dict]] = []
         
         # 2. 动态属性缓存 (在 reset, step 和 try_wait_for_resources 之后同步更新)
         self.station_wall_clock: Optional[np.ndarray] = None
@@ -208,7 +252,35 @@ class EnvProxy:
         if 'num_tasks' in info: self.num_tasks = info['num_tasks']
         if 'ideal_makespan' in info: self.ideal_makespan = info['ideal_makespan']
         if 'mean_task_time' in info: self.mean_task_time = info['mean_task_time']
-        if 'dataset_pool' in info: self.dataset_pool = info['dataset_pool']
+        if 'dataset_count' in info:
+            self.dataset_count = int(info['dataset_count'])
+            while len(self.dataset_pool) < self.dataset_count:
+                self.dataset_pool.append(None)
+        if 'active_dataset_idx' in info:
+            self.active_dataset_idx = int(info['active_dataset_idx'])
+        descriptor = info.get('dataset_descriptor')
+        if descriptor is not None:
+            idx = int(descriptor['dataset_idx'])
+            while len(self.dataset_pool) <= idx:
+                self.dataset_pool.append(None)
+            cached = self.dataset_pool[idx] or {}
+            cached.update(descriptor)
+            self.dataset_pool[idx] = cached
+
+    def _recv(self, operation: str):
+        if not self._conn.poll(self._command_timeout_sec):
+            exit_code = self._process.exitcode
+            state = "alive" if self._process.is_alive() else f"exitcode={exit_code}"
+            raise TimeoutError(
+                f"VectorEnv worker {self._idx} 执行 {operation} 超时 "
+                f"({self._command_timeout_sec:.1f}s, {state})"
+            )
+        status, value = self._conn.recv()
+        if status not in {"OK", "INIT_OK"}:
+            raise VectorEnvWorkerError(
+                f"VectorEnv worker {self._idx} 执行 {operation} 失败:\n{value}"
+            )
+        return value
 
     def update_dynamic_properties(self, info: dict):
         if 'station_wall_clock' in info: self.station_wall_clock = info['station_wall_clock']
@@ -218,83 +290,50 @@ class EnvProxy:
 
     def reset(self, randomize_duration: bool = False, randomize_workers: bool = False, seed: Optional[int] = None):
         self._conn.send(('reset', {'randomize_duration': randomize_duration, 'randomize_workers': randomize_workers, 'seed': seed}))
-        status, val = self._conn.recv()
-        if status == "OK":
-            obs, dynamic_info = val
-            self.update_dynamic_properties(dynamic_info)
-            self.update_static_properties(dynamic_info)
-            return obs
-        else:
-            raise val
+        obs, dynamic_info = self._recv("reset")
+        self.update_dynamic_properties(dynamic_info)
+        self.update_static_properties(dynamic_info)
+        return obs
 
     def step(self, action: Any):
         self._conn.send(('step', action))
-        status, val = self._conn.recv()
-        if status == "OK":
-            obs, reward, done, info = val
-            if 'dynamic_info' in info:
-                self.update_dynamic_properties(info['dynamic_info'])
-                del info['dynamic_info']
-            return obs, reward, done, info
-        else:
-            raise val
+        obs, reward, done, info = self._recv("step")
+        if 'dynamic_info' in info:
+            self.update_dynamic_properties(info.pop('dynamic_info'))
+        return obs, reward, done, info
 
     def get_masks(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         self._conn.send(('get_masks', None))
-        status, val = self._conn.recv()
-        if status == "OK":
-            return val
-        else:
-            raise val
+        return tuple(torch.from_numpy(mask) for mask in self._recv("get_masks"))
 
     def get_rollout_state(self):
         self._conn.send(('get_rollout_state', None))
-        status, val = self._conn.recv()
-        if status == "OK":
-            masks, snap, dynamic_info = val
-            self.update_dynamic_properties(dynamic_info)
-            return masks, snap
-        else:
-            raise val
+        masks, snap, dynamic_info = self._recv("get_rollout_state")
+        self.update_dynamic_properties(dynamic_info)
+        return tuple(torch.from_numpy(mask) for mask in masks), snap
 
     def step_snapshot(self, action: Any):
         self._conn.send(('step_snapshot', action))
-        status, val = self._conn.recv()
-        if status == "OK":
-            snap, reward, done, info = val
-            if 'dynamic_info' in info:
-                self.update_dynamic_properties(info['dynamic_info'])
-                del info['dynamic_info']
-            return snap, reward, done, info
-        else:
-            raise val
+        snap, reward, done, info = self._recv("step_snapshot")
+        if 'dynamic_info' in info:
+            self.update_dynamic_properties(info.pop('dynamic_info'))
+        return snap, reward, done, info
 
     def try_wait_for_resources(self) -> bool:
         self._conn.send(('try_wait_for_resources', None))
-        status, val = self._conn.recv()
-        if status == "OK":
-            res, dynamic_info = val
-            self.update_dynamic_properties(dynamic_info)
-            return res
-        else:
-            raise val
+        res, dynamic_info = self._recv("try_wait_for_resources")
+        self.update_dynamic_properties(dynamic_info)
+        return res
 
     def get_state_snapshot(self) -> dict:
         self._conn.send(('get_state_snapshot', None))
-        status, val = self._conn.recv()
-        if status == "OK":
-            return val
-        else:
-            raise val
+        return self._recv("get_state_snapshot")
 
     def switch_dataset(self, idx: int):
         self._conn.send(('switch_dataset', idx))
-        status, val = self._conn.recv()
-        if status == "OK":
-            self.update_static_properties(val)
-            self.update_dynamic_properties(val)
-        else:
-            raise val
+        val = self._recv("switch_dataset")
+        self.update_static_properties(val)
+        self.update_dynamic_properties(val)
 
     def rebuild_state_from_snapshot(self, snapshot: dict) -> HeteroData:
         """
@@ -306,17 +345,15 @@ class EnvProxy:
         from environment import _fill_station_macro_features
         
         ctx_idx = snapshot.get('dataset_idx', 0)
+        while len(self.dataset_pool) <= ctx_idx:
+            self.dataset_pool.append(None)
         ctx = self.dataset_pool[ctx_idx]
         
         # 防御机制：如果该数据集尚未在代理端加载 base_data，发送紧急 IPC 请求子进程就地初始化
-        if 'base_data' not in ctx:
+        if ctx is None or 'base_data' not in ctx:
             self._conn.send(('initialize_dataset_context', ctx_idx))
-            status, val = self._conn.recv()
-            if status == "OK":
-                self.dataset_pool[ctx_idx] = val
-                ctx = self.dataset_pool[ctx_idx]
-            else:
-                raise val
+            self.dataset_pool[ctx_idx] = self._recv("initialize_dataset_context")
+            ctx = self.dataset_pool[ctx_idx]
 
         data = ctx['base_data'].clone()
         
@@ -347,7 +384,7 @@ class EnvProxy:
         
         # 2. 重建工人节点特征
         snap_num_workers = len(snapshot['worker_free_time'])
-        worker_x = snapshot['base_worker_x'].clone()
+        worker_x = torch.as_tensor(snapshot['base_worker_x']).clone()
         
         wait_times_w = np.maximum(0, snapshot['worker_free_time'] - snapshot['current_time'])
         worker_x[:, 11] = torch.log1p(torch.tensor(wait_times_w, dtype=torch.float) / ctx['mean_task_time'])
@@ -464,11 +501,18 @@ class VectorEnv:
         num_envs: int = 4,
         max_workers: Any = None,
         start_method: Optional[str] = None,
+        worker_threads: Any = "auto",
+        init_timeout_sec: float = 120.0,
+        command_timeout_sec: float = 120.0,
     ):
         self.num_envs = num_envs
         self.closed = False
         self.start_method = start_method
+        self.init_timeout_sec = float(init_timeout_sec)
+        self.command_timeout_sec = float(command_timeout_sec)
         self._mp_ctx = mp.get_context(start_method) if start_method else mp.get_context()
+        self.worker_threads = self._resolve_worker_threads(worker_threads, num_envs)
+        self.worker_audits: List[dict] = []
         
         # 创建双向管道
         self.parent_conns, self.child_conns = zip(*[self._mp_ctx.Pipe() for _ in range(num_envs)])
@@ -476,21 +520,61 @@ class VectorEnv:
         # 启动守护子进程
         self.processes = []
         for i in range(num_envs):
-            p = self._mp_ctx.Process(target=_worker, args=(self.child_conns[i], make_env_fn, i), daemon=True)
+            p = self._mp_ctx.Process(
+                target=_worker,
+                args=(self.child_conns[i], make_env_fn, i, self.worker_threads),
+                daemon=True,
+            )
             self.processes.append(p)
             p.start()
             
         # 收集子进程初始化和静态配置的反馈
         self.envs = []
-        for i in range(num_envs):
-            status, info = self.parent_conns[i].recv()
-            if status == "INIT_OK":
-                proxy = EnvProxy(self.parent_conns[i], i)
+        try:
+            for i in range(num_envs):
+                conn = self.parent_conns[i]
+                process = self.processes[i]
+                if not conn.poll(self.init_timeout_sec):
+                    state = "alive" if process.is_alive() else f"exitcode={process.exitcode}"
+                    raise TimeoutError(
+                        f"VectorEnv worker {i} 初始化超时 "
+                        f"({self.init_timeout_sec:.1f}s, {state})"
+                    )
+                status, info = conn.recv()
+                if status != "INIT_OK":
+                    raise VectorEnvWorkerError(f"VectorEnv worker {i} 初始化失败:\n{info}")
+                proxy = EnvProxy(conn, process, i, self.command_timeout_sec)
                 proxy.update_static_properties(info)
                 self.envs.append(proxy)
-            else:
-                self.close()
-                raise RuntimeError(f"Failed to initialize environment in worker {i}: {info}")
+                self.worker_audits.append(dict(info.get("worker_audit", {})))
+        except Exception:
+            self.close()
+            raise
+
+    @staticmethod
+    def _resolve_worker_threads(worker_threads: Any, num_envs: int) -> int:
+        if worker_threads is None or str(worker_threads).lower() == "auto":
+            return max(1, (os.cpu_count() or 1) // max(1, int(num_envs)))
+        try:
+            return max(1, int(worker_threads))
+        except (TypeError, ValueError):
+            return max(1, (os.cpu_count() or 1) // max(1, int(num_envs)))
+
+    def _recv_worker(self, index: int, operation: str):
+        conn = self.parent_conns[index]
+        process = self.processes[index]
+        if not conn.poll(self.command_timeout_sec):
+            state = "alive" if process.is_alive() else f"exitcode={process.exitcode}"
+            raise TimeoutError(
+                f"VectorEnv worker {index} 执行 {operation} 超时 "
+                f"({self.command_timeout_sec:.1f}s, {state})"
+            )
+        status, value = conn.recv()
+        if status != "OK":
+            raise VectorEnvWorkerError(
+                f"VectorEnv worker {index} 执行 {operation} 失败:\n{value}"
+            )
+        return value
 
     def reset_all(self, randomize_duration: bool = False, randomize_workers: bool = False) -> List[Any]:
         """异步广播复位指令并同步收集子图状态"""
@@ -499,14 +583,10 @@ class VectorEnv:
         
         results = []
         for i in range(self.num_envs):
-            status, val = self.parent_conns[i].recv()
-            if status == "OK":
-                obs, dynamic_info = val
-                self.envs[i].update_dynamic_properties(dynamic_info)
-                self.envs[i].update_static_properties(dynamic_info)
-                results.append(obs)
-            else:
-                raise val
+            obs, dynamic_info = self._recv_worker(i, "reset")
+            self.envs[i].update_dynamic_properties(dynamic_info)
+            self.envs[i].update_static_properties(dynamic_info)
+            results.append(obs)
         return results
 
     def step_all(self, actions: List[Any]) -> Tuple[List[Any], List[float], List[bool], List[dict]]:
@@ -516,15 +596,10 @@ class VectorEnv:
                 
         results = []
         for i in range(self.num_envs):
-            status, val = self.parent_conns[i].recv()
-            if status == "OK":
-                obs, reward, done, info = val
-                if 'dynamic_info' in info:
-                    self.envs[i].update_dynamic_properties(info['dynamic_info'])
-                    del info['dynamic_info']
-                results.append((obs, reward, done, info))
-            else:
-                raise val
+            obs, reward, done, info = self._recv_worker(i, "step")
+            if 'dynamic_info' in info:
+                self.envs[i].update_dynamic_properties(info.pop('dynamic_info'))
+            results.append((obs, reward, done, info))
                 
         next_states = [r[0] for r in results]
         rewards = [r[1] for r in results]
@@ -539,15 +614,10 @@ class VectorEnv:
                 
         results = []
         for i in range(self.num_envs):
-            status, val = self.parent_conns[i].recv()
-            if status == "OK":
-                snap, reward, done, info = val
-                if 'dynamic_info' in info:
-                    self.envs[i].update_dynamic_properties(info['dynamic_info'])
-                    del info['dynamic_info']
-                results.append((snap, reward, done, info))
-            else:
-                raise val
+            snap, reward, done, info = self._recv_worker(i, "step_snapshot")
+            if 'dynamic_info' in info:
+                self.envs[i].update_dynamic_properties(info.pop('dynamic_info'))
+            results.append((snap, reward, done, info))
                 
         snapshots = [r[0] for r in results]
         rewards = [r[1] for r in results]
@@ -562,11 +632,8 @@ class VectorEnv:
         
         results = []
         for i in range(self.num_envs):
-            status, val = self.parent_conns[i].recv()
-            if status == "OK":
-                results.append(val)
-            else:
-                raise val
+            masks = self._recv_worker(i, "get_masks")
+            results.append(tuple(torch.from_numpy(mask) for mask in masks))
         return results
 
     def get_masks_and_snapshots_all(self):
@@ -577,14 +644,10 @@ class VectorEnv:
         masks_list = []
         snapshots = []
         for i in range(self.num_envs):
-            status, val = self.parent_conns[i].recv()
-            if status == "OK":
-                masks, snap, dynamic_info = val
-                self.envs[i].update_dynamic_properties(dynamic_info)
-                masks_list.append(masks)
-                snapshots.append(snap)
-            else:
-                raise val
+            masks, snap, dynamic_info = self._recv_worker(i, "get_rollout_state")
+            self.envs[i].update_dynamic_properties(dynamic_info)
+            masks_list.append(tuple(torch.from_numpy(mask) for mask in masks))
+            snapshots.append(snap)
         return masks_list, snapshots
 
     def try_wait_for_resources_all(self) -> List[bool]:
@@ -602,21 +665,30 @@ class VectorEnv:
             self.parent_conns[i].send(('switch_dataset', idx))
             
         for i in range(self.num_envs):
-            status, val = self.parent_conns[i].recv()
-            if status == "OK":
-                self.envs[i].update_static_properties(val)
-                self.envs[i].update_dynamic_properties(val)
-            else:
-                raise val
+            val = self._recv_worker(i, "switch_dataset")
+            self.envs[i].update_static_properties(val)
+            self.envs[i].update_dynamic_properties(val)
 
     def close(self):
         if self.closed:
             return
-        for p in self.processes:
+        for conn, process in zip(
+            getattr(self, "parent_conns", ()),
+            getattr(self, "processes", ()),
+        ):
+            if process.is_alive():
+                try:
+                    conn.send(("close", None))
+                except (BrokenPipeError, EOFError, OSError):
+                    pass
+        deadline = time.monotonic() + 2.0
+        for p in getattr(self, "processes", ()):
+            if p.is_alive():
+                p.join(timeout=max(0.0, deadline - time.monotonic()))
             if p.is_alive():
                 p.terminate()
-                p.join(timeout=2.0)
-        for conn in self.parent_conns:
+                p.join(timeout=1.0)
+        for conn in getattr(self, "parent_conns", ()):
             try:
                 conn.close()
             except Exception:

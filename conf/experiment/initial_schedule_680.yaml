@@ -1,14 +1,13 @@
-# 初始 APAL 调度训练配置：关闭动态扰动，保留工时和工人池随机化。
-# 用法：
-# python train.py --config conf/experiment/initial_schedule.yaml
 defaults:
   - ../model/hb_gat_pn.yaml
   - ../env/apal_default.yaml
   - ../env/initial_schedule.yaml
+  - ../env/initial_bucket_680.yaml
   - ../reward/default.yaml
   - ../train/ppo_default.yaml
+  - ../train/batch_16.yaml
   - ../rollout/fastpath.yaml
 
 experiment:
-  experiment_name: initial_schedule
+  experiment_name: initial_schedule_680
   checkpoint_root: checkpoints

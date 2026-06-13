@@ -54,6 +54,8 @@ def test_vector_env_rebuild_and_switch() -> None:
     configs.n_w = 80
     configs.n_m = 5
     configs.max_slots_per_station = 3
+    configs.enable_dynamic_events = False
+    configs.enable_material_delay = False
     
     # 使用 pathlib 规范化数据集目录
     datasets_dir = PROJECT_ROOT / "data" / "random_datasets"

@@ -28,6 +28,11 @@ from utils.vector_env import EnvCreator, VectorEnv
 pytestmark = pytest.mark.vector_safe
 
 
+class _FailingEnvCreator:
+    def __call__(self, index: int):
+        raise RuntimeError(f"worker-{index}-init-failure")
+
+
 def _pick_simple_actions(obs_list, masks_list):
     actions = []
     for obs, masks in zip(obs_list, masks_list):
@@ -101,6 +106,19 @@ def test_vector_env_two_process_lifecycle_low_memory() -> None:
                 assert rebuilt["worker"].x.shape[0] == len(snapshot["worker_free_time"])
         finally:
             vec_env.close()
+
+
+def test_vector_env_initialization_failure_is_reported_without_hanging() -> None:
+    before_children = len(mp.active_children())
+    with pytest.raises(RuntimeError, match="worker-0-init-failure"):
+        VectorEnv(
+            _FailingEnvCreator(),
+            num_envs=1,
+            start_method="spawn",
+            worker_threads=1,
+            init_timeout_sec=15.0,
+            command_timeout_sec=15.0,
+        )
 
     after_children = len(mp.active_children())
     assert after_children <= before_children, (

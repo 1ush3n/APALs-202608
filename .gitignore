@@ -21,6 +21,7 @@ build/
 /checkpoints/
 /results/
 /tf-logs/
+/data/generated/
 wandb/
 *.pth
 *.ckpt

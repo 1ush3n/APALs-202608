@@ -1,4 +1,10 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
 import sys
+from dataclasses import asdict, dataclass
 from pathlib import Path
 # 把父目录加入系统路径以便加载 environment
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +16,24 @@ import argparse
 import re
 import random
 from environment import AirLineEnv_Graph
+from data_loader import load_data
+
+
+@dataclass(frozen=True)
+class GeneratedDatasetRecord:
+    file: str
+    target_task_count: int
+    actual_task_count: int
+    graph_node_count: int
+    sha256: str
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="生成基于原工序拓扑结构的随机扰动数据集 (支持拓扑剪枝和安全加点防死锁)")
@@ -225,6 +249,113 @@ def generate_random_dataset(template_path, output_path, target_length, time_var)
     
     df.to_csv(output_path, index=False, encoding='utf-8-sig')
     return num_to_drop, num_to_add
+
+
+def validate_generated_dataset(
+    dataset_path: Path,
+    worker_pool_path: Path,
+    *,
+    min_length: int,
+    max_length: int,
+) -> dict[str, int]:
+    """校验生成数据的任务规模、DAG、边索引及技能人数覆盖。"""
+    frame = pd.read_csv(dataset_path, dtype=str)
+    task_count = int((frame["类型"].astype(int) == 2).sum())
+    if not min_length <= task_count <= max_length:
+        raise ValueError(f"真实工序数 {task_count} 不在 [{min_length}, {max_length}]")
+
+    raw_data = load_data(dataset_path)
+    graph_node_count = int(raw_data["num_tasks"])
+    edge_index = raw_data["precedence_edges"]
+    assert edge_index.ndim == 2 and edge_index.shape[0] == 2
+    if edge_index.numel() > 0:
+        assert int(edge_index.min()) >= 0
+        assert int(edge_index.max()) < graph_node_count
+
+    worker_frame = pd.read_csv(worker_pool_path)
+    skill_columns = [f"skill_{idx}" for idx in range(10)]
+    skill_capacity = worker_frame[skill_columns].sum(axis=0).to_numpy(dtype=int)
+    for _, row in raw_data["task_df"].iterrows():
+        skill = int(row["skill_type"])
+        demand = max(1, int(row["demand_workers"]))
+        if not 0 <= skill < len(skill_capacity):
+            raise ValueError(f"技能编号越界: {skill}")
+        if demand > skill_capacity[skill]:
+            raise ValueError(f"技能 {skill} 的需求人数 {demand} 超过工人池容量")
+
+    return {"task_count": task_count, "graph_node_count": graph_node_count}
+
+
+def generate_bucket(
+    template_path: Path,
+    output_dir: Path,
+    *,
+    min_length: int,
+    max_length: int,
+    num_samples: int,
+    time_var: float,
+    seed: int,
+    worker_pool_path: Path,
+) -> dict:
+    """从唯一 APAL 基准模板确定性生成一个窄规模训练池。"""
+    if min_length <= 0 or max_length < min_length:
+        raise ValueError("工序区间非法")
+    if num_samples < 1:
+        raise ValueError("num_samples 必须大于 0")
+
+    template = template_path.resolve()
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    random.seed(seed)
+    np.random.seed(seed)
+
+    baseline_path = output_dir / f"baseline_{template.name}"
+    shutil.copy2(template, baseline_path)
+    records: list[GeneratedDatasetRecord] = []
+
+    for sample_idx in range(1, num_samples + 1):
+        target_length = random.randint(min_length, max_length)
+        output_path = output_dir / (
+            f"variant_{sample_idx:02d}_tasks_{target_length}_template_{template.stem}.csv"
+        )
+        generate_random_dataset(template, output_path, target_length, time_var)
+        stats = validate_generated_dataset(
+            output_path,
+            worker_pool_path,
+            min_length=min_length,
+            max_length=max_length,
+        )
+        records.append(
+            GeneratedDatasetRecord(
+                file=output_path.name,
+                target_task_count=target_length,
+                actual_task_count=stats["task_count"],
+                graph_node_count=stats["graph_node_count"],
+                sha256=_sha256(output_path),
+            )
+        )
+
+    try:
+        template_ref = template.relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        template_ref = template.name
+    manifest = {
+        "version": 1,
+        "template": template_ref,
+        "template_sha256": _sha256(template),
+        "baseline_file": baseline_path.name,
+        "min_length": min_length,
+        "max_length": max_length,
+        "num_samples": num_samples,
+        "time_var": time_var,
+        "seed": seed,
+        "files": [asdict(record) for record in records],
+    }
+    (output_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return manifest
 
 def main():
     args = parse_args()

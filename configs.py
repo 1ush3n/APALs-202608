@@ -1,8 +1,8 @@
 
-from dataclasses import dataclass, field
-import os
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
+import platform
 
 @dataclass
 class Config:
@@ -10,8 +10,8 @@ class Config:
     # 路径配置 (Paths)
     # ------------------
     data_dir: str = "data"
-    data_file_path: str = os.path.join("data", "283.csv") # 默认验证集基准图
-    worker_pool_path: str = os.path.join("data", "worker_pool_fixed.csv")
+    data_file_path: str = str(Path("data") / "283.csv") # 默认验证集基准图
+    worker_pool_path: str = str(Path("data") / "worker_pool_fixed.csv")
     
     # ------------------
     # 环境与图相关 (Environment & Graph)
@@ -41,8 +41,9 @@ class Config:
     # ------------------
     # 泛化性与域随机化 (Domain Randomization)
     # ------------------
-    train_data_path_or_dir: str = "data/random_datasets"        # 290+715 混合训练目录
+    train_data_path_or_dir: str = "data/generated/initial_283"
     switch_dataset_every_updates: int = 1                 # 频繁切换以增强泛化能力
+    dataset_context_cache_size: int = 2                   # 每个环境最多缓存的完整图上下文数量
     randomize_durations: bool = True                      # 开启随机工时扰动
     dur_random_range: float = 0.2                         # 扰动幅度
     curriculum_episodes: int = 0        # 训练前 N 轮强制关闭所有随机因子
@@ -152,6 +153,8 @@ class Config:
     enable_rollout_profiler: bool = True        # 是否开启 Rollout 计时分析器
     rollout_profile_interval: int = 10           # 每 N 个 episode 记录一次性能指标到 TensorBoard
     rollout_profile_cuda_sync: bool = False      # Profiler 中是否强制 CUDA 同步计时（训练时关闭以免拖慢速度）
+    rollout_heartbeat_interval_sec: float = 0.0 # 0 表示关闭；需要诊断长时间阶段时再开启
+    rollout_max_steps: int = 0 # 仅用于受控冒烟测试；0 表示不截断
     
     c_entropy: float = 0.0002                
     c_entropy_end: float = 0.00005            
@@ -186,10 +189,22 @@ class Config:
     # ------------------
     # 平台并行策略 (Platform Parallelism)
     # ------------------
-    import platform
     num_envs_linux: int = 8                 # Linux 服务器默认并行环境数
     num_envs_windows: int = 2               # Windows 本机默认并行环境数（低显存）
-    vector_env_start_method: str = "auto"   # 多进程启动方式: "auto" / "spawn" / "forkserver"
+    vector_env_start_method: str = "auto"   # 多进程启动方式: "spawn" / "forkserver"
+    vector_env_worker_threads: str = "auto"
+    vector_env_init_timeout_sec: float = 120.0
+    vector_env_command_timeout_sec: float = 120.0
+
+    # ------------------
+    # Lightning 训练编排
+    # ------------------
+    use_lightning: bool = True
+    lightning_precision: str = "16-mixed"
+    lightning_accelerator: str = "auto"
+    lightning_devices: int = 1
+    float32_matmul_precision: str = "high"
+    eval_scenarios: list[str] = field(default_factory=lambda: ["standard"])
 
     # ------------------
     # 日志与监控 (Logging)
@@ -211,7 +226,7 @@ class Config:
 
     def to_flat_dict(self) -> dict:
         """导出当前扁平配置，便于调试和测试。"""
-        return dict(self.__dict__)
+        return asdict(self)
 
 
 def _flatten_config_tree(data: Mapping[str, Any], prefix: str = "") -> dict:
@@ -232,6 +247,11 @@ def _parse_yaml_scalar(value: str) -> Any:
         return lower == "true"
     if lower in {"null", "none"}:
         return None
+    if text.startswith("[") and text.endswith("]"):
+        inner = text[1:-1].strip()
+        if not inner:
+            return []
+        return [_parse_yaml_scalar(item.strip()) for item in inner.split(",")]
     try:
         if any(ch in text for ch in [".", "e", "E"]):
             return float(text)
@@ -287,6 +307,18 @@ def _simple_yaml_load(text: str) -> dict:
     return root
 
 
+def _deep_merge_mapping(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """递归合并映射，仅覆盖后加载配置明确给出的叶子字段。"""
+    merged: dict[str, Any] = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[key] = _deep_merge_mapping(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def _load_yaml_mapping(path: Path, yaml_module: Any, visited: set[Path]) -> dict:
     """加载单个 YAML，并递归展开 defaults 列表。"""
     resolved = path.resolve()
@@ -309,10 +341,13 @@ def _load_yaml_mapping(path: Path, yaml_module: Any, visited: set[Path]) -> dict
         raise ValueError(f"defaults 必须是列表: {path}")
     for item in defaults:
         default_path = path.parent / str(item)
-        merged.update(_load_yaml_mapping(default_path, yaml_module, visited))
+        merged = _deep_merge_mapping(
+            merged,
+            _load_yaml_mapping(default_path, yaml_module, visited),
+        )
 
     body = {key: value for key, value in loaded.items() if key != "defaults"}
-    merged.update(body)
+    merged = _deep_merge_mapping(merged, body)
     visited.remove(resolved)
     return merged
 
@@ -332,19 +367,49 @@ def load_config_files(paths: list[str] | tuple[str, ...], target: Config | None 
     except ImportError:
         yaml = None
 
-    merged = {}
+    merged: dict[str, Any] = {}
     for raw_path in paths:
         path = Path(raw_path)
         if not path.exists():
             raise FileNotFoundError(f"配置文件不存在: {path}")
         loaded = _load_yaml_mapping(path, yaml, set())
-        merged.update(_flatten_config_tree(loaded))
+        merged = _deep_merge_mapping(merged, loaded)
 
-    unknown = [key for key in merged if not hasattr(cfg, key)]
+    flat = _flatten_config_tree(merged)
+    unknown = [key for key in flat if not hasattr(cfg, key)]
     if unknown and strict:
         raise KeyError(f"配置文件包含未知字段: {unknown}")
-    cfg.update_from_dict({key: value for key, value in merged.items() if hasattr(cfg, key)})
+    cfg.update_from_dict({key: value for key, value in flat.items() if hasattr(cfg, key)})
     return cfg
+
+
+def resolve_platform_hardware_config(
+    system_name: str | None = None,
+    project_root: Path | None = None,
+) -> Path:
+    """返回当前操作系统唯一对应的硬件配置。"""
+    system = system_name or platform.system()
+    root = project_root or Path(__file__).resolve().parent
+    if system == "Windows":
+        return root / "conf" / "hardware" / "windows_4060_low_memory.yaml"
+    if system == "Linux":
+        return root / "conf" / "hardware" / "linux_server.yaml"
+    raise RuntimeError(f"不支持的训练平台: {system!r}；仅支持 Windows 和 Linux")
+
+
+def load_training_config(
+    experiment_paths: list[str] | tuple[str, ...],
+    target: Config | None = None,
+    *,
+    system_name: str | None = None,
+) -> tuple[Config, tuple[str, ...]]:
+    """先加载实验配置，再追加当前平台硬件配置。"""
+    cfg = target if target is not None else configs
+    hardware_path = resolve_platform_hardware_config(system_name=system_name)
+    paths = tuple(str(path) for path in experiment_paths) + (str(hardware_path),)
+    load_config_files(paths, target=cfg)
+    cfg.config_paths = paths
+    return cfg, paths
 
 # 全局单例实例化，保持向下兼容
 configs = Config()

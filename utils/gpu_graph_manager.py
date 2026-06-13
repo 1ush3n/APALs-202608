@@ -95,7 +95,10 @@ class GPUBatchGraphManager:
         # ① Task 静态特征
         batch_template['task'].x = ctx['base_task_x'].to(t_device).repeat(batch_size, 1)
         # ② Worker 静态特征 (需根据每个 snapshot 实际被选中的工人 base_worker_x 拼接)
-        base_worker_x_batch = torch.cat([snap['base_worker_x'] for snap in snapshots], dim=0).to(t_device)
+        base_worker_x_batch = torch.cat(
+            [torch.as_tensor(snap['base_worker_x']) for snap in snapshots],
+            dim=0,
+        ).to(t_device)
         batch_template['worker'].x = base_worker_x_batch
         # ③ Station 静态特征
         batch_template['station'].x = ctx['base_station_x'].to(t_device).repeat(batch_size, 1)

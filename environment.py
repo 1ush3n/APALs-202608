@@ -7,6 +7,7 @@ from gymnasium import spaces
 import os
 import pandas as pd
 import heapq
+from collections import OrderedDict
 from typing import Tuple, List, Dict, Optional, Any
 from pathlib import Path
 
@@ -73,19 +74,23 @@ class AirLineEnv_Graph(gym.Env):
         self.num_workers = configs.n_w
         self.num_stations = configs.n_m
         
-        # [Dataset Pool] 扫描输入路径，构建图纸骨架池
-        self.dataset_pool = []
-        
-        if os.path.isdir(data_path_or_dir):
-            # 扫描目录下所有的 csv 和 xlsx
-            files = [os.path.join(data_path_or_dir, f) for f in os.listdir(data_path_or_dir) 
-                     if f.endswith('.csv') or f.endswith('.xlsx')]
+        # 目录中只保留轻量文件描述符，完整图上下文按需加载。
+        self.dataset_pool: list[dict[str, Any]] = []
+        self._context_lru: OrderedDict[int, None] = OrderedDict()
+        self._context_cache_size = max(1, int(getattr(configs, "dataset_context_cache_size", 2)))
+
+        data_source = Path(data_path_or_dir)
+        if data_source.is_dir():
+            files = sorted(
+                path for path in data_source.iterdir()
+                if path.suffix.lower() in {".csv", ".xlsx"}
+            )
             if not files:
-                raise ValueError(f"目录 {data_path_or_dir} 中未找到任何 csv 或 xlsx 文件。")
-            for f in files:
-                self._load_and_build_context(f)
+                raise ValueError(f"目录 {data_source} 中未找到任何 csv 或 xlsx 文件。")
+            for file_path in files:
+                self._register_dataset(file_path)
         else:
-            self._load_and_build_context(data_path_or_dir)
+            self._register_dataset(data_source)
             
         # 初始化激活索引
         self.active_dataset_idx = 0
@@ -102,24 +107,55 @@ class AirLineEnv_Graph(gym.Env):
         self.reschedule_lower_bound = 0.0
         self.reschedule_takt_feasible = True
         
-    def _load_and_build_context(self, file_path):
-        """预加载并将图骨架打包成上下文字典"""
-        raw_data = load_data(file_path)
-        ctx = {'file_path': file_path, 'raw_data': raw_data, 'num_tasks': raw_data['num_tasks']}
-        self.dataset_pool.append(ctx)
+    def _register_dataset(self, file_path: str | Path) -> None:
+        """注册数据集路径，不在环境初始化时加载 DataFrame 和图张量。"""
+        self.dataset_pool.append({"file_path": str(Path(file_path).resolve())})
+
+    def _load_and_build_context(self, file_path: str | Path) -> None:
+        """兼容旧调用：解析轻量元数据，完整图仍在首次切换时构建。"""
+        path = Path(file_path).resolve()
+        raw_data = load_data(path)
+        self.dataset_pool.append(
+            {
+                "file_path": str(path),
+                "raw_data": raw_data,
+                "num_tasks": int(raw_data["num_tasks"]),
+            }
+        )
+
+    def _touch_context(self, idx: int) -> None:
+        self._context_lru.pop(idx, None)
+        self._context_lru[idx] = None
+        while len(self._context_lru) > self._context_cache_size:
+            evict_idx, _ = self._context_lru.popitem(last=False)
+            if evict_idx == self.active_dataset_idx:
+                self._context_lru[evict_idx] = None
+                continue
+            ctx = self.dataset_pool[evict_idx]
+            file_path = ctx["file_path"]
+            ctx.clear()
+            ctx["file_path"] = file_path
+
+    def _ensure_dataset_context(self, idx: int) -> dict[str, Any]:
+        if not 0 <= idx < len(self.dataset_pool):
+            raise IndexError(f"数据集索引越界: {idx}/{len(self.dataset_pool)}")
+        ctx = self.dataset_pool[idx]
+        if "raw_data" not in ctx:
+            raw_data = load_data(Path(ctx["file_path"]))
+            ctx["raw_data"] = raw_data
+            ctx["num_tasks"] = int(raw_data["num_tasks"])
+
+        self.raw_data = ctx["raw_data"]
+        self.num_tasks = int(ctx["num_tasks"])
+        if "base_data" not in ctx:
+            self._build_static_context(ctx)
+        self._touch_context(idx)
+        return ctx
         
     def switch_dataset(self, idx: int):
         """无缝切换激活的图骨架"""
         self.active_dataset_idx = idx
-        ctx = self.dataset_pool[idx]
-        
-        # 1. 设置当前环境的激活骨架 (兼容后续依赖 self.raw_data 的逻辑)
-        self.raw_data = ctx['raw_data']
-        self.num_tasks = ctx['num_tasks']
-        
-        # 2. 如果该数据集尚未执行过初始化，则触发全套张量构建
-        if 'base_data' not in ctx:
-            self._build_static_context(ctx)
+        ctx = self._ensure_dataset_context(idx)
             
         # 3. 将激活上下文的属性挂载到当前环境实例，保持向下兼容
         self.base_data = ctx['base_data']
@@ -147,6 +183,34 @@ class AirLineEnv_Graph(gym.Env):
         self.worker_locks = np.zeros(self.num_workers, dtype=int)
         self.station_loads = np.zeros(self.num_stations, dtype=float)
         self.station_wall_clock = np.zeros(self.num_stations, dtype=float)
+
+    @property
+    def dataset_count(self) -> int:
+        return len(self.dataset_pool)
+
+    def get_dataset_descriptor(self, idx: int) -> dict[str, Any]:
+        """返回可安全跨进程传输的轻量数据集信息。"""
+        ctx = self.dataset_pool[idx]
+        return {
+            "dataset_idx": int(idx),
+            "file_path": str(ctx["file_path"]),
+            "num_tasks": None if "num_tasks" not in ctx else int(ctx["num_tasks"]),
+        }
+
+    def export_dataset_context(self, idx: int) -> dict[str, Any]:
+        """按需导出主进程重建 observation 所需的静态上下文。"""
+        ctx = self._ensure_dataset_context(idx)
+        required = (
+            "file_path",
+            "num_tasks",
+            "base_data",
+            "base_task_x",
+            "base_station_x",
+            "full_can_do_edge_index",
+            "mean_task_time",
+            "ideal_station_load",
+        )
+        return {key: ctx[key] for key in required}
         
     def _build_static_context(self, ctx):
         """巧妙利用原有的 init_hetero_data 逻辑，并将产生的属性打包进 ctx"""
@@ -1398,7 +1462,7 @@ class AirLineEnv_Graph(gym.Env):
         data['task'].x = task_x
         
         snap_num_workers = len(snapshot['worker_free_time'])
-        worker_x = snapshot['base_worker_x'].clone()
+        worker_x = torch.as_tensor(snapshot['base_worker_x']).clone()
         
         # [Feature Upgrade: Wait time rebuild]，使用对数归一化
         wait_times_w = np.maximum(0, snapshot['worker_free_time'] - snapshot['current_time'])

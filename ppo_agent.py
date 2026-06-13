@@ -108,6 +108,22 @@ class PPOAgent:
             torch.cuda.empty_cache()
 
     @staticmethod
+    def validate_snapshot_homogeneity(states: List[Any]) -> None:
+        """一次 PPO 更新只允许包含同一图和相同工人数的 snapshot。"""
+        snapshots = [state for state in states if isinstance(state, dict)]
+        if not snapshots:
+            return
+        if len(snapshots) != len(states):
+            raise RuntimeError("PPO memory 混合了 snapshot 与 HeteroData 状态")
+        dataset_ids = {int(state.get("dataset_idx", 0)) for state in snapshots}
+        worker_counts = {len(state["worker_free_time"]) for state in snapshots}
+        if len(dataset_ids) != 1 or len(worker_counts) != 1:
+            raise RuntimeError(
+                "PPO update 要求同质窄池轨迹，"
+                f"dataset_ids={sorted(dataset_ids)}, worker_counts={sorted(worker_counts)}"
+            )
+
+    @staticmethod
     def get_task_demand(task_x: torch.Tensor, task_idx: int) -> int:
         """从 task 特征第 16 列读取 APAL 工序硬性需求人数。"""
         assert task_x.dim() == 2 and task_x.size(1) > 16, f"task_x 形状异常: {tuple(task_x.shape)}"
@@ -506,6 +522,11 @@ class PPOAgent:
 
         batch_size = len(obs_list)
         results = []
+        state_value_tensors = []
+        decoded_actions = []
+        task_mask_refs = []
+        worker_mask_refs = []
+        eval_fail_flags = []
 
         with torch.no_grad():
             # 1. 鎵归噺鎵撳寘寮傛瀯鍥捐娴嬫暟鎹苟閫佸叆 GPU锛屼互 O(1) 澶嶆潅搴﹁繍琛?GNN 缂栫爜鍜?Critic 浠峰€肩綉缁?
@@ -674,32 +695,81 @@ class PPOAgent:
                 # 鑻ュ洜杩囧害绔炰簤鎴栨閿侀€変笉澶熷伐浜?
                 if len(team_indices) < demand:
                     if is_eval:
-                        # 璇勪及涓ユ牸妯″紡锛氱洿鎺ヨ褰曞け璐ョ姸鎬?
-                        results.append((None, 0.0, 0.0, None, True))
+                        state_value_tensors.append(torch.tensor(0.0, device=self.device))
+                        decoded_actions.append(
+                            (0, 0, [], torch.tensor(0.0, device=self.device), None)
+                        )
+                        task_mask_refs.append(None)
+                        worker_mask_refs.append(None)
+                        eval_fail_flags.append(True)
                         continue
                     raise RuntimeError(
                         f"FATAL DEADLOCK: Failed to select enough valid workers (needed {demand}, got {len(team_indices)}).\n"
                         f"Please inspect the mask consistency!"
                     )
                 
-                total_worker_logprob = sum(worker_logprobs) if worker_logprobs else torch.tensor(0.0).to(self.device)
-                action_logprob = task_logprob + station_logprob + total_worker_logprob
-                state_value = state_values_batch[i].item()
-                action_tuple = (t_idx, station_action.item(), team_indices)
-                
-                # 妫€鏌?action 鏄惁涓烘棤鏁堝姩浣?
-                is_invalid_action = False
-                if m_task is not None and m_task[t_idx].item():
-                    is_invalid_action = True
-                if specific_station_mask is not None and specific_station_mask[0, station_action.item()].item():
-                    is_invalid_action = True
-                if m_worker is not None:
-                    for w_idx in team_indices:
-                        if m_worker[w_idx].item():
-                            is_invalid_action = True
-                
-                results.append((action_tuple, action_logprob.item(), state_value, specific_station_mask, is_invalid_action))
-                
+                total_worker_logprob = (
+                    sum(worker_logprobs)
+                    if worker_logprobs
+                    else torch.tensor(0.0, device=self.device)
+                )
+                state_value_tensors.append(state_values_batch[i])
+                decoded_actions.append(
+                    (
+                        t_idx,
+                        s_act,
+                        team_indices,
+                        task_logprob + station_logprob + total_worker_logprob,
+                        specific_station_mask,
+                    )
+                )
+                task_mask_refs.append(m_task)
+                worker_mask_refs.append(m_worker)
+                eval_fail_flags.append(False)
+
+        state_values = (
+            torch.stack(state_value_tensors)
+            .detach()
+            .float()
+            .reshape(-1)
+            .cpu()
+            .tolist()
+        )
+        action_logprobs = (
+            torch.stack([decoded[3] for decoded in decoded_actions])
+            .detach()
+            .float()
+            .cpu()
+            .tolist()
+        )
+        for index, decoded in enumerate(decoded_actions):
+            if eval_fail_flags[index]:
+                results.append((None, 0.0, 0.0, None, True))
+                continue
+
+            task_index, station_index, team_indices, _action_logprob, station_mask = decoded
+            is_invalid_action = False
+            task_mask = task_mask_refs[index]
+            worker_mask = worker_mask_refs[index]
+            if task_mask is not None and task_mask[task_index].item():
+                is_invalid_action = True
+            if station_mask is not None and station_mask[0, station_index - 1].item():
+                is_invalid_action = True
+            if worker_mask is not None:
+                for worker_index in team_indices:
+                    if worker_mask[worker_index].item():
+                        is_invalid_action = True
+
+            results.append(
+                (
+                    (task_index, station_index - 1, team_indices),
+                    action_logprobs[index],
+                    state_values[index],
+                    station_mask,
+                    is_invalid_action,
+                )
+            )
+
         return results
 
     def update(self, memory: Any, env: Any = None, current_ep: int = 1) -> Dict[str, float]:
@@ -714,6 +784,7 @@ class PPOAgent:
         """
         # 1. 璁＄畻骞夸箟浼樺娍浼拌 (GAE - Generalized Advantage Estimation)
         # 灏?rewards 涓?values 寮犻噺鍖栦互杩涜 GAE 璁＄畻
+        self.validate_snapshot_homogeneity(memory.states)
         mem_rewards = memory.rewards
         mem_is_terminals = memory.is_terminals
         mem_is_truncated = getattr(memory, 'is_truncated', [False] * len(mem_rewards))
@@ -1217,8 +1288,6 @@ class PPOAgent:
         mean_adv = sum(batch_adv_means) / len(batch_adv_means) if batch_adv_means else 0.0
         std_adv = sum(batch_adv_stds) / len(batch_adv_stds) if batch_adv_stds else 0.0
         memory_snapshot = self.get_memory_snapshot()
-        self.clear_device_cache()
-        
         metrics = {
             'Loss/Total': avg_loss / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
             'Loss/Policy': avg_policy_loss / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
@@ -1248,5 +1317,3 @@ class PPOAgent:
             'Memory/Reserved_GB': memory_snapshot['reserved_gb'],
         }
         return metrics
-
-

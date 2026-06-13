@@ -1,11 +1,6 @@
-# ============================================================
 # APAL 调度系统依赖清单
-# ============================================================
-# 注意：PyTorch 必须通过官方索引安装以获取 CUDA 支持
-# pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu130
-# 然后再安装其余依赖：
-# pip install -r requirements.txt
-# ============================================================
+# 请按 PyTorch 官方安装矩阵安装与驱动兼容的 CUDA wheel。
+# 不要仅依据本机 CUDA Toolkit 版本硬编码 wheel 索引。
 
 torch>=2.0.0
 torchvision>=0.15.0
@@ -19,3 +14,6 @@ tensorboard>=2.13
 schedulefree>=1.0
 openpyxl>=3.1
 PyYAML>=6.0
+omegaconf>=2.3
+lightning>=2.5
+einops>=0.8

@@ -26,6 +26,7 @@ def setup_module(module):
 def test_station_breakdown_and_recovery():
     """测试事件①：工位故障与恢复及槽位掩码"""
     # 强制开启配置
+    configs.enable_dynamic_events = True
     configs.enable_station_breakdown = True
     configs.prob_station_breakdown_base = 1.0  # 100% 触发
     configs.prob_station_breakdown_max = 1.0
@@ -86,6 +87,7 @@ def test_station_breakdown_and_recovery():
 
 def test_online_duration_perturbation():
     """测试事件②：工时在线随机扰动"""
+    configs.enable_dynamic_events = True
     configs.enable_online_duration_perturb = True
     configs.online_perturb_prob_per_step = 1.0  # 100% 触发
 
@@ -124,6 +126,7 @@ def test_online_duration_perturbation():
 
 def test_material_arrival_delay():
     """测试事件③：物料延迟到达及 ActionMasker 拦截机制"""
+    configs.enable_dynamic_events = True
     configs.enable_material_delay = True
     configs.prob_material_delay_base = 1.0  # 全员延迟
     configs.prob_material_delay_max = 1.0
@@ -156,7 +159,7 @@ def test_material_arrival_delay():
 
     # 验证 GNN 的等待时间第 [17] 维特征反映
     obs = env._get_observation()
-    expected_wait = (ready_time - env.current_time) / env.mean_task_time
+    expected_wait = np.log1p((ready_time - env.current_time) / env.mean_task_time)
     assert abs(obs['task'].x[tid, 17].item() - expected_wait) < 1e-5, "GNN should reflect exact normalized material wait time"
 
     # 4. 模拟时间推移物料到达，解除屏蔽
@@ -169,6 +172,7 @@ def test_material_arrival_delay():
 
 def test_worker_fatigue_and_lazy_recovery():
     """测试事件④：工人连续工作疲劳及空闲动态恢复 (Lazy Evaluation)"""
+    configs.enable_dynamic_events = True
     configs.enable_worker_fatigue = True
     configs.fatigue_threshold_hours = 4.0
     configs.fatigue_decay_slope = 0.05

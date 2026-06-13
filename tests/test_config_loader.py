@@ -6,11 +6,18 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from configs import Config, load_config_files
+from configs import (
+    Config,
+    load_config_files,
+    load_training_config,
+    resolve_platform_hardware_config,
+)
 from train import PROJECT_ROOT, resolve_checkpoint_paths, resolve_tensorboard_log_root, write_best_model_meta
 
 
@@ -102,3 +109,42 @@ def test_tensorboard_log_root_is_platform_specific(monkeypatch) -> None:
 
     monkeypatch.setattr("platform.system", lambda: "Windows")
     assert resolve_tensorboard_log_root(cfg) == PROJECT_ROOT / "tf-logs"
+
+
+def test_training_config_selects_windows_low_memory_profile() -> None:
+    cfg = Config()
+    _, paths = load_training_config(
+        [str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml")],
+        target=cfg,
+        system_name="Windows",
+    )
+
+    assert cfg.num_envs == 2
+    assert cfg.vector_env_start_method == "spawn"
+    assert cfg.batch_size == 4
+    assert Path(paths[-1]).name == "windows_4060_low_memory.yaml"
+
+
+def test_training_config_selects_linux_profile() -> None:
+    cfg = Config()
+    _, paths = load_training_config(
+        [str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml")],
+        target=cfg,
+        system_name="Linux",
+    )
+
+    assert cfg.num_envs == 8
+    assert cfg.vector_env_start_method == "forkserver"
+    assert cfg.batch_size == 32
+    assert Path(paths[-1]).name == "linux_server.yaml"
+
+
+def test_experiments_do_not_embed_hardware_profiles() -> None:
+    experiment_dir = PROJECT_ROOT / "conf" / "experiment"
+    for path in experiment_dir.glob("*.yaml"):
+        assert "../hardware/" not in path.read_text(encoding="utf-8")
+
+
+def test_unsupported_platform_is_rejected() -> None:
+    with pytest.raises(RuntimeError, match="不支持的训练平台"):
+        resolve_platform_hardware_config(system_name="Darwin")

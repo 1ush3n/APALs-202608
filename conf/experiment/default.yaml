@@ -8,4 +8,3 @@ defaults:
   - ../reward/default.yaml
   - ../train/ppo_default.yaml
   - ../rollout/fastpath.yaml
-  - ../hardware/windows_4060.yaml

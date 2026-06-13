@@ -13,6 +13,12 @@ def get_base_parser():
     parser.add_argument("--ablation_no_pointer", action="store_true", help="消融实验：禁用指针网络")
     parser.add_argument("--ablation_no_mask", action="store_true", help="消融实验：禁用硬掩码，改用软惩罚")
     parser.add_argument("--resume", action="store_true", help="是否自动恢复最新 checkpoint")
+    parser.add_argument(
+        "--trainer",
+        choices=("lightning", "legacy"),
+        default="lightning",
+        help="训练编排器；legacy 仅用于历史结果复现",
+    )
     return parser
 
 

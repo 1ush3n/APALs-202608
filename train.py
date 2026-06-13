@@ -32,7 +32,7 @@ from datetime import datetime
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
-from configs import configs, load_config_files
+from configs import configs, load_training_config
 import pandas as pd
 from baselines.heuristic.baseline_ga import GeneticAlgorithmScheduler
 from utils.visualization import plot_gantt
@@ -226,6 +226,47 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+
+def initialize_training_config(args, argv=None, system_name: str | None = None):
+    """统一加载实验配置、平台配置和显式命令行覆盖。"""
+    argv_set = set(sys.argv[1:] if argv is None else argv)
+    _, loaded_paths = load_training_config(
+        args.config,
+        target=configs,
+        system_name=system_name,
+    )
+    if "--ablation_no_gat" in argv_set:
+        configs.ablation_no_gat = True
+    if "--ablation_no_pointer" in argv_set:
+        configs.ablation_no_pointer = True
+    if "--ablation_no_mask" in argv_set:
+        configs.ablation_no_mask = True
+    if "--data_path" in argv_set:
+        configs.data_file_path = args.data_path
+    if "--seed" in argv_set:
+        configs.seed = int(args.seed)
+    if "--max_episodes" in argv_set:
+        configs.max_episodes = int(args.max_episodes)
+
+    precision = str(configs.float32_matmul_precision)
+    if precision not in {"highest", "high", "medium"}:
+        raise ValueError(f"float32_matmul_precision 无效: {precision}")
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision(precision)
+
+    print(
+        "[Runtime] "
+        f"platform={system_name or __import__('platform').system()} "
+        f"configs={[str(Path(path)) for path in loaded_paths]} "
+        f"num_envs={configs.num_envs} "
+        f"worker_threads={configs.vector_env_worker_threads} "
+        f"start_method={configs.vector_env_start_method} "
+        f"amp={configs.lightning_precision} "
+        f"matmul_precision={precision}",
+        flush=True,
+    )
+    return configs
+
 # ---------------------------------------------------------------------------
 # 经验回放缓冲区 (Memory Buffer)
 # ---------------------------------------------------------------------------
@@ -341,7 +382,8 @@ def compute_apal_rollout_diagnostics(env_proxy, snapshot: dict, masks) -> dict:
 
     critical_offset_values = []
     dataset_idx = snapshot.get("dataset_idx", 0)
-    ctx = env_proxy.dataset_pool[dataset_idx]
+    pool = getattr(env_proxy, "dataset_pool", [])
+    ctx = pool[dataset_idx] if dataset_idx < len(pool) and pool[dataset_idx] is not None else {}
     is_critical = np.asarray(ctx.get("is_critical", []), dtype=bool)
     if is_critical.size > 0:
         cpm_earliest = _get_cpm_earliest_starts(ctx)
@@ -409,7 +451,15 @@ def select_actions_batch_compat(
     return results
 
 
-def evaluate_model(env, agent, num_runs=1, temperature=None, writer=None, current_ep=0):
+def evaluate_model(
+    env,
+    agent,
+    num_runs=1,
+    temperature=None,
+    writer=None,
+    current_ep=0,
+    scenario_names=None,
+):
     """
     使用包含温度平滑的定制定向策略评估当前模型性能。
     在多情景（Standard、工时加噪、工人缺损、动态故障）固定扰动下进行评估，
@@ -460,6 +510,17 @@ def evaluate_model(env, agent, num_runs=1, temperature=None, writer=None, curren
             'seed': 20263
         }
     ]
+    if scenario_names is not None:
+        aliases = {
+            "standard": "0_Standard",
+            "duration_noise": "1_DurationNoise",
+            "worker_noise": "2_WorkerNoise",
+            "dynamic_events": "3_DynamicEvents",
+        }
+        selected = {aliases.get(str(name).lower(), str(name)) for name in scenario_names}
+        scenarios = [scenario for scenario in scenarios if scenario["name"] in selected]
+        if not scenarios:
+            raise ValueError(f"未选择任何有效评估场景: {scenario_names}")
     
     scenario_results = []
     
@@ -960,20 +1021,23 @@ def train(args):
         train_dir = resolve_workspace_path(getattr(configs, 'train_data_path_or_dir', data_path))
         print(f"训练图纸池 (Dataset Pool): {train_dir}")
         
-        num_envs = getattr(configs, 'num_envs', 4) # DPPO 并行数量
+        num_envs = int(configs.num_envs) # DPPO 并行数量
         import platform
         plat = platform.system()
-        if plat == "Linux":
-            num_envs = configs.num_envs_linux
-        elif plat == "Windows":
-            num_envs = configs.num_envs_windows
         start_method = getattr(configs, 'vector_env_start_method', 'auto')
         if start_method == "auto":
-            start_method = "forkserver" if plat == "Linux" else "spawn"
+            raise RuntimeError("平台硬件配置必须显式指定 vector_env_start_method")
         print(f"初始化 DPPO 向量化环境，并行数量: {num_envs} (平台: {plat}, start_method: {start_method})")
         from utils.vector_env import EnvCreator
         make_env = EnvCreator(str(train_dir), seed_offset=42)
-        vec_env = VectorEnv(make_env, num_envs=num_envs, start_method=start_method)
+        vec_env = VectorEnv(
+            make_env,
+            num_envs=num_envs,
+            start_method=start_method,
+            worker_threads=getattr(configs, "vector_env_worker_threads", "auto"),
+            init_timeout_sec=float(getattr(configs, "vector_env_init_timeout_sec", 120.0)),
+            command_timeout_sec=float(getattr(configs, "vector_env_command_timeout_sec", 120.0)),
+        )
         env = vec_env.envs[0] # 保留一个env引用用于 fallback 和 属性查询
         
         # [Validation] 验证环境：绑定单一的稳定基准图，防止评估基准浮动
@@ -1455,25 +1519,31 @@ def train(args):
                         writer.add_scalar(k, v, ep)
                             
                 except RuntimeError as e:
-                    if "out of memory" in str(e) or "OOM" in str(e):
-                        print(f"\n⚠️ [OOM 防护] 显存不足，自动清理缓存并跳过本轮更新 (Episode {ep})")
-                        import gc
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
-                    else:
-                        raise e
+                    oom_text = str(e).lower()
+                    is_cuda_oom = isinstance(e, torch.cuda.OutOfMemoryError) or (
+                        "out of memory" in oom_text
+                        and any(token in oom_text for token in ("cuda", "gpu", "device"))
+                    )
+                    if is_cuda_oom:
+                        raise RuntimeError(
+                            "PPO 更新发生 CUDA OOM。optimizer 可能已经执行部分 step，"
+                            "为保护 on-policy 语义，训练已终止；请降低 batch_size 或环境数。"
+                        ) from e
+                    raise
                 finally:
                     memory.clear()
                     
                 # [Dataset Pool] 交替课程学习：按设定的 PPO Update 频率切换图纸
                 current_update_count = ep // update_every_episodes
                 if current_update_count % getattr(configs, 'switch_dataset_every_updates', 1) == 0:
-                    if len(env.dataset_pool) > 1:
-                        import random
-                        next_idx = random.randint(0, len(env.dataset_pool) - 1)
+                    if env.dataset_count > 1:
+                        next_idx = current_update_count % env.dataset_count
                         vec_env.switch_dataset_all(next_idx)
-                        print(f"      🔄 [Alternating Training] 已切图至: {env.dataset_pool[next_idx]['file_path']} (Nodes: {env.num_tasks})")
+                        descriptor = env.dataset_pool[next_idx] or {}
+                        print(
+                            f"      [Narrow Pool] dataset={next_idx + 1}/{env.dataset_count}, "
+                            f"file={descriptor.get('file_path', '按需加载')}, nodes={env.num_tasks}"
+                        )
                 
             # 定期评估与保存
               # [Validation Strategy]
@@ -1496,6 +1566,7 @@ def train(args):
                         temperature=configs.eval_temperature,
                         writer=writer,
                         current_ep=ep,
+                        scenario_names=tuple(configs.eval_scenarios),
                     )
                     res_metrics = {}
                 
@@ -1742,28 +1813,11 @@ if __name__ == "__main__":
     
     # 动态写入 configs 对象，由于各处都会 import configs，可实现全局透传
     # 先保持旧版 argparse 默认值行为，再加载 YAML，最后只让显式命令行参数覆盖 YAML。
-    setattr(configs, 'ablation_no_gat', args.ablation_no_gat)
-    setattr(configs, 'ablation_no_pointer', args.ablation_no_pointer)
-    setattr(configs, 'ablation_no_mask', args.ablation_no_mask)
-    setattr(configs, 'data_file_path', args.data_path)
-    setattr(configs, 'seed', args.seed)
-    setattr(configs, 'max_episodes', args.max_episodes)
-
-    if args.config:
-        load_config_files(args.config, configs)
-        setattr(configs, 'config_paths', tuple(args.config))
-        argv = set(sys.argv[1:])
-        if '--ablation_no_gat' in argv:
-            setattr(configs, 'ablation_no_gat', True)
-        if '--ablation_no_pointer' in argv:
-            setattr(configs, 'ablation_no_pointer', True)
-        if '--ablation_no_mask' in argv:
-            setattr(configs, 'ablation_no_mask', True)
-        if '--data_path' in argv:
-            setattr(configs, 'data_file_path', args.data_path)
-        if '--seed' in argv:
-            setattr(configs, 'seed', args.seed)
-        if '--max_episodes' in argv:
-            setattr(configs, 'max_episodes', args.max_episodes)
+    initialize_training_config(args)
     
-    train(args)
+    if args.trainer == "lightning":
+        from train_lightning import run as run_lightning
+
+        run_lightning(args, config_initialized=True)
+    else:
+        train(args)
