@@ -11,14 +11,19 @@ train:
   clip_v_grad_norm: 0.05
   batch_size: 32
   accumulation_steps: 16
+  auto_oom_retry: true
+  skip_update_on_oom: true
+  oom_min_batch_size: 2
+  oom_max_retries: 1
+  oom_transactional_updates: true
   c_policy: 1.0
   c_value: 0.5
   c_entropy: 0.0002
   c_entropy_end: 0.00005
   entropy_decay_episodes: 300
   max_episodes: 300
-  update_every_episodes: 2
-  eval_freq: 2
+  update_every_episodes: 1
+  eval_freq: 1
   eval_temperature: 0.0
   sample_temperature: 1.0
   use_schedule_free: true

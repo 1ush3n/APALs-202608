@@ -58,6 +58,13 @@ class FeatureEmbedder(nn.Module):
             get_input_layer_norm(config.hidden_dim),
             get_activation()
         )
+        self.skill_emb = None
+        if getattr(config, 'use_skill_hub', False):
+            self.skill_emb = nn.Sequential(
+                nn.Linear(config.skill_feat_dim, config.hidden_dim),
+                get_input_layer_norm(config.hidden_dim),
+                get_activation(),
+            )
 
     def forward(self, x_dict):
         """
@@ -71,6 +78,9 @@ class FeatureEmbedder(nn.Module):
             out['worker'] = self.worker_emb(x_dict['worker'])
         if 'station' in x_dict:
             out['station'] = self.station_emb(x_dict['station'])
+        if 'skill' in x_dict:
+            assert self.skill_emb is not None, "输入包含 Skill 节点，但模型未启用 use_skill_hub"
+            out['skill'] = self.skill_emb(x_dict['skill'])
         return out
 
 # ---------------------------------------------------------------------------
@@ -93,7 +103,16 @@ class HeteroGATEncoder(nn.Module):
                 ('station', 'has_task', 'task'): GATv2Conv(config.hidden_dim, config.hidden_dim, heads=config.num_heads, concat=False, add_self_loops=False),
                 
                 # 3. 资源流：工人与任务的能力匹配/执行关系
-                ('worker', 'can_do', 'task'): GATv2Conv(config.hidden_dim, config.hidden_dim, heads=config.num_heads, concat=False, add_self_loops=False),
+                **({
+                    ('worker', 'has_skill', 'skill'): GATv2Conv(config.hidden_dim, config.hidden_dim, heads=config.num_heads, concat=False, add_self_loops=False),
+                    ('skill', 'required_by', 'task'): GATv2Conv(config.hidden_dim, config.hidden_dim, heads=config.num_heads, concat=False, add_self_loops=False),
+                    **({
+                        ('task', 'requires', 'skill'): GATv2Conv(config.hidden_dim, config.hidden_dim, heads=config.num_heads, concat=False, add_self_loops=False),
+                        ('skill', 'provided_by', 'worker'): GATv2Conv(config.hidden_dim, config.hidden_dim, heads=config.num_heads, concat=False, add_self_loops=False),
+                    } if getattr(config, 'skill_hub_bidirectional', False) else {}),
+                } if getattr(config, 'use_skill_hub', False) else {
+                    ('worker', 'can_do', 'task'): GATv2Conv(config.hidden_dim, config.hidden_dim, heads=config.num_heads, concat=False, add_self_loops=False),
+                }),
                 ('task', 'done_by', 'worker'): GATv2Conv(config.hidden_dim, config.hidden_dim, heads=config.num_heads, concat=False, add_self_loops=False),
                 
             }, aggr='sum')
@@ -103,7 +122,8 @@ class HeteroGATEncoder(nn.Module):
             self.norms.append(nn.ModuleDict({
                 'task': get_gat_layer_norm(config.hidden_dim),
                 'worker': get_gat_layer_norm(config.hidden_dim),
-                'station': get_gat_layer_norm(config.hidden_dim)
+                'station': get_gat_layer_norm(config.hidden_dim),
+                **({'skill': get_gat_layer_norm(config.hidden_dim)} if getattr(config, 'use_skill_hub', False) else {}),
             }))
             
     def forward(self, x_dict, edge_index_dict):

@@ -75,7 +75,11 @@ Lightning 每个 episode 输出一行精简 rollout 摘要：
 3. 图状态重建耗时。
 4. 环境 Step 耗时。
 
-自动验证按 `eval_freq` 执行，默认只运行 Standard 场景，并打印 Makespan、Balance、Reward、人员/站位利用率及耗时。详细指标同时写入 Lightning/TensorBoard。
+自动验证默认每个 episode 执行一次，只运行 Standard 场景，并打印 Makespan、Balance、Reward、人员/站位利用率及耗时。详细指标同时写入 Lightning/TensorBoard。
+
+Lightning 每次 PPO 更新后覆盖保存 `checkpoints/<实验名>/lightning/last.ckpt`；执行自动验证且 Makespan 改善时，覆盖保存 `checkpoints/<实验名>/lightning/best/best.ckpt`。终端会打印对应的 `[Checkpoint]` 记录。
+
+Lightning 与 legacy 的 TensorBoard 日志根目录统一由 `log_dir` 控制，当前固定为 `/root/tf-logs`。Lightning 写入 `/root/tf-logs/<实验名>/version_N/`，legacy 写入 `/root/tf-logs/<实验名>_ALB_PPO_<时间戳>/`。
 
 Rollout 心跳默认关闭。需要诊断长时间阶段时，可在 rollout YAML 中设置：
 
@@ -83,6 +87,50 @@ Rollout 心跳默认关闭。需要诊断长时间阶段时，可在 rollout YAM
 rollout:
   rollout_heartbeat_interval_sec: 30.0
 ```
+
+## 输出文件与目录
+
+除 `log_dir` 等绝对路径外，以下相对路径均以项目根目录为基准。`<实验名>` 来自实验 YAML 的 `experiment_name`，例如 `initial_schedule_283`。
+
+### Lightning 训练
+
+| 输出 | 路径 | 说明 |
+|---|---|---|
+| 最新完整 checkpoint | `checkpoints/<实验名>/lightning/last.ckpt` | 每个 episode 覆盖保存，可用于 `--resume` |
+| 最优完整 checkpoint | `checkpoints/<实验名>/lightning/best/best.ckpt` | Standard 验证 Makespan 改善时覆盖保存 |
+| TensorBoard event | `/root/tf-logs/<实验名>/version_N/events.out.tfevents.*` | rollout、PPO、验证、OOM 和性能指标 |
+| Lightning 超参数 | `/root/tf-logs/<实验名>/version_N/hparams.yaml` | Lightning Logger 生成 |
+
+查看日志：
+
+```bash
+tensorboard --logdir /root/tf-logs --bind_all
+```
+
+### Legacy 训练
+
+| 输出 | 路径 | 说明 |
+|---|---|---|
+| 最新训练断点 | `checkpoints/<实验名>/latest_checkpoint.pth` | 模型、优化器和 episode 状态 |
+| 最优模型权重 | `checkpoints/<实验名>/bestmodel/best_model.pth` | 验证指标改善时覆盖保存 |
+| 最优模型元数据 | `checkpoints/<实验名>/bestmodel/best_model_meta.json` | episode、Makespan、配置和数据路径 |
+| TensorBoard event | `/root/tf-logs/<实验名>_ALB_PPO_<时间戳>/events.out.tfevents.*` | legacy 训练指标 |
+| 阶段诊断报告 | `results/reports/report_ep<episode>_<时间戳>.md` | 按 `generate_report_every_episodes` 生成 |
+| 最佳排程轨迹 | `checkpoints/<实验名>/eval_traces/Ep_<episode>_Best_Schedule.csv` | 训练过程中导出的排程 |
+| 轨迹甘特图 | `checkpoints/<实验名>/eval_traces/Ep_<episode>_Gantt.png` | 对应排程可视化 |
+| PPO 最终输出 | `results/PPO/PPO_Final_schedule.csv`、`PPO_Final_gantt.png` | 训练结束后的 PPO 推演 |
+| GA 对照输出 | `results/GA/GA_Baseline_schedule.csv`、`GA_Baseline_gantt.png` | GA 基线排程 |
+
+### 排程与评估
+
+| 输出 | 路径 | 说明 |
+|---|---|---|
+| 默认最终排程 | `results/final_schedule.csv` | `scripts/generate_schedule.py` 生成，也是默认重调度 baseline |
+| 重调度评估场景 | `results/reschedule_eval_scenarios.csv` | 默认重调度场景文件 |
+| 手动评估排程 | 评估结果目录下的 `<前缀>_schedule.csv` | `evaluate_model.py` 输出 |
+| 手动评估甘特图 | 同目录下的 `<前缀>_gantt.png` | 最佳评估排程可视化 |
+
+Lightning 模型使用 `.ckpt`，legacy 模型使用 `.pth`，二者不能直接互换。加载模型时还必须保持与训练时相同的 Skill Hub 图配置。
 
 ## 评估与排程
 
@@ -115,3 +163,29 @@ python -m pytest -q
 ```powershell
 python -m pytest -q tests/test_config_loader.py tests/test_lightning_architecture.py tests/test_vector_env_safety.py
 ```
+
+## Skill Hub 资源图
+
+默认使用 Skill Hub 压缩稠密的工人技能边，配置位于 `conf/model/hb_gat_pn.yaml`：
+
+```yaml
+model:
+  use_skill_hub: true
+  skill_hub_bidirectional: true
+  num_skill_types: 10
+  skill_feat_dim: 16
+```
+
+- `use_skill_hub: false`：保留原始 `Worker -> Task` 的 `can_do` 直接边，可用于旧模型和消融对照。
+- `use_skill_hub: true`：使用 `Worker -> Skill -> Task` 压缩资源图。
+- `skill_hub_bidirectional: true`：额外启用 `Task -> Skill -> Worker` 反向消息；设为 `false` 时仅保留正向链路。
+- Skill Hub 与旧直接边互斥，不会同时参与消息传递。
+- 新旧图结构的模型参数不兼容；加载 checkpoint 时必须使用训练该 checkpoint 时相同的图模式。
+
+## CUDA OOM 保护
+
+- Windows 低显存配置将 PPO batch 上限设为 `4`；Linux 不设置上限，使用实验配置的默认 batch。
+- GPU 图模板仅保留当前数据集，避免训练池轮换时显存逐轮累积。
+- PPO 更新首次发生 CUDA OOM 时会完整回滚模型、优化器、AMP 缩放器和随机状态，并将 batch 减半重试一次。
+- 减半后再次 OOM 将直接回滚并跳过当前 PPO 更新；TensorBoard 会记录 `OOM/RetryCount`、`OOM/SkippedUpdate` 和 `OOM/EffectiveBatchSize`。
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 用于缓解显存碎片，但不能替代 batch 上限和事务回滚。

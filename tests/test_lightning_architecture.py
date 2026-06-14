@@ -77,6 +77,42 @@ def test_lightning_module_uses_manual_optimization_contract() -> None:
     batch = next(iter(data.train_dataloader()))
     module.training_step(batch, 0)
     assert agent.updated is True
+    assert module.last_completed_episode == 1
+    assert module.last_eval_metrics == {"makespan": 1.0}
+
+
+def test_rollout_checkpoint_saves_latest_and_best(tmp_path) -> None:
+    from train_lightning import RolloutCheckpoint
+
+    saved_paths = []
+    trainer = SimpleNamespace(
+        save_checkpoint=lambda path: saved_paths.append(path)
+    )
+    module = SimpleNamespace(
+        last_completed_episode=2,
+        last_eval_metrics={"makespan": 10.0},
+    )
+    callback = RolloutCheckpoint(tmp_path)
+
+    callback.on_train_batch_end(trainer, module, None, None, 0)
+
+    assert saved_paths == [
+        str(tmp_path / "best" / "best.ckpt"),
+        str(tmp_path / "last.ckpt"),
+    ]
+    assert callback.best_makespan == 10.0
+
+    saved_paths.clear()
+    module.last_completed_episode = 3
+    module.last_eval_metrics = None
+    callback.on_train_batch_end(trainer, module, None, None, 1)
+    assert saved_paths == [str(tmp_path / "last.ckpt")]
+
+    saved_paths.clear()
+    module.last_completed_episode = 4
+    module.last_eval_metrics = {"makespan": 12.0}
+    callback.on_train_batch_end(trainer, module, None, None, 2)
+    assert saved_paths == [str(tmp_path / "last.ckpt")]
 
 
 def test_rollout_metrics_expose_expected_log_keys() -> None:

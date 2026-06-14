@@ -69,6 +69,9 @@ class _RolloutDataset(IterableDataset):
         for episode in range(1, self.max_episodes + 1):
             yield self.rollout_service.collect(episode)
 
+    def __len__(self) -> int:
+        return self.max_episodes
+
 
 class APALDataModule(pl.LightningDataModule):
     """DataModule 产生 on-policy rollout，DataLoader 不再复制环境池。"""
@@ -84,6 +87,9 @@ class APALDataModule(pl.LightningDataModule):
             batch_size=None,
             num_workers=0,
         )
+
+    def __len__(self) -> int:
+        return self.max_episodes
 
 
 class APALLightningModule(pl.LightningModule):
@@ -103,6 +109,8 @@ class APALLightningModule(pl.LightningModule):
         self.rollout_service = rollout_service
         self.eval_freq = max(1, int(eval_freq))
         self.policy = agent.policy
+        self.last_completed_episode = 0
+        self.last_eval_metrics: dict[str, float] | None = None
 
     def configure_optimizers(self):
         return self.agent.optimizer
@@ -119,20 +127,37 @@ class APALLightningModule(pl.LightningModule):
 
     def training_step(self, batch: RolloutUpdate, batch_idx: int):
         assert isinstance(batch, RolloutUpdate), type(batch)
+        self.last_eval_metrics = None
         for rollout_metrics in batch.rollout_metrics:
+            # 记录详细指标
             for name, value in rollout_metrics.as_log_dict().items():
                 self.log(name, value, on_step=True, on_epoch=False)
+            # 显式推送到 Lightning 终端进度条
+            self.log("Rew", float(rollout_metrics.average_reward), on_step=True, on_epoch=False, prog_bar=True)
+            self.log("Mk", float(rollout_metrics.average_makespan), on_step=True, on_epoch=False, prog_bar=True)
+            self.log("SPS", float(rollout_metrics.steps_per_second), on_step=True, on_epoch=False, prog_bar=True)
+
         self.agent.validate_snapshot_homogeneity(batch.memory.states)
         metrics = self.agent.update(batch.memory, batch.env, current_ep=batch.episode)
+        if float(metrics.get("OOM/SkippedUpdate", 0.0)) > 0.0:
+            print(
+                f"[PPO OOM] Episode {batch.episode} 更新已安全回滚并跳过，"
+                f"下轮 batch_size={int(metrics['OOM/EffectiveBatchSize'])}"
+            )
         for name, value in metrics.items():
             if isinstance(value, (int, float)):
                 scalar = torch.tensor(float(value))
                 if torch.isfinite(scalar):
                     self.log(name, float(value), on_step=True, on_epoch=False)
+                    # 将总损失也展示到进度条
+                    if name == "Loss/Total":
+                        self.log("loss", float(value), on_step=True, on_epoch=False, prog_bar=True)
 
         if batch.episode % self.eval_freq == 0:
-            for name, value in self.rollout_service.evaluate(batch.episode).items():
+            self.last_eval_metrics = self.rollout_service.evaluate(batch.episode)
+            for name, value in self.last_eval_metrics.items():
                 self.log(f"Eval/{name}", float(value), on_step=True, on_epoch=False)
+        self.last_completed_episode = int(batch.episode)
         return None
 
     def on_fit_end(self) -> None:

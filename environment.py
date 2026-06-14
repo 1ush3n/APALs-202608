@@ -15,6 +15,7 @@ from data_loader import load_data
 from configs import configs
 from core.event_engine import Event, EventType, EventQueue
 from core.action_masker import ActionMasker
+from utils.resource_graph import apply_resource_graph
 from utils.reschedule import (
     BaselineSchedule,
     RescheduleScenario,
@@ -256,13 +257,16 @@ class AirLineEnv_Graph(gym.Env):
         ctx['is_critical'] = self.is_critical
         
         # 预计算全量 can_do 边索引（基于 full_worker_skill_matrix，不依赖 reset 采样）
-        n_w_full = self.full_worker_skill_matrix.shape[0]
-        n_t_full = self.num_tasks
-        w_all = torch.arange(n_w_full).repeat_interleave(n_t_full)
-        t_all = torch.arange(n_t_full).repeat(n_w_full)
-        skills_col = self.task_static_feat[:, 1].squeeze().long()
-        has_skill = self.full_worker_skill_matrix[w_all, skills_col[t_all]] == 1.0
-        ctx['full_can_do_edge_index'] = torch.stack([w_all[has_skill], t_all[has_skill]])
+        if getattr(configs, "use_skill_hub", False):
+            ctx['full_can_do_edge_index'] = torch.empty((2, 0), dtype=torch.long)
+        else:
+            n_w_full = self.full_worker_skill_matrix.shape[0]
+            n_t_full = self.num_tasks
+            w_all = torch.arange(n_w_full).repeat_interleave(n_t_full)
+            t_all = torch.arange(n_t_full).repeat(n_w_full)
+            skills_col = self.task_static_feat[:, 1].squeeze().long()
+            has_skill = self.full_worker_skill_matrix[w_all, skills_col[t_all]] == 1.0
+            ctx['full_can_do_edge_index'] = torch.stack([w_all[has_skill], t_all[has_skill]])
 
     def _resolve_project_path(self, path_like: str | Path) -> Path:
         path = Path(path_like)
@@ -498,6 +502,14 @@ class AirLineEnv_Graph(gym.Env):
         self.base_worker_x = torch.cat([self.worker_static_feat, self.worker_skill_matrix, torch.zeros((self.num_workers, 11))], dim=1)
         # [Feature Upgrade] station base feat + slot_wait_time + relative loads (15 dims)
         self.base_station_x = torch.zeros((self.num_stations, 15))
+
+        # 显式构建静态图骨架，后续 observation 只刷新动态特征和动态边。
+        data['task'].x = self.base_task_x.clone()
+        data['worker'].x = self.base_worker_x.clone()
+        data['station'].x = self.base_station_x.clone()
+        data['task', 'precedes', 'task'].edge_index = self.raw_data['precedence_edges'].clone().long()
+        apply_resource_graph(data, self.base_task_x, self.base_worker_x, configs)
+        self.base_data = data
         
     def reset(self, randomize_duration: bool = False, randomize_workers: bool = False, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[HeteroData, Dict[str, Any]]:
         """
@@ -681,12 +693,7 @@ class AirLineEnv_Graph(gym.Env):
         # 克隆 Observation 数据并重建稀疏边矩阵 (由于 worker数量波动)
         self.obs_data = self.base_data.clone()
         
-        w_indices_edge = torch.arange(self.num_workers).repeat_interleave(self.num_tasks)
-        t_indices_edge = torch.arange(self.num_tasks).repeat(self.num_workers)
-        task_req_skills = self.task_static_feat[:, 1].squeeze().long()
-        has_skill_mask = self.worker_skill_matrix[w_indices_edge, task_req_skills[t_indices_edge]] == 1.0
-        
-        self.obs_data['worker', 'can_do', 'task'].edge_index = torch.stack([w_indices_edge[has_skill_mask], t_indices_edge[has_skill_mask]])
+        apply_resource_graph(self.obs_data, self.base_task_x, self.base_worker_x, configs)
         
         # 动态篡改工时
         if randomize_duration:
@@ -1325,6 +1332,7 @@ class AirLineEnv_Graph(gym.Env):
             worker_x[w, 21] = self.get_current_fatigue_factor(w, self.current_time)
             
         data['worker'].x = worker_x
+        apply_resource_graph(data, task_x, worker_x, configs)
         
         # 3. Station Features (In-place refresh)
         station_x = self.base_station_x.clone()
@@ -1495,12 +1503,7 @@ class AirLineEnv_Graph(gym.Env):
             worker_x[w, 21] = fatigue_f
             
         data['worker'].x = worker_x
-        if 'can_do_edge_index' in snapshot:
-            data['worker', 'can_do', 'task'].edge_index = snapshot['can_do_edge_index'].clone()
-        else:
-            full_ce = ctx['full_can_do_edge_index']
-            mask = full_ce[0] < snap_num_workers
-            data['worker', 'can_do', 'task'].edge_index = full_ce[:, mask].clone()
+        apply_resource_graph(data, task_x, worker_x, configs)
         
         station_x = ctx['base_station_x'].clone()
         station_x[:, 0] = torch.tensor(snapshot['station_loads'], dtype=torch.float) / max(1.0, ctx['ideal_station_load'])

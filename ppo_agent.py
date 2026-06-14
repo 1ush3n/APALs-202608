@@ -8,6 +8,7 @@ import math
 import copy
 import numpy as np
 import gc
+import random
 from contextlib import nullcontext
 from typing import Tuple, List, Dict, Optional, Any
 from torch_geometric.data import HeteroData
@@ -77,7 +78,18 @@ class PPOAgent:
         self.k_epochs = k_epochs    # 姣忔 Update 鐨勮凯浠ｈ疆鏁?
         self.eps_clip = eps_clip    # PPO Clip鍙傛暟 (e.g., 0.2)
         self.device = device
-        self.batch_size = batch_size
+        requested_batch_size = max(1, int(batch_size))
+        batch_size_cap = max(0, int(getattr(configs, "ppo_batch_size_cap", 0)))
+        self.batch_size = (
+            min(requested_batch_size, batch_size_cap)
+            if batch_size_cap > 0
+            else requested_batch_size
+        )
+        if self.batch_size != requested_batch_size:
+            print(
+                f"PPO Batch 平台限幅: requested={requested_batch_size}, "
+                f"effective={self.batch_size}, cap={batch_size_cap}"
+            )
         self.accumulation_steps = configs.accumulation_steps
         self.gae_lambda = configs.gae_lambda
         
@@ -139,6 +151,70 @@ class PPOAgent:
             "reserved_gb": torch.cuda.memory_reserved() / 1024**3,
         }
 
+    @staticmethod
+    def _clone_state_to_cpu(value: Any) -> Any:
+        """递归复制训练状态到 CPU，避免事务快照额外占用显存。"""
+        if torch.is_tensor(value):
+            return value.detach().cpu().clone()
+        if isinstance(value, dict):
+            return {key: PPOAgent._clone_state_to_cpu(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [PPOAgent._clone_state_to_cpu(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(PPOAgent._clone_state_to_cpu(item) for item in value)
+        return copy.deepcopy(value)
+
+    @staticmethod
+    def _is_cuda_oom_error(exc: BaseException) -> bool:
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+        message = str(exc).lower()
+        return "out of memory" in message and any(
+            token in message for token in ("cuda", "gpu", "device")
+        )
+
+    def _capture_update_transaction(self) -> Dict[str, Any]:
+        """保存可完整回滚一次 PPO 更新所需的训练与随机状态。"""
+        transaction = {
+            "policy": self._clone_state_to_cpu(self.policy.state_dict()),
+            "optimizer": self._clone_state_to_cpu(self.optimizer.state_dict()),
+            "scaler": copy.deepcopy(self.scaler.state_dict()),
+            "current_step": int(self.current_step),
+            "batch_size": int(self.batch_size),
+            "python_rng": random.getstate(),
+            "numpy_rng": np.random.get_state(),
+            "torch_rng": torch.get_rng_state(),
+        }
+        if self.use_ema and hasattr(self, "ema_policy"):
+            transaction["ema_policy"] = self._clone_state_to_cpu(
+                self.ema_policy.state_dict()
+            )
+        if torch.cuda.is_available():
+            transaction["cuda_rng"] = torch.cuda.get_rng_state_all()
+        return transaction
+
+    def _restore_update_transaction(self, transaction: Dict[str, Any]) -> None:
+        """恢复 OOM 前的模型、优化器、缩放器及随机状态。"""
+        self.policy.load_state_dict(transaction["policy"])
+        self.optimizer.load_state_dict(transaction["optimizer"])
+        self.scaler.load_state_dict(transaction["scaler"])
+        self.current_step = int(transaction["current_step"])
+        self.batch_size = int(transaction["batch_size"])
+        random.setstate(transaction["python_rng"])
+        np.random.set_state(transaction["numpy_rng"])
+        torch.set_rng_state(transaction["torch_rng"])
+        if "ema_policy" in transaction:
+            self.ema_policy.load_state_dict(transaction["ema_policy"])
+        if "cuda_rng" in transaction and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(transaction["cuda_rng"])
+
+    def _cleanup_failed_update(self) -> None:
+        """移除失败反向传播留下的梯度、图模板和 CUDA 缓存引用。"""
+        try:
+            self.optimizer.zero_grad(set_to_none=True)
+        except TypeError:
+            self.optimizer.zero_grad()
+        self.gpu_graph_manager.clear()
     def ensure_hetero_batch_vectors(self, batch: HeteroData, batch_size: Optional[int] = None) -> int:
         """确保 task/station/worker 都带有 PyG batch 向量。"""
         if batch_size is None:
@@ -152,7 +228,10 @@ class PPOAgent:
             raise ValueError("HeteroData batch_size 必须大于 0")
 
         repaired = 0
-        for node_type in ('task', 'station', 'worker'):
+        node_types = ['task', 'station', 'worker']
+        if 'skill' in batch.node_types:
+            node_types.append('skill')
+        for node_type in node_types:
             storage = batch[node_type]
             if not hasattr(storage, 'x') or storage.x is None:
                 continue
@@ -773,6 +852,70 @@ class PPOAgent:
         return results
 
     def update(self, memory: Any, env: Any = None, current_ep: int = 1) -> Dict[str, float]:
+        """执行可回滚的 PPO 更新，并在 CUDA OOM 时降低 batch 后重试。"""
+        transactional = bool(getattr(configs, "oom_transactional_updates", True))
+        auto_retry = bool(getattr(configs, "auto_oom_retry", True))
+        skip_on_oom = bool(getattr(configs, "skip_update_on_oom", True))
+        min_batch_size = max(1, int(getattr(configs, "oom_min_batch_size", 2)))
+        max_retries = max(0, int(getattr(configs, "oom_max_retries", 1)))
+        original_batch_size = int(self.batch_size)
+        transaction = self._capture_update_transaction() if transactional else None
+        retry_count = 0
+
+        while True:
+            try:
+                metrics = self._update_once(memory, env, current_ep=current_ep)
+                metrics["OOM/RetryCount"] = float(retry_count)
+                metrics["OOM/SkippedUpdate"] = 0.0
+                metrics["OOM/EffectiveBatchSize"] = float(self.batch_size)
+                return metrics
+            except RuntimeError as exc:
+                if not self._is_cuda_oom_error(exc):
+                    raise
+
+                failed_batch_size = int(self.batch_size)
+                self._cleanup_failed_update()
+                if transaction is not None:
+                    self._restore_update_transaction(transaction)
+                    self._cleanup_failed_update()
+
+                next_batch_size = max(min_batch_size, failed_batch_size // 2)
+                can_retry = (
+                    auto_retry
+                    and retry_count < max_retries
+                    and next_batch_size < failed_batch_size
+                )
+                if can_retry:
+                    retry_count += 1
+                    self.batch_size = next_batch_size
+                    print(
+                        "WARNING: PPO 更新发生 CUDA OOM，已完整回滚；"
+                        f"batch_size {failed_batch_size} -> {next_batch_size}，"
+                        f"开始第 {retry_count}/{max_retries} 次重试。"
+                    )
+                    continue
+
+                if skip_on_oom and transaction is not None:
+                    self.batch_size = min(failed_batch_size, original_batch_size)
+                    memory_snapshot = self.get_memory_snapshot()
+                    print(
+                        "WARNING: PPO 更新在 OOM 重试耗尽后已完整回滚并跳过；"
+                        f"episode={current_ep}, batch_size={failed_batch_size}。"
+                    )
+                    return {
+                        "OOM/RetryCount": float(retry_count),
+                        "OOM/SkippedUpdate": 1.0,
+                        "OOM/EffectiveBatchSize": float(self.batch_size),
+                        "Memory/Allocated_GB": memory_snapshot["allocated_gb"],
+                        "Memory/Reserved_GB": memory_snapshot["reserved_gb"],
+                    }
+
+                raise RuntimeError(
+                    "PPO 更新发生 CUDA OOM，且无法安全回滚跳过。"
+                    "请启用 oom_transactional_updates，或进一步降低 PPO batch_size。"
+                ) from exc
+
+    def _update_once(self, memory: Any, env: Any = None, current_ep: int = 1) -> Dict[str, float]:
         """
         PPO 鏇存柊閫昏緫銆?
         
@@ -782,6 +925,9 @@ class PPOAgent:
         Returns:
             metrics: dict, 鐢ㄤ簬 TensorBoard 璁板綍
         """
+        # 无引用缓存清理只能缓解碎片化；活跃张量由显式生命周期管理。
+        self.clear_device_cache()
+
         # 1. 璁＄畻骞夸箟浼樺娍浼拌 (GAE - Generalized Advantage Estimation)
         # 灏?rewards 涓?values 寮犻噺鍖栦互杩涜 GAE 璁＄畻
         self.validate_snapshot_homogeneity(memory.states)
@@ -847,6 +993,10 @@ class PPOAgent:
         N_samples = len(memory.states)
         gpu_rebuild_fallback_count = 0
         gpu_rebuild_fallback_messages = []
+        if enable_gpu_batch and memory.states and isinstance(memory.states[0], dict):
+            self.gpu_graph_manager.retain_dataset(
+                int(memory.states[0].get("dataset_idx", 0))
+            )
 
         def _attach_update_targets(state, idx: int):
             """为单个重建图绑定 PPO 更新所需字段。"""
@@ -902,6 +1052,8 @@ class PPOAgent:
                     raise RuntimeError("GPUBatchGraphManager.batched_rebuild_on_gpu 杩斿洖 None")
                 return _bind_gpu_batch_targets(batch, batch_indices)
             except Exception as exc:
+                if self._is_cuda_oom_error(exc):
+                    raise
                 gpu_rebuild_fallback_count += 1
                 if len(gpu_rebuild_fallback_messages) < 3:
                     gpu_rebuild_fallback_messages.append(f"{type(exc).__name__}: {exc}")

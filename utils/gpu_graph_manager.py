@@ -3,6 +3,7 @@ from torch_geometric.data import Batch
 import numpy as np
 from typing import Any
 from configs import configs
+from utils.resource_graph import apply_batched_resource_graph
 
 class GPUBatchGraphManager:
     """
@@ -14,11 +15,29 @@ class GPUBatchGraphManager:
         self.device = device
         # 缓存 (dataset_idx, batch_size) 对应的 Batch 模板，防重复分配显存
         self.templates = {}
+
+    def retain_dataset(self, dataset_idx: int) -> int:
+        """仅保留当前数据集的模板，避免窄区间轮换时显存逐轮累积。"""
+        stale_keys = [key for key in self.templates if key[0] != dataset_idx]
+        for key in stale_keys:
+            del self.templates[key]
+        return len(stale_keys)
+
+    def clear(self) -> int:
+        """释放全部 GPU Batch 模板引用并返回清理数量。"""
+        template_count = len(self.templates)
+        self.templates.clear()
+        return template_count
         
     def get_batch_template(self, env: Any, batch_size: int, dataset_idx: int):
         if batch_size <= 0:
             raise ValueError("GPU Batch 模板的 batch_size 必须大于 0")
-        key = (dataset_idx, batch_size)
+        key = (
+            dataset_idx,
+            batch_size,
+            bool(getattr(configs, "use_skill_hub", False)),
+            bool(getattr(configs, "skill_hub_bidirectional", False)),
+        )
         if key not in self.templates:
             ctx = env.dataset_pool[dataset_idx]
             base_data = ctx['base_data']
@@ -44,6 +63,8 @@ class GPUBatchGraphManager:
             'worker': num_workers,
             'station': num_stations,
         }
+        if bool(getattr(configs, "use_skill_hub", False)):
+            specs['skill'] = int(getattr(configs, "num_skill_types", 10))
         for node_type, nodes_per_graph in specs.items():
             storage = batch[node_type]
             expected_nodes = batch_size * nodes_per_graph
@@ -79,6 +100,7 @@ class GPUBatchGraphManager:
 
         batch_size = len(snapshots)
         dataset_idx = snapshots[0].get('dataset_idx', 0)
+        self.retain_dataset(dataset_idx)
         ctx = env.dataset_pool[dataset_idx]
         
         num_tasks = ctx['num_tasks']
@@ -128,7 +150,6 @@ class GPUBatchGraphManager:
         # 收集动态边的连接索引
         ts_src, ts_dst = [], []
         tw_src, tw_dst = [], []
-        can_do_src, can_do_dst = [], []
         
         max_slots = getattr(configs, 'max_slots_per_station', 3)
         
@@ -160,16 +181,6 @@ class GPUBatchGraphManager:
             station_slots.append(allowed_slots)
             
             # can_do 边偏移与收集
-            snap_can_do = snap.get('can_do_edge_index')
-            if snap_can_do is None:
-                full_can_do = ctx['full_can_do_edge_index']
-                snap_can_do = full_can_do[:, full_can_do[0] < num_workers]
-            if isinstance(snap_can_do, np.ndarray):
-                snap_can_do_t = torch.from_numpy(snap_can_do)
-            else:
-                snap_can_do_t = snap_can_do
-            can_do_src.append(snap_can_do_t[0] + worker_offset)
-            can_do_dst.append(snap_can_do_t[1] + task_offset)
             
             # 解析已指派的活动工序列表以计算槽位释放等待时间
             station_finish_lists = [[] for _ in range(num_stations)]
@@ -304,10 +315,15 @@ class GPUBatchGraphManager:
             batch_template['task', 'done_by', 'worker'].edge_index = torch.empty((2, 0), dtype=torch.long, device=t_device)
             
         # ③ Can_do 关系边覆写
-        batch_template['worker', 'can_do', 'task'].edge_index = torch.stack([
-            torch.cat(can_do_src, dim=0),
-            torch.cat(can_do_dst, dim=0)
-        ], dim=0).to(t_device)
+        apply_batched_resource_graph(
+            batch_template,
+            batch_template['task'].x,
+            batch_template['worker'].x,
+            batch_size=batch_size,
+            num_tasks=num_tasks,
+            num_workers=num_workers,
+            config=configs,
+        )
         batch_template = self._ensure_batch_vectors(
             batch_template,
             batch_size=batch_size,

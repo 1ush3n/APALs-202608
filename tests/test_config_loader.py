@@ -100,15 +100,10 @@ def test_experiment_checkpoint_paths_and_best_model_meta_are_isolated(tmp_path: 
     assert "conf/experiment/initial_schedule.yaml" in meta_text
 
 
-def test_tensorboard_log_root_is_platform_specific(monkeypatch) -> None:
+def test_tensorboard_log_root_strictly_uses_config() -> None:
     cfg = Config()
-    cfg.log_dir = "tf-logs"
-
-    monkeypatch.setattr("platform.system", lambda: "Linux")
+    cfg.log_dir = "/root/tf-logs"
     assert resolve_tensorboard_log_root(cfg) == Path("/root/tf-logs")
-
-    monkeypatch.setattr("platform.system", lambda: "Windows")
-    assert resolve_tensorboard_log_root(cfg) == PROJECT_ROOT / "tf-logs"
 
 
 def test_training_config_selects_windows_low_memory_profile() -> None:
@@ -122,6 +117,7 @@ def test_training_config_selects_windows_low_memory_profile() -> None:
     assert cfg.num_envs == 2
     assert cfg.vector_env_start_method == "spawn"
     assert cfg.batch_size == 4
+    assert cfg.ppo_batch_size_cap == 4
     assert Path(paths[-1]).name == "windows_4060_low_memory.yaml"
 
 
@@ -133,8 +129,9 @@ def test_training_config_selects_linux_profile() -> None:
         system_name="Linux",
     )
 
-    assert cfg.num_envs == 8
+    assert cfg.num_envs == 16
     assert cfg.vector_env_start_method == "forkserver"
+    assert cfg.ppo_batch_size_cap == 0
     assert cfg.batch_size == 32
     assert Path(paths[-1]).name == "linux_server.yaml"
 

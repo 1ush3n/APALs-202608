@@ -37,6 +37,10 @@ class Config:
     task_feat_dim: int = 18              # Task Node Input Features (17 -> 18, 新增物料等待时间)
     worker_feat_dim: int = 22            # Worker Node Input Features (21 -> 22, 新增疲劳系数)
     station_feat_dim: int = 15           # Station Node Input Features
+    use_skill_hub: bool = True           # 是否用 Skill Hub 替代稠密 Worker->Task 技能边
+    skill_hub_bidirectional: bool = True # Skill Hub 是否增加 Task->Skill->Worker 反向消息
+    num_skill_types: int = 10            # APAL 工种数量
+    skill_feat_dim: int = 16             # 技能 one-hot 10 维 + 六项资源统计
     
     # ------------------
     # 泛化性与域随机化 (Domain Randomization)
@@ -121,6 +125,12 @@ class Config:
     eps_clip_end: float = 0.10             # PPO Clip 衰减下界，避免后期过早收窄到 0.05
     clip_v_grad_norm: float = 0.05          # 保护 Value Network 梯度的防破甲护盾
     batch_size: int = 32                    # 严防爆显存
+    ppo_batch_size_cap: int = 0             # 0 表示不限制；平台配置可设置显存安全上限
+    auto_oom_retry: bool = True             # CUDA OOM 后自动降低 PPO batch 重试
+    skip_update_on_oom: bool = True         # 重试耗尽后回滚并跳过当前 PPO 更新
+    oom_min_batch_size: int = 2             # OOM 自动降级的最小 PPO batch
+    oom_max_retries: int = 1                # 首次 OOM 后仅将 batch 减半重试一次
+    oom_transactional_updates: bool = True  # 更新前保存 CPU 快照，保证回滚语义完整
     r_coef_std: float = 0.5                # 解决坍缩效应
     
     estimated_cmax_station_slots: float = 3.0 
@@ -163,8 +173,8 @@ class Config:
     gae_lambda: float = 0.9               
     
     max_episodes: int = 300             
-    update_every_episodes: int = 2       
-    eval_freq: int = 2                  
+    update_every_episodes: int = 1
+    eval_freq: int = 1
     eval_temperature: float = 0.0         
     sample_temperature: float = 1.0        
     
@@ -189,7 +199,7 @@ class Config:
     # ------------------
     # 平台并行策略 (Platform Parallelism)
     # ------------------
-    num_envs_linux: int = 8                 # Linux 服务器默认并行环境数
+    num_envs_linux: int = 16                 # Linux 服务器默认并行环境数
     num_envs_windows: int = 2               # Windows 本机默认并行环境数（低显存）
     vector_env_start_method: str = "auto"   # 多进程启动方式: "spawn" / "forkserver"
     vector_env_worker_threads: str = "auto"
@@ -209,7 +219,7 @@ class Config:
     # ------------------
     # 日志与监控 (Logging)
     # ------------------
-    log_dir: str = "/root/tf-logs" if platform.system() == "Linux" else "tf-logs"
+    log_dir: str = "/root/tf-logs"
     experiment_name: str = "default"
     checkpoint_root: str = "checkpoints"
     config_paths: tuple[str, ...] = field(default_factory=tuple)

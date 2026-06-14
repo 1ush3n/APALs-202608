@@ -343,6 +343,7 @@ class EnvProxy:
         """
         from configs import configs
         from environment import _fill_station_macro_features
+        from utils.resource_graph import apply_resource_graph
         
         ctx_idx = snapshot.get('dataset_idx', 0)
         while len(self.dataset_pool) <= ctx_idx:
@@ -415,12 +416,7 @@ class EnvProxy:
             worker_x[w, 21] = fatigue_f
             
         data['worker'].x = worker_x
-        if 'can_do_edge_index' in snapshot:
-            data['worker', 'can_do', 'task'].edge_index = snapshot['can_do_edge_index'].clone()
-        else:
-            full_ce = ctx['full_can_do_edge_index']
-            mask = full_ce[0] < snap_num_workers
-            data['worker', 'can_do', 'task'].edge_index = full_ce[:, mask].clone()
+        apply_resource_graph(data, task_x, worker_x, configs)
         
         # 3. 重建站位特征
         num_stations = len(snapshot['station_loads'])

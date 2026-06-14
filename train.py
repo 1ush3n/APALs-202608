@@ -7,6 +7,9 @@ if omp_threads:
     except ValueError:
         os.environ["OMP_NUM_THREADS"] = "1"
 
+# 启用可扩展显存段以缓解动态图 GNN 变长 batch 的碎片化；峰值显存仍由 batch 控制。
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import time
 import sys
 import io
@@ -79,12 +82,8 @@ def resolve_checkpoint_paths(config_obj=configs) -> dict[str, Path]:
 
 
 def resolve_tensorboard_log_root(config_obj=configs) -> Path:
-    """按平台解析 TensorBoard 根目录；Linux 服务器固定写入 /root/tf-logs。"""
-    import platform
-
-    if platform.system() == "Linux":
-        return Path("/root/tf-logs")
-    return resolve_workspace_path(getattr(config_obj, "log_dir", "tf-logs"))
+    """严格使用配置中的 TensorBoard 根目录，不再按平台隐式改写。"""
+    return Path(getattr(config_obj, "log_dir", "/root/tf-logs")).expanduser()
 
 
 def write_best_model_meta(
@@ -293,7 +292,7 @@ class Memory:
         del self.is_truncated[:]
         del self.masks[:]
         del self.values[:]
-        
+
         # 显式释放残余对象，防 OOM 内存泄漏
         import gc
         gc.collect()
@@ -467,7 +466,7 @@ def evaluate_model(
     """
     if temperature is None:
         temperature = getattr(configs, 'eval_temperature', 0.0)
-        
+
     # 评估期间必须关闭 Dropout 等机制
     agent.policy.eval()
     
@@ -543,7 +542,7 @@ def evaluate_model(
         sc_durations = []
         sc_worker_utils = []
         sc_station_utils = []
-        
+
         for _ in range(num_runs):
             state = env.reset(randomize_duration=sc['rand_dur'], randomize_workers=sc['rand_w'], seed=sc['seed'])
             done = False
@@ -1169,7 +1168,25 @@ def train(args):
         print(f"Rollout 加速: fast_snapshot={use_fast_path}, profiler={use_profiler}, "
               f"shadow_mask_verify={getattr(configs, 'enable_shadow_mask_verification', False)}")
         
-        for ep in range(start_episode, configs.max_episodes + 1):
+        # 引入 tqdm 并局部遮蔽 print 函数，使训练日志在不破坏进度条的前提下输出
+        from tqdm import tqdm
+        _original_print = print
+        def print(*args, **kwargs):
+            sep = kwargs.get('sep', ' ')
+            file = kwargs.get('file', None)
+            if file is None or file is sys.stdout or file is sys.stderr:
+                tqdm.write(sep.join(map(str, args)))
+            else:
+                _original_print(*args, **kwargs)
+
+        pbar = tqdm(
+            range(start_episode, configs.max_episodes + 1),
+            desc="🚀 APAL Training Progress",
+            dynamic_ncols=True,
+            unit="ep"
+        )
+
+        for ep in pbar:
             
             agent.policy.train()
             current_temp = configs.sample_temperature
@@ -1180,17 +1197,17 @@ def train(args):
             states = vec_env.reset_all(randomize_duration=apply_noise, randomize_workers=apply_noise)
             dones = [False] * num_envs
             ep_rewards = [0.0] * num_envs
-            
+
             # 为每个环境维护独立的轨迹细节
             ep_makespan_penalties = [0.0] * num_envs
             ep_std_penalties = [0.0] * num_envs
             ep_deadlock_penalties = [0.0] * num_envs
             ep_is_deadlock = [False] * num_envs
             ep_task_completions = [0.0] * num_envs
-            
+
             # 为每个环境维护独立的轨迹缓冲区
             env_memories = [Memory() for _ in range(num_envs)]
-            
+
             max_steps = max([e.num_tasks for e in vec_env.envs]) * 2 
             
             prof_mask_cum = prof_select_cum = prof_snapshot_cum = prof_step_cum = 0.0
@@ -1448,7 +1465,13 @@ def train(args):
                     writer.add_scalar(f'RewardDiagnostic/{key}', total / reward_diag_count, ep)
             
             status_strs = ["DEADLOCK" if len(vec_env.envs[i].assigned_tasks) < vec_env.envs[i].num_tasks else "COMPLETED" for i in range(num_envs)]
-            print(f"Episode {ep} | Avg Reward: {avg_reward:.2f} | Avg Makespan: {avg_makespan:.1f} | Statuses: {status_strs}")
+            # 动态更新进度条右侧的性能后缀，避免在大循环内频繁 print 刷屏
+            pbar.set_postfix({
+                "Rew": f"{avg_reward:.2f}",
+                "Mk": f"{avg_makespan:.1f}",
+                "DL": f"{deadlock_rate * 100:.0f}%",
+                "SPS": f"{steps_per_sec:.1f}" if use_profiler and prof_step_count > 0 else "N/A"
+            })
             
             # Rollout Profiler: 累计计时 + 平均 + 吞吐量
             if use_profiler and prof_step_count > 0:
@@ -1712,6 +1735,10 @@ def train(args):
                 # 生成阶段性报告
                 if ep > 0 and ep % getattr(configs, 'generate_report_every_episodes', 100) == 0:
                     reporter.generate_report(current_ep=ep, metrics_dict=last_metrics)
+
+        # 恢复默认的 print 打印函数，以便接下来美观地输出终局报表
+        print = _original_print
+
         # =======================================================================
         # 6. 训练结束 - 终局性能测评与基线对比 (End of Training Evaluation)
         # =======================================================================
@@ -1745,7 +1772,7 @@ def train(args):
                 num_runs=1,
                 temperature=configs.eval_temperature,
             )
-        
+
         # 配置 GA 基准对抗
         print("\n>>> [2/2] 开始执行 Genetic Algorithm (GA) 基线推演...")
         ga_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)

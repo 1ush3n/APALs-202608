@@ -1,5 +1,5 @@
 hardware:
-  num_envs: 8
+  num_envs: 16
   vector_env_start_method: forkserver
   vector_env_worker_threads: 1
   vector_env_init_timeout_sec: 180.0
