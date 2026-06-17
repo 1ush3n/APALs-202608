@@ -50,12 +50,12 @@ def scale_profile_for_task_count(num_tasks: int) -> ScaleProfile:
     """根据工序规模选择上界 profile。"""
     n = int(num_tasks)
     if n <= 283:
-        return ScaleProfile(name="283", max_ops=283, batch_size=32, k_epochs=1)
+        return ScaleProfile(name="283", max_ops=283, batch_size=256, k_epochs=1)
     if n <= 1000:
-        return ScaleProfile(name="680", max_ops=1000, batch_size=16, k_epochs=2)
+        return ScaleProfile(name="680", max_ops=1000, batch_size=128, k_epochs=2)
     if n <= 2338:
-        return ScaleProfile(name="2338", max_ops=2338, batch_size=8, k_epochs=3)
-    return ScaleProfile(name="3182", max_ops=3182, batch_size=4, k_epochs=4)
+        return ScaleProfile(name="2338", max_ops=2338, batch_size=64, k_epochs=3)
+    return ScaleProfile(name="3182", max_ops=3182, batch_size=32, k_epochs=4)
 
 
 def scheduled_updates_for_task_count(
