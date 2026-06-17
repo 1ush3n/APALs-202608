@@ -48,6 +48,20 @@ class Config:
     train_data_path_or_dir: str = "data/generated/initial_283"
     switch_dataset_every_updates: int = 1                 # 频繁切换以增强泛化能力
     dataset_context_cache_size: int = 2                   # 每个环境最多缓存的完整图上下文数量
+    enable_multiscale_training: bool = False              # 是否启用多规模 APAL 反规模采样训练
+    multiscale_min_ops: int = 200                         # 多规模训练纳入的最小工序数
+    multiscale_max_ops: int = 3100                        # 多规模训练纳入的最大工序数
+    multiscale_sampling_exponent: float = 0.5             # 反规模采样指数，0.5 对应 1/sqrt(n)
+    multiscale_min_updates: int = 600                     # 次线性更新预算下界，仅用于调度记录
+    multiscale_max_updates: int = 3300                    # 次线性更新预算上界，仅用于调度记录
+    enable_multi_benchmark_eval: bool = False             # 是否用四基准归一化评分选择 best model
+    multi_benchmark_data_paths: list[str] = field(default_factory=lambda: [
+        "data/283.csv",
+        "data/680.csv",
+        "data/2338.csv",
+        "data/3182.csv",
+    ])
+    multi_benchmark_reference_makespans: dict[str, float] = field(default_factory=dict)
     randomize_durations: bool = True                      # 开启随机工时扰动
     dur_random_range: float = 0.2                         # 扰动幅度
     curriculum_episodes: int = 0        # 训练前 N 轮强制关闭所有随机因子

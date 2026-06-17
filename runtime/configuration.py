@@ -99,6 +99,22 @@ def validate_runtime_config(config: Config) -> None:
         raise ValueError(f"float32_matmul_precision 无效: {config.float32_matmul_precision}")
     if int(config.num_envs) < 1 or int(config.batch_size) < 1 or int(config.eval_freq) < 1:
         raise ValueError("num_envs、batch_size 和 eval_freq 必须大于 0")
+    if bool(getattr(config, "enable_multi_benchmark_eval", False)):
+        refs = getattr(config, "multi_benchmark_reference_makespans", {})
+        if isinstance(refs, str):
+            import json
+
+            refs = json.loads(refs)
+        paths = getattr(config, "multi_benchmark_data_paths", [])
+        if not refs:
+            raise ValueError("启用多基准评估时必须配置 multi_benchmark_reference_makespans")
+        missing = [
+            str(path).replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            for path in paths
+            if str(path).replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0] not in refs
+        ]
+        if missing:
+            raise ValueError(f"多基准参考 makespan 缺失: {missing}")
     if config.skill_hub_bidirectional and not config.use_skill_hub:
         config.skill_hub_bidirectional = False
 

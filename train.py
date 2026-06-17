@@ -42,6 +42,14 @@ from runtime.artifacts import (
     resolve_path as resolve_artifact_path,
     sanitize_name,
 )
+from runtime.multiscale import (
+    BenchmarkScore,
+    InverseScaleDatasetSampler,
+    apply_scale_profile_to_agent,
+    build_dataset_candidates,
+    parse_reference_makespans,
+    score_multi_benchmark,
+)
 import pandas as pd
 from baselines.heuristic.baseline_ga import GeneticAlgorithmScheduler
 from utils.visualization import plot_gantt
@@ -644,6 +652,99 @@ def evaluate_model(
     return avg_makespan, avg_balance, avg_reward, best_sch, avg_duration, avg_w_util, avg_s_util
 
 
+def evaluate_initial_multi_benchmark(agent, config_obj=configs, writer=None, current_ep=0):
+    """在多个固定初始排程基准集上评估，并计算归一化综合分。"""
+    refs = parse_reference_makespans(getattr(config_obj, "multi_benchmark_reference_makespans", {}))
+    rows: list[BenchmarkScore] = []
+    device = agent.device
+    was_training = bool(agent.policy.training)
+    paths = list(getattr(config_obj, "multi_benchmark_data_paths", []))
+    if not paths:
+        raise ValueError("multi_benchmark_data_paths 不能为空")
+    backups = {
+        "enable_dynamic_events": getattr(config_obj, "enable_dynamic_events", False),
+        "enable_station_breakdown": getattr(config_obj, "enable_station_breakdown", False),
+        "enable_material_delay": getattr(config_obj, "enable_material_delay", False),
+        "enable_online_duration_perturb": getattr(config_obj, "enable_online_duration_perturb", False),
+        "enable_worker_fatigue": getattr(config_obj, "enable_worker_fatigue", False),
+        "randomize_durations": getattr(config_obj, "randomize_durations", False),
+    }
+    for key in backups:
+        setattr(config_obj, key, False)
+
+    try:
+        for raw_path in paths:
+            data_path = resolve_workspace_path(raw_path)
+            benchmark_name = data_path.stem
+            if benchmark_name not in refs:
+                raise ValueError(f"缺少基准 {benchmark_name} 的 reference makespan")
+            env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)
+            state = env.reset(randomize_duration=False, randomize_workers=False, seed=2026)
+            done = False
+            invalid_step_count = 0
+            start_time = time.time()
+
+            agent.policy.eval()
+            for _ in range(env.num_tasks * 3):
+                if done:
+                    break
+                task_mask, station_mask, worker_mask = env.get_masks()
+                if task_mask.all():
+                    if env.try_wait_for_resources():
+                        state = refresh_env_observation(env)
+                        continue
+                    invalid_step_count += 1
+                    break
+                action_ret = agent.select_action(
+                    state.to(device),
+                    mask_task=task_mask.to(device),
+                    mask_station_matrix=station_mask.to(device),
+                    mask_worker=worker_mask.to(device),
+                    deterministic=True,
+                    temperature=0.0,
+                    is_eval=True,
+                )
+                if action_ret[0] is None:
+                    invalid_step_count += 1
+                    break
+                action, _, _, _, is_invalid = action_ret
+                if is_invalid:
+                    invalid_step_count += 1
+                    break
+                state, _reward, done, info = env.step(action)
+                if info.get("invalid_action", False):
+                    invalid_step_count += 1
+                    break
+
+            complete = len(env.assigned_tasks) == env.num_tasks
+            if complete and invalid_step_count == 0:
+                makespan = float(np.max(env.station_wall_clock))
+            else:
+                makespan = float(env.ideal_makespan * 3.0)
+            reference = float(refs[benchmark_name])
+            row = BenchmarkScore(
+                benchmark_name=benchmark_name,
+                data_path=str(data_path),
+                makespan=makespan,
+                reference_makespan=reference,
+                normalized_score=float(makespan / reference),
+                complete=bool(complete),
+                invalid_step_count=int(invalid_step_count),
+                inference_time=float(time.time() - start_time),
+            )
+            rows.append(row)
+            if writer is not None:
+                writer.add_scalar(f"MultiBenchmark/{benchmark_name}_NormalizedScore", row.normalized_score, current_ep)
+                writer.add_scalar(f"MultiBenchmark/{benchmark_name}_Makespan", row.makespan, current_ep)
+                writer.add_scalar(f"MultiBenchmark/{benchmark_name}_InvalidSteps", row.invalid_step_count, current_ep)
+    finally:
+        for key, value in backups.items():
+            setattr(config_obj, key, value)
+        if was_training:
+            agent.policy.train()
+    return score_multi_benchmark(rows)
+
+
 def _compute_assignment_utilization(env, final_makespan: float) -> tuple[float, float]:
     worker_busy_time = 0.0
     station_busy_time = np.zeros(env.num_stations)
@@ -1032,6 +1133,34 @@ def train(args):
         # [Validation] 验证环境：绑定单一的稳定基准图，防止评估基准浮动
         print(f"基准评估图 (Eval Graph): {data_path}")
         eval_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)
+        multiscale_sampler = None
+        current_multiscale_candidate = None
+        if getattr(configs, "enable_multiscale_training", False):
+            if train_dir.is_dir():
+                multiscale_dataset_pool = [
+                    {"file_path": str(path.resolve())}
+                    for path in sorted(train_dir.iterdir())
+                    if path.suffix.lower() in {".csv", ".xlsx"}
+                ]
+            else:
+                multiscale_dataset_pool = [{"file_path": str(train_dir.resolve())}]
+            candidates = build_dataset_candidates(
+                multiscale_dataset_pool,
+                min_ops=int(getattr(configs, "multiscale_min_ops", 200)),
+                max_ops=int(getattr(configs, "multiscale_max_ops", 3100)),
+                sampling_exponent=float(getattr(configs, "multiscale_sampling_exponent", 0.5)),
+                min_updates=int(getattr(configs, "multiscale_min_updates", 600)),
+                max_updates=int(getattr(configs, "multiscale_max_updates", 3300)),
+            )
+            multiscale_sampler = InverseScaleDatasetSampler(candidates, seed=int(getattr(configs, "seed", 42)))
+            print("多规模 APAL 训练已启用，候选实例如下：")
+            for item in candidates:
+                print(
+                    f"  idx={item.dataset_idx} ops={item.num_tasks} "
+                    f"profile={item.profile.name} batch={item.profile.batch_size} "
+                    f"k_epochs={item.profile.k_epochs} weight={item.sampling_weight:.6f} "
+                    f"budget={item.scheduled_updates} file={Path(item.file_path).name}"
+                )
         print("环境初始化完成.")
         
         # 2. 初始化设备与模型
@@ -1133,6 +1262,7 @@ def train(args):
         # 最佳模型记录
         best_makespan = float('inf')
         best_reschedule_score = float('inf')
+        best_multi_benchmark_score = float('inf')
         best_model_dir = checkpoint_paths["best_model_dir"]
         best_model_dir.mkdir(parents=True, exist_ok=True)
         best_model_path = checkpoint_paths["best_model_path"]
@@ -1173,6 +1303,20 @@ def train(args):
             
             agent.policy.train()
             current_temp = configs.sample_temperature
+            if multiscale_sampler is not None:
+                current_multiscale_candidate = multiscale_sampler.sample()
+                vec_env.switch_dataset_all(current_multiscale_candidate.dataset_idx)
+                apply_scale_profile_to_agent(agent, current_multiscale_candidate.profile, configs)
+                writer.add_scalar("Multiscale/NumTasks", current_multiscale_candidate.num_tasks, ep)
+                writer.add_scalar("Multiscale/SamplingWeight", current_multiscale_candidate.sampling_weight, ep)
+                writer.add_scalar("Multiscale/PPOEpochsPerRollout", agent.k_epochs, ep)
+                writer.add_scalar("Multiscale/PPOBatchSize", agent.batch_size, ep)
+                print(
+                    f"[Multiscale] ep={ep} idx={current_multiscale_candidate.dataset_idx} "
+                    f"ops={current_multiscale_candidate.num_tasks} "
+                    f"profile={current_multiscale_candidate.profile.name} "
+                    f"k_epochs={agent.k_epochs} batch={agent.batch_size}"
+                )
             
             curr_curriculum_episodes = configs.curriculum_episodes
             apply_noise = configs.randomize_durations if ep > curr_curriculum_episodes else False
@@ -1547,7 +1691,7 @@ def train(args):
                     
                 # [Dataset Pool] 交替课程学习：按设定的 PPO Update 频率切换图纸
                 current_update_count = ep // update_every_episodes
-                if current_update_count % getattr(configs, 'switch_dataset_every_updates', 1) == 0:
+                if multiscale_sampler is None and current_update_count % getattr(configs, 'switch_dataset_every_updates', 1) == 0:
                     if env.dataset_count > 1:
                         next_idx = current_update_count % env.dataset_count
                         vec_env.switch_dataset_all(next_idx)
@@ -1581,6 +1725,29 @@ def train(args):
                         scenario_names=tuple(configs.eval_scenarios),
                     )
                     res_metrics = {}
+                multi_benchmark_result = None
+                if (
+                    not getattr(configs, "enable_reschedule_mode", False)
+                    and getattr(configs, "enable_multi_benchmark_eval", False)
+                ):
+                    multi_benchmark_result = evaluate_initial_multi_benchmark(
+                        agent,
+                        config_obj=configs,
+                        writer=writer,
+                        current_ep=ep,
+                    )
+                    writer.add_scalar("MultiBenchmark/CompositeScore", multi_benchmark_result.composite_score, ep)
+                    writer.add_scalar("MultiBenchmark/Eligible", float(multi_benchmark_result.eligible), ep)
+                    print(
+                        f"  [MultiBenchmark] score={multi_benchmark_result.composite_score:.6f} "
+                        f"eligible={int(multi_benchmark_result.eligible)}"
+                    )
+                    for row in multi_benchmark_result.rows:
+                        print(
+                            f"    {row.benchmark_name}: mk={row.makespan:.2f} "
+                            f"ref={row.reference_makespan:.2f} norm={row.normalized_score:.4f} "
+                            f"complete={int(row.complete)} invalid={row.invalid_step_count}"
+                        )
                 
                 reporter.add_record(ep, makespan, balance, w_util, s_util, best_sch, eval_reward)
                 
@@ -1660,14 +1827,69 @@ def train(args):
                 if getattr(configs, "enable_reschedule_mode", False):
                     current_score = float(res_metrics.get("composite_score", float("inf")))
                     can_save_best = bool(res_metrics.get("eligible_rate", 0.0) >= 1.0 - 1e-9 and current_score < best_reschedule_score)
+                    selection_metric = "reschedule_composite_score"
+                    score_terms = {
+                        key: float(res_metrics.get(key, 0.0))
+                        for key in [
+                            "score_makespan",
+                            "score_balance",
+                            "score_takt_violation",
+                            "score_start_stability",
+                            "score_station_change",
+                            "score_team_change",
+                        ]
+                    }
+                    constraint_metrics = res_metrics
+                elif multi_benchmark_result is not None:
+                    current_score = float(multi_benchmark_result.composite_score)
+                    can_save_best = bool(
+                        multi_benchmark_result.eligible
+                        and current_score < best_multi_benchmark_score
+                    )
+                    selection_metric = "multi_benchmark_normalized_makespan"
+                    score_terms = {
+                        row.benchmark_name: float(row.normalized_score)
+                        for row in multi_benchmark_result.rows
+                    }
+                    constraint_metrics = {
+                        "eligible": float(multi_benchmark_result.eligible),
+                        "composite_score": float(multi_benchmark_result.composite_score),
+                        "benchmarks": [
+                            {
+                                "benchmark_name": row.benchmark_name,
+                                "data_path": row.data_path,
+                                "makespan": float(row.makespan),
+                                "reference_makespan": float(row.reference_makespan),
+                                "normalized_score": float(row.normalized_score),
+                                "complete": bool(row.complete),
+                                "invalid_step_count": int(row.invalid_step_count),
+                                "inference_time": float(row.inference_time),
+                            }
+                            for row in multi_benchmark_result.rows
+                        ],
+                    }
+                    if current_multiscale_candidate is not None:
+                        constraint_metrics["training_instance"] = {
+                            "dataset_idx": int(current_multiscale_candidate.dataset_idx),
+                            "file_path": current_multiscale_candidate.file_path,
+                            "num_tasks": int(current_multiscale_candidate.num_tasks),
+                            "profile": current_multiscale_candidate.profile.name,
+                            "sampling_weight": float(current_multiscale_candidate.sampling_weight),
+                            "scheduled_updates": int(current_multiscale_candidate.scheduled_updates),
+                        }
                 else:
                     current_score = makespan
                     can_save_best = bool(makespan < best_makespan)
+                    selection_metric = "eval_makespan"
+                    score_terms = {}
+                    constraint_metrics = {}
 
                 if can_save_best:
                     best_makespan = makespan
                     if getattr(configs, "enable_reschedule_mode", False):
                         best_reschedule_score = current_score
+                    elif multi_benchmark_result is not None:
+                        best_multi_benchmark_score = current_score
                     torch.save(
                         {
                             "model_state_dict": agent.policy.state_dict(),
@@ -1683,26 +1905,21 @@ def train(args):
                         best_model_meta_path,
                         episode=ep,
                         eval_makespan=best_makespan,
-                        selection_metric="reschedule_composite_score" if getattr(configs, "enable_reschedule_mode", False) else "eval_makespan",
-                        best_score=current_score if getattr(configs, "enable_reschedule_mode", False) else None,
-                        score_terms={
-                            key: float(res_metrics.get(key, 0.0))
-                            for key in [
-                                "score_makespan",
-                                "score_balance",
-                                "score_takt_violation",
-                                "score_start_stability",
-                                "score_station_change",
-                                "score_team_change",
-                            ]
-                        },
-                        constraint_metrics=res_metrics if getattr(configs, "enable_reschedule_mode", False) else {},
+                        selection_metric=selection_metric,
+                        best_score=current_score if selection_metric != "eval_makespan" else None,
+                        score_terms=score_terms,
+                        constraint_metrics=constraint_metrics,
                         config_obj=configs,
                     )
                     if getattr(configs, "enable_reschedule_mode", False):
                         print(
                             "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"
                             f"New Best Reschedule Model Saved! Score: {best_reschedule_score:.6f}, Makespan: {best_makespan:.2f}"
+                        )
+                    elif multi_benchmark_result is not None:
+                        print(
+                            "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"
+                            f"New Best Multi-Benchmark Model Saved! Score: {best_multi_benchmark_score:.6f}, Makespan: {best_makespan:.2f}"
                         )
                     else:
                         print(f"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNew Best Model Saved! Makespan: {best_makespan}")
