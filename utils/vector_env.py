@@ -247,6 +247,7 @@ class EnvProxy:
         self.assigned_tasks: List[Any] = []
         self.task_status: Optional[np.ndarray] = None
         self.current_time: float = 0.0
+        self._worker_skill_topology_cache: dict[tuple[int, bytes], torch.Tensor] = {}
 
     def update_static_properties(self, info: dict):
         if 'num_tasks' in info: self.num_tasks = info['num_tasks']
@@ -343,7 +344,12 @@ class EnvProxy:
         """
         from configs import configs
         from environment import _fill_station_macro_features
-        from utils.resource_graph import apply_resource_graph
+        from utils.resource_graph import (
+            SkillHubTopology,
+            apply_resource_graph,
+            build_worker_skill_edges,
+            worker_topology_key,
+        )
         
         ctx_idx = snapshot.get('dataset_idx', 0)
         while len(self.dataset_pool) <= ctx_idx:
@@ -416,7 +422,30 @@ class EnvProxy:
             worker_x[w, 21] = fatigue_f
             
         data['worker'].x = worker_x
-        apply_resource_graph(data, task_x, worker_x, configs)
+        topology = None
+        if bool(getattr(configs, "use_skill_hub", False)):
+            topology_key = snapshot.get("worker_topology_key") or worker_topology_key(
+                worker_x,
+                int(configs.num_skill_types),
+            )
+            worker_edges = self._worker_skill_topology_cache.get(topology_key)
+            if worker_edges is None:
+                worker_edges = build_worker_skill_edges(
+                    worker_x,
+                    int(configs.num_skill_types),
+                )
+                self._worker_skill_topology_cache[topology_key] = worker_edges
+            topology = SkillHubTopology(
+                worker_to_skill=worker_edges,
+                skill_to_task=ctx["task_skill_edge_index"],
+            )
+        apply_resource_graph(
+            data,
+            task_x,
+            worker_x,
+            configs,
+            skill_hub_topology=topology,
+        )
         
         # 3. 重建站位特征
         num_stations = len(snapshot['station_loads'])

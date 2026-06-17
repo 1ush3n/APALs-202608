@@ -8,6 +8,7 @@ PPO/APAL 训练闭环修复专项测试。
 from __future__ import annotations
 
 import sys
+import ast
 from pathlib import Path
 
 import torch
@@ -160,6 +161,38 @@ def test_train_import_has_no_debug_stdout() -> None:
         check=True,
     )
     assert result.stdout.strip() == ""
+
+
+def test_legacy_profiler_initializes_sps_before_progress_display() -> None:
+    """legacy 进度条读取 SPS 前必须已有初始化，避免首轮 UnboundLocalError。"""
+    source = (PROJECT_ROOT / "train.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    train_fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "train"
+    )
+    assignments = [
+        node.lineno
+        for node in ast.walk(train_fn)
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and any(
+            isinstance(target, ast.Name) and target.id == "steps_per_sec"
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
+        )
+    ]
+    postfix_reads = [
+        node.lineno
+        for node in ast.walk(train_fn)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id == "steps_per_sec"
+    ]
+    assert assignments
+    assert postfix_reads
+    assert min(assignments) < min(postfix_reads)
 
 
 def test_train_resolve_workspace_path_handles_relative_and_absolute() -> None:

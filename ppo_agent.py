@@ -23,21 +23,22 @@ class PPOAgent:
     PPO (Proximal Policy Optimization) 鏅鸿兘浣撱€?
     璐熻矗涓?Environment 浜や簰锛屾敹闆嗚建杩癸紝骞舵洿鏂?Strategy Network銆?
     """
-    def __init__(self, model, lr, gamma, k_epochs, eps_clip, device, batch_size=4, total_timesteps=0):
+    def __init__(self, model, lr, gamma, k_epochs, eps_clip, device, batch_size=4, total_timesteps=0, config=None):
+        self.config = config if config is not None else configs
         self.policy = model.to(device)
         
         from utils.gpu_graph_manager import GPUBatchGraphManager
-        self.gpu_graph_manager = GPUBatchGraphManager(device)
+        self.gpu_graph_manager = GPUBatchGraphManager(device, config=self.config)
         
-        self.use_schedule_free = getattr(configs, 'use_schedule_free', False)
+        self.use_schedule_free = getattr(self.config, 'use_schedule_free', False)
         
         # [SF Enhancement] 鑻ユ湭瀹夎 schedulefree 搴擄紝寮鸿闄嶇骇涓烘櫘閫?AdamW 浼樺寲妯″紡锛岄槻姝㈠悗缁彂鐢?train()/eval() 璋冪敤宕╂簝
         if self.use_schedule_free and AdamWScheduleFree is None:
             print("WARNING: ScheduleFree is requested but the 'schedulefree' package is not installed. Falling back to default AdamW.")
             self.use_schedule_free = False
         
-        actor_lr_multiplier = float(getattr(configs, 'actor_lr_multiplier', 1.0))
-        critic_lr_multiplier = float(getattr(configs, 'critic_lr_multiplier', 1.0))
+        actor_lr_multiplier = float(getattr(self.config, 'actor_lr_multiplier', 1.0))
+        critic_lr_multiplier = float(getattr(self.config, 'critic_lr_multiplier', 1.0))
         actor_params = []
         critic_params = []
         for name, param in self.policy.named_parameters():
@@ -54,13 +55,13 @@ class PPOAgent:
 
         if self.use_schedule_free and AdamWScheduleFree is not None:
             # [SF Enhancement] 鍔ㄦ€佽皟鏁撮鐑湡锛岃瀹氫负鎬绘洿鏂版鏁扮殑 5% (鏈€灏?100)
-            warmup = getattr(configs, 'sf_warmup_steps', max(100, int(max(1, total_timesteps) * 0.05)))
+            warmup = getattr(self.config, 'sf_warmup_steps', max(100, int(max(1, total_timesteps) * 0.05)))
             self.optimizer = AdamWScheduleFree(optimizer_params, lr=lr, weight_decay=1e-4, warmup_steps=warmup)
         else:
             self.optimizer = torch.optim.AdamW(optimizer_params, lr=lr, weight_decay=1e-4)
             
-        self.use_ema = getattr(configs, 'use_ema', False)
-        self.ema_decay = getattr(configs, 'ema_decay', 0.995)
+        self.use_ema = getattr(self.config, 'use_ema', False)
+        self.ema_decay = getattr(self.config, 'ema_decay', 0.995)
         
         # [SF Enhancement] 鑷姩瑕嗙洊 EMA 闃叉鎺у埗鏉冨啿绐佷笌鍐椾綑璁＄畻
         if self.use_schedule_free and self.use_ema:
@@ -79,7 +80,7 @@ class PPOAgent:
         self.eps_clip = eps_clip    # PPO Clip鍙傛暟 (e.g., 0.2)
         self.device = device
         requested_batch_size = max(1, int(batch_size))
-        batch_size_cap = max(0, int(getattr(configs, "ppo_batch_size_cap", 0)))
+        batch_size_cap = max(0, int(getattr(self.config, "ppo_batch_size_cap", 0)))
         self.batch_size = (
             min(requested_batch_size, batch_size_cap)
             if batch_size_cap > 0
@@ -90,12 +91,12 @@ class PPOAgent:
                 f"PPO Batch 平台限幅: requested={requested_batch_size}, "
                 f"effective={self.batch_size}, cap={batch_size_cap}"
             )
-        self.accumulation_steps = configs.accumulation_steps
-        self.gae_lambda = configs.gae_lambda
+        self.accumulation_steps = self.config.accumulation_steps
+        self.gae_lambda = self.config.gae_lambda
         
         self.MseLoss = nn.MSELoss() 
         
-        self.kl_early_stop = configs.kl_early_stop
+        self.kl_early_stop = self.config.kl_early_stop
         
         self.initial_lr = lr
         
@@ -347,7 +348,7 @@ class PPOAgent:
             state_value: float
             specific_station_mask: 鐢ㄤ簬 Memory 璁板綍
         """
-        no_mask = configs.ablation_no_mask
+        no_mask = self.config.ablation_no_mask
         
         if self.use_schedule_free:
             if is_eval:
@@ -584,7 +585,7 @@ class PPOAgent:
         Returns:
             results: List of Tuples containing (action_tuple, action_logprob, state_value, specific_station_mask, is_invalid_action)
         """
-        no_mask = configs.ablation_no_mask
+        no_mask = self.config.ablation_no_mask
         mask_value = -1e4
         
         if self.use_schedule_free:
@@ -853,11 +854,11 @@ class PPOAgent:
 
     def update(self, memory: Any, env: Any = None, current_ep: int = 1) -> Dict[str, float]:
         """执行可回滚的 PPO 更新，并在 CUDA OOM 时降低 batch 后重试。"""
-        transactional = bool(getattr(configs, "oom_transactional_updates", True))
-        auto_retry = bool(getattr(configs, "auto_oom_retry", True))
-        skip_on_oom = bool(getattr(configs, "skip_update_on_oom", True))
-        min_batch_size = max(1, int(getattr(configs, "oom_min_batch_size", 2)))
-        max_retries = max(0, int(getattr(configs, "oom_max_retries", 1)))
+        transactional = bool(getattr(self.config, "oom_transactional_updates", True))
+        auto_retry = bool(getattr(self.config, "auto_oom_retry", True))
+        skip_on_oom = bool(getattr(self.config, "skip_update_on_oom", True))
+        min_batch_size = max(1, int(getattr(self.config, "oom_min_batch_size", 2)))
+        max_retries = max(0, int(getattr(self.config, "oom_max_retries", 1)))
         original_batch_size = int(self.batch_size)
         transaction = self._capture_update_transaction() if transactional else None
         retry_count = 0
@@ -989,7 +990,7 @@ class PPOAgent:
         b_team = torch.tensor(team_list, dtype=torch.long)
         
         # Attach targets to Data objects for Batching
-        enable_gpu_batch = getattr(configs, 'enable_gpu_batch_rebuild', False) and env is not None
+        enable_gpu_batch = getattr(self.config, 'enable_gpu_batch_rebuild', False) and env is not None
         N_samples = len(memory.states)
         gpu_rebuild_fallback_count = 0
         gpu_rebuild_fallback_messages = []
@@ -1199,7 +1200,7 @@ class PPOAgent:
                     team_lp = torch.zeros_like(task_lp)
                     team_entropy = torch.zeros_like(task_entropy)
                     
-                    if hasattr(batch, 'y_worker_mask') and not getattr(configs, 'ablation_no_mask', False):
+                    if hasattr(batch, 'y_worker_mask') and not getattr(self.config, 'ablation_no_mask', False):
                          d_w_mask, _ = to_dense_batch(batch.y_worker_mask.float(), batch['worker'].batch)
                          curr_mask = (d_w_mask > 0.5) | (~w_p_mask)
                     else:
@@ -1299,7 +1300,7 @@ class PPOAgent:
                     
                     # 鍔ㄦ€佽“鍑忔帰绱笂闄?
                     progress = min(1.0, self.current_step / max(1, self.total_timesteps))
-                    eps_clip_end = float(getattr(configs, 'eps_clip_end', 0.05))
+                    eps_clip_end = float(getattr(self.config, 'eps_clip_end', 0.05))
                     curr_eps_clip = self.eps_clip - progress * (self.eps_clip - eps_clip_end)
                     
                     surr1 = ratios * b_adv
@@ -1312,17 +1313,17 @@ class PPOAgent:
                     
                     policy_loss = -torch.min(surr1, surr2).mean()
                     
-                    c_val = configs.c_value
-                    decay_eps = max(1, configs.entropy_decay_episodes)
+                    c_val = self.config.c_value
+                    decay_eps = max(1, self.config.entropy_decay_episodes)
                     
                     ent_progress = min(1.0, current_ep / decay_eps)
                     
-                    c_ent_base = configs.c_entropy
-                    c_ent_end = configs.c_entropy_end
+                    c_ent_base = self.config.c_entropy
+                    c_ent_end = self.config.c_entropy_end
                     import math
                     c_ent = c_ent_end + (c_ent_base - c_ent_end) * math.exp(-3.0 * ent_progress)
                     
-                    c_pol = configs.c_policy
+                    c_pol = self.config.c_policy
                     
                     old_values = batch.y_value.view(-1) if hasattr(batch, 'y_value') else None
                     value_loss_raw = self.compute_value_loss(
@@ -1376,7 +1377,7 @@ class PPOAgent:
                     
                     torch.nn.utils.clip_grad_norm_(actor_params, max_norm=0.5)
                     # 缁?Critic 鎸傝杩滄瘮 Actor 鏇磋杽寮辩殑瑁呯敳锛岄槻姝㈠眬閮ㄨ剦鍐插甫宕╁叏鐩?
-                    torch.nn.utils.clip_grad_norm_(critic_params, max_norm=configs.clip_v_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(critic_params, max_norm=self.config.clip_v_grad_norm)
                     
                     self.scaler.step(self.optimizer)
                     self.scaler.update()

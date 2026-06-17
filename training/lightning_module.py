@@ -115,6 +115,14 @@ class APALLightningModule(pl.LightningModule):
     def configure_optimizers(self):
         return self.agent.optimizer
 
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        from runtime.checkpoints import build_checkpoint_metadata
+
+        checkpoint["apal_metadata"] = build_checkpoint_metadata(
+            self.rollout_service.config,
+            episode=int(self.last_completed_episode),
+        )
+
     def transfer_batch_to_device(
         self,
         batch: RolloutUpdate,

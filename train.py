@@ -36,6 +36,12 @@ from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
 from configs import configs, load_training_config
+from runtime.configuration import resolve_runtime_config
+from runtime.artifacts import (
+    checkpoint_paths as resolve_artifact_checkpoint_paths,
+    resolve_path as resolve_artifact_path,
+    sanitize_name,
+)
 import pandas as pd
 from baselines.heuristic.baseline_ga import GeneticAlgorithmScheduler
 from utils.visualization import plot_gantt
@@ -55,29 +61,25 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 def resolve_workspace_path(path_like, base_dir: Path = PROJECT_ROOT) -> Path:
     """将配置中的路径解析为跨平台绝对路径；绝对路径保持不变。"""
-    path = Path(path_like)
-    return path if path.is_absolute() else base_dir / path
+    return resolve_artifact_path(path_like, base_dir)
 
 
 def sanitize_experiment_name(name: object) -> str:
     """将实验名压缩为安全目录名，避免不同配置的 checkpoint 互相覆盖。"""
-    raw = str(name or "default").strip()
-    safe = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in raw)
-    return safe or "default"
+    return sanitize_name(name)
 
 
 def resolve_checkpoint_paths(config_obj=configs) -> dict[str, Path]:
     """按 experiment_name/checkpoint_root 解析当前实验的模型保存路径。"""
-    root = resolve_workspace_path(getattr(config_obj, "checkpoint_root", "checkpoints"))
-    experiment_name = sanitize_experiment_name(getattr(config_obj, "experiment_name", "default"))
-    model_dir = root / experiment_name
-    best_model_dir = model_dir / "bestmodel"
+    paths = resolve_artifact_checkpoint_paths(config_obj, PROJECT_ROOT)
+    model_dir = paths["model_dir"]
+    best_model_dir = paths["legacy_best"].parent
     return {
         "model_dir": model_dir,
-        "checkpoint_path": model_dir / "latest_checkpoint.pth",
+        "checkpoint_path": paths["legacy_latest"],
         "best_model_dir": best_model_dir,
-        "best_model_path": best_model_dir / "best_model.pth",
-        "best_model_meta_path": best_model_dir / "best_model_meta.json",
+        "best_model_path": paths["legacy_best"],
+        "best_model_meta_path": paths["legacy_best_meta"],
     }
 
 
@@ -227,25 +229,13 @@ def set_seed(seed=42):
 
 
 def initialize_training_config(args, argv=None, system_name: str | None = None):
-    """统一加载实验配置、平台配置和显式命令行覆盖。"""
-    argv_set = set(sys.argv[1:] if argv is None else argv)
-    _, loaded_paths = load_training_config(
-        args.config,
+    """统一加载默认值、YAML、平台配置和命令行覆盖。"""
+    _, loaded_paths, explicit_fields = resolve_runtime_config(
+        args,
         target=configs,
         system_name=system_name,
     )
-    if "--ablation_no_gat" in argv_set:
-        configs.ablation_no_gat = True
-    if "--ablation_no_pointer" in argv_set:
-        configs.ablation_no_pointer = True
-    if "--ablation_no_mask" in argv_set:
-        configs.ablation_no_mask = True
-    if "--data_path" in argv_set:
-        configs.data_file_path = args.data_path
-    if "--seed" in argv_set:
-        configs.seed = int(args.seed)
-    if "--max_episodes" in argv_set:
-        configs.max_episodes = int(args.max_episodes)
+    args.explicit_config_fields = explicit_fields
 
     precision = str(configs.float32_matmul_precision)
     if precision not in {"highest", "high", "medium"}:
@@ -1077,7 +1067,8 @@ def train(args):
             eps_clip=configs.eps_clip,
             device=device,
             batch_size=configs.batch_size,
-            total_timesteps=total_updates
+            total_timesteps=total_updates,
+            config=configs,
         )
 
         
@@ -1168,16 +1159,8 @@ def train(args):
         print(f"Rollout 加速: fast_snapshot={use_fast_path}, profiler={use_profiler}, "
               f"shadow_mask_verify={getattr(configs, 'enable_shadow_mask_verification', False)}")
         
-        # 引入 tqdm 并局部遮蔽 print 函数，使训练日志在不破坏进度条的前提下输出
+        # tqdm 负责进度展示；日志继续使用内置 print，避免遮蔽内置函数造成作用域错误。
         from tqdm import tqdm
-        _original_print = print
-        def print(*args, **kwargs):
-            sep = kwargs.get('sep', ' ')
-            file = kwargs.get('file', None)
-            if file is None or file is sys.stdout or file is sys.stderr:
-                tqdm.write(sep.join(map(str, args)))
-            else:
-                _original_print(*args, **kwargs)
 
         pbar = tqdm(
             range(start_episode, configs.max_episodes + 1),
@@ -1213,6 +1196,7 @@ def train(args):
             prof_mask_cum = prof_select_cum = prof_snapshot_cum = prof_step_cum = 0.0
             prof_deadlock_cum = 0.0
             prof_step_count = 0
+            steps_per_sec = 0.0
             apal_diag_sums = {
                 "schedulable_tasks": 0.0,
                 "avg_worker_wait_h": 0.0,
@@ -1465,6 +1449,14 @@ def train(args):
                     writer.add_scalar(f'RewardDiagnostic/{key}', total / reward_diag_count, ep)
             
             status_strs = ["DEADLOCK" if len(vec_env.envs[i].assigned_tasks) < vec_env.envs[i].num_tasks else "COMPLETED" for i in range(num_envs)]
+            prof_ep_total = (
+                time.perf_counter() - prof_ep_t0
+                if use_profiler
+                else 0.0
+            )
+            if use_profiler and prof_step_count > 0:
+                steps_per_sec = prof_step_count / max(prof_ep_total, 1e-6)
+
             # 动态更新进度条右侧的性能后缀，避免在大循环内频繁 print 刷屏
             pbar.set_postfix({
                 "Rew": f"{avg_reward:.2f}",
@@ -1475,7 +1467,6 @@ def train(args):
             
             # Rollout Profiler: 累计计时 + 平均 + 吞吐量
             if use_profiler and prof_step_count > 0:
-                prof_ep_total = time.perf_counter() - prof_ep_t0
                 n = prof_step_count
                 mask_ms    = (prof_mask_cum / n) * 1000
                 deadlock_ms = (prof_deadlock_cum / n) * 1000
@@ -1483,8 +1474,6 @@ def train(args):
                 snapshot_ms = (prof_snapshot_cum / n) * 1000
                 step_ms    = (prof_step_cum / n) * 1000
                 total_per_step_ms = mask_ms + deadlock_ms + select_ms + snapshot_ms + step_ms
-                steps_per_sec = n / max(prof_ep_total, 1e-6)
-                
                 if ep % configs.rollout_profile_interval == 0:
                     writer.add_scalar('Rollout/EpisodeTotal_s', prof_ep_total, ep)
                     writer.add_scalar('Rollout/Mask_ms', mask_ms, ep)
@@ -1655,6 +1644,11 @@ def train(args):
                     'model_state_dict': agent.policy.state_dict(),
                     'optimizer_state_dict': agent.optimizer.state_dict()
                 }
+                from runtime.checkpoints import build_checkpoint_metadata
+                save_dict['apal_metadata'] = build_checkpoint_metadata(
+                    configs,
+                    episode=int(ep),
+                )
                 if hasattr(agent, 'optimizer_adam'):
                     save_dict['optimizer_adam_state_dict'] = agent.optimizer_adam.state_dict()
                 if hasattr(agent, 'ema_policy'):
@@ -1674,7 +1668,17 @@ def train(args):
                     best_makespan = makespan
                     if getattr(configs, "enable_reschedule_mode", False):
                         best_reschedule_score = current_score
-                    torch.save(agent.policy.state_dict(), best_model_path)
+                    torch.save(
+                        {
+                            "model_state_dict": agent.policy.state_dict(),
+                            "apal_metadata": build_checkpoint_metadata(
+                                configs,
+                                episode=int(ep),
+                                eval_makespan=float(best_makespan),
+                            ),
+                        },
+                        best_model_path,
+                    )
                     write_best_model_meta(
                         best_model_meta_path,
                         episode=ep,
@@ -1736,9 +1740,6 @@ def train(args):
                 if ep > 0 and ep % getattr(configs, 'generate_report_every_episodes', 100) == 0:
                     reporter.generate_report(current_ep=ep, metrics_dict=last_metrics)
 
-        # 恢复默认的 print 打印函数，以便接下来美观地输出终局报表
-        print = _original_print
-
         # =======================================================================
         # 6. 训练结束 - 终局性能测评与基线对比 (End of Training Evaluation)
         # =======================================================================
@@ -1750,7 +1751,11 @@ def train(args):
         if best_model_path.exists():
              print(f"加载训练历史上最好的验证模型用于最终推演: {best_model_path}")
              try:
-                 model.load_state_dict(torch.load(best_model_path, map_location=device))
+                 from runtime.checkpoints import load_checkpoint, load_policy_weights
+                 load_policy_weights(
+                     model,
+                     load_checkpoint(best_model_path, map_location=device),
+                 )
              except RuntimeError as e:
                  print(f"⚠️ 警告: 历史最佳模型 ({best_model_path}) 的结构与当前配置不匹配，无法加载。将继续使用当前最新的训练结果进行推演！")
              

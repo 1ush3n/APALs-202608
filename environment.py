@@ -15,7 +15,14 @@ from data_loader import load_data
 from configs import configs
 from core.event_engine import Event, EventType, EventQueue
 from core.action_masker import ActionMasker
-from utils.resource_graph import apply_resource_graph
+from utils.resource_graph import (
+    SkillHubTopology,
+    apply_resource_graph,
+    build_skill_hub_topology,
+    build_task_skill_edges,
+    build_worker_skill_edges,
+    worker_topology_key,
+)
 from utils.reschedule import (
     BaselineSchedule,
     RescheduleScenario,
@@ -95,6 +102,8 @@ class AirLineEnv_Graph(gym.Env):
             
         # 初始化激活索引
         self.active_dataset_idx = 0
+        self._worker_skill_topology_cache: dict[tuple[int, bytes], torch.Tensor] = {}
+        self._active_worker_topology_key: tuple[int, bytes] | None = None
         self.switch_dataset(0)
         
         # 动作空间: Tuple(Task, Station, Worker_List_Leader, Num_Workers)
@@ -207,11 +216,45 @@ class AirLineEnv_Graph(gym.Env):
             "base_data",
             "base_task_x",
             "base_station_x",
+            "task_skill_edge_index",
             "full_can_do_edge_index",
             "mean_task_time",
             "ideal_station_load",
         )
         return {key: ctx[key] for key in required}
+
+    def _skill_hub_topology(
+        self,
+        task_skill_edge_index: torch.Tensor,
+        worker_x: torch.Tensor,
+        topology_key: tuple[int, bytes] | None,
+    ) -> SkillHubTopology | None:
+        """取得 Skill Hub 静态拓扑；legacy direct 模式不使用该缓存。"""
+        if not bool(getattr(configs, "use_skill_hub", False)):
+            return None
+        key = topology_key or worker_topology_key(
+            worker_x,
+            int(configs.num_skill_types),
+        )
+        worker_edges = self._worker_skill_topology_cache.get(key)
+        if worker_edges is None:
+            worker_edges = build_worker_skill_edges(
+                worker_x,
+                int(configs.num_skill_types),
+            )
+            self._worker_skill_topology_cache[key] = worker_edges
+        return SkillHubTopology(
+            worker_to_skill=worker_edges,
+            skill_to_task=task_skill_edge_index,
+        )
+
+    def _current_skill_hub_topology(self) -> SkillHubTopology | None:
+        ctx = self.dataset_pool[self.active_dataset_idx]
+        return self._skill_hub_topology(
+            ctx["task_skill_edge_index"],
+            self.base_worker_x,
+            self._active_worker_topology_key,
+        )
         
     def _build_static_context(self, ctx):
         """巧妙利用原有的 init_hetero_data 逻辑，并将产生的属性打包进 ctx"""
@@ -255,6 +298,10 @@ class AirLineEnv_Graph(gym.Env):
         ctx['base_durations'] = self.base_durations
         ctx['max_allowed_stations'] = self.max_allowed_stations
         ctx['is_critical'] = self.is_critical
+        ctx['task_skill_edge_index'] = build_task_skill_edges(
+            self.base_task_x,
+            int(configs.num_skill_types),
+        )
         
         # 预计算全量 can_do 边索引（基于 full_worker_skill_matrix，不依赖 reset 采样）
         if getattr(configs, "use_skill_hub", False):
@@ -500,6 +547,13 @@ class AirLineEnv_Graph(gym.Env):
         
         # [Feature Upgrade] worker base feat + wait_time slot (11 dims padding now, total 22 dims)
         self.base_worker_x = torch.cat([self.worker_static_feat, self.worker_skill_matrix, torch.zeros((self.num_workers, 11))], dim=1)
+        self._active_worker_topology_key = worker_topology_key(
+            self.base_worker_x,
+            int(configs.num_skill_types),
+        )
+        self._worker_skill_topology_cache[self._active_worker_topology_key] = (
+            build_worker_skill_edges(self.base_worker_x, int(configs.num_skill_types))
+        )
         # [Feature Upgrade] station base feat + slot_wait_time + relative loads (15 dims)
         self.base_station_x = torch.zeros((self.num_stations, 15))
 
@@ -508,7 +562,18 @@ class AirLineEnv_Graph(gym.Env):
         data['worker'].x = self.base_worker_x.clone()
         data['station'].x = self.base_station_x.clone()
         data['task', 'precedes', 'task'].edge_index = self.raw_data['precedence_edges'].clone().long()
-        apply_resource_graph(data, self.base_task_x, self.base_worker_x, configs)
+        initial_topology = build_skill_hub_topology(
+            self.base_task_x,
+            self.base_worker_x,
+            int(configs.num_skill_types),
+        ) if bool(getattr(configs, "use_skill_hub", False)) else None
+        apply_resource_graph(
+            data,
+            self.base_task_x,
+            self.base_worker_x,
+            configs,
+            skill_hub_topology=initial_topology,
+        )
         self.base_data = data
         
     def reset(self, randomize_duration: bool = False, randomize_workers: bool = False, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[HeteroData, Dict[str, Any]]:
@@ -578,6 +643,17 @@ class AirLineEnv_Graph(gym.Env):
         # 重建动态的 base_worker_x (维度随 num_workers 变化, 增加至 22 维以容纳疲劳因子)
         # 1(efficiency) + 10(skills) + 11(Padding: 1 wait, 1 free, 8 locks, 1 fatigue) = 22 dims
         self.base_worker_x = torch.cat([self.worker_static_feat, self.worker_skill_matrix, torch.zeros((self.num_workers, 11))], dim=1)
+        self._active_worker_topology_key = worker_topology_key(
+            self.base_worker_x,
+            int(configs.num_skill_types),
+        )
+        if self._active_worker_topology_key not in self._worker_skill_topology_cache:
+            self._worker_skill_topology_cache[self._active_worker_topology_key] = (
+                build_worker_skill_edges(
+                    self.base_worker_x,
+                    int(configs.num_skill_types),
+                )
+            )
         
         # 重置运行状态张量
         self.current_time = 0.0
@@ -693,7 +769,13 @@ class AirLineEnv_Graph(gym.Env):
         # 克隆 Observation 数据并重建稀疏边矩阵 (由于 worker数量波动)
         self.obs_data = self.base_data.clone()
         
-        apply_resource_graph(self.obs_data, self.base_task_x, self.base_worker_x, configs)
+        apply_resource_graph(
+            self.obs_data,
+            self.base_task_x,
+            self.base_worker_x,
+            configs,
+            skill_hub_topology=self._current_skill_hub_topology(),
+        )
         
         # 动态篡改工时
         if randomize_duration:
@@ -1332,7 +1414,13 @@ class AirLineEnv_Graph(gym.Env):
             worker_x[w, 21] = self.get_current_fatigue_factor(w, self.current_time)
             
         data['worker'].x = worker_x
-        apply_resource_graph(data, task_x, worker_x, configs)
+        apply_resource_graph(
+            data,
+            task_x,
+            worker_x,
+            configs,
+            skill_hub_topology=self._current_skill_hub_topology(),
+        )
         
         # 3. Station Features (In-place refresh)
         station_x = self.base_station_x.clone()
@@ -1405,6 +1493,7 @@ class AirLineEnv_Graph(gym.Env):
             'assigned_tasks': list(self.assigned_tasks),
             'base_worker_x': self.base_worker_x.clone(),
             'dataset_idx': getattr(self, 'active_dataset_idx', 0),
+            'worker_topology_key': self._active_worker_topology_key,
             # [Dynamic Events] 保存新增状态变量
             'station_available_slots': self.station_available_slots.copy(),
             'task_material_ready': self.task_material_ready.copy(),
@@ -1503,7 +1592,17 @@ class AirLineEnv_Graph(gym.Env):
             worker_x[w, 21] = fatigue_f
             
         data['worker'].x = worker_x
-        apply_resource_graph(data, task_x, worker_x, configs)
+        apply_resource_graph(
+            data,
+            task_x,
+            worker_x,
+            configs,
+            skill_hub_topology=self._skill_hub_topology(
+                ctx["task_skill_edge_index"],
+                worker_x,
+                snapshot.get("worker_topology_key"),
+            ),
+        )
         
         station_x = ctx['base_station_x'].clone()
         station_x[:, 0] = torch.tensor(snapshot['station_loads'], dtype=torch.float) / max(1.0, ctx['ideal_station_load'])

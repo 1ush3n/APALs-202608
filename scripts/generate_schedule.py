@@ -1,132 +1,108 @@
+from __future__ import annotations
 
-import torch
-import pandas as pd
-import numpy as np
+import argparse
 import sys
 from pathlib import Path
 
-# 添加项目根目录到 Python 路径
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT))
+import pandas as pd
+import torch
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from configs import configs
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
-from configs import configs
-
-def resolve_project_path(path_like):
-    path = Path(path_like)
-    return path if path.is_absolute() else PROJECT_ROOT / path
+from runtime.artifacts import resolve_path, write_run_manifest
+from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint, load_policy_weights
+from runtime.configuration import add_common_config_arguments, resolve_runtime_config
 
 
-def find_latest_checkpoint(model_dir):
-    model_dir = resolve_project_path(model_dir)
-    list_of_files = list(model_dir.glob("*.pth"))
-    if not list_of_files:
-        return None
-    latest_file = max(list_of_files, key=lambda path: path.stat().st_ctime)
-    return latest_file
+def generate_schedule(
+    model_path: str,
+    *,
+    explicit_fields: set[str] | None = None,
+    output_path: str | Path | None = None,
+) -> pd.DataFrame:
+    checkpoint_path = resolve_path(model_path, PROJECT_ROOT)
+    checkpoint = load_checkpoint(checkpoint_path)
+    apply_checkpoint_model_spec(
+        configs, checkpoint.model_spec, explicit_fields=explicit_fields,
+    )
+    data_path = resolve_path(configs.data_file_path, PROJECT_ROOT)
+    target = resolve_path(
+        output_path or Path(configs.result_dir) / "final_schedule.csv",
+        PROJECT_ROOT,
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_run_manifest(
+        target.parent,
+        configs,
+        command="generate_schedule",
+        extra={
+            "checkpoint": str(checkpoint_path.resolve()),
+            "resource_graph_mode": checkpoint.model_spec.resource_graph_mode,
+        },
+    )
 
-def generate_schedule(model_path=None):
-    print("--- Generating Schedule (Deterministic) ---")
-    
-    data_path = getattr(configs, 'data_file_path', 'data/283.csv')
-    env = AirLineEnv_Graph(data_path_or_dir=data_path)
-    print(f"Dataset: {data_path}")
-    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
-    
-    # Load Model
+    env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=int(configs.seed))
     model = HBGATPN(configs).to(device)
-    
-    if model_path is None:
-        model_dir = "checkpoints"
-        model_path = find_latest_checkpoint(model_dir)
-        
-    if model_path is not None:
-        model_path = resolve_project_path(model_path)
-
-    if model_path and model_path.exists():
-        print(f"Loading weights from: {model_path}")
-        try:
-            model.load_state_dict(torch.load(model_path, map_location=device))
-        except RuntimeError as e:
-            print(f"Warning: Architecture mismatch for {model_path}. Proceeding with random weights.\nError details: {str(e)[:100]}...")
-    else:
-        print("Warning: No checkpoint found or specified. Using random weights.")
-        
-    agent = PPOAgent(model, configs.lr, configs.gamma, configs.k_epochs, configs.eps_clip, device, configs.batch_size)
-    
-    # Rollout
+    load_policy_weights(model, checkpoint)
+    agent = PPOAgent(
+        model, configs.lr, configs.gamma, configs.k_epochs,
+        configs.eps_clip, device, configs.batch_size, config=configs,
+    )
     state = env.reset()
     done = False
-    total_reward = 0
-    
-    # Track Schedule Details
-    # env.assigned_tasks already has (task_id, station_id, worker_id, start, end)
-    # But internal_id. Need mapping back to original?
-    # env.raw_data['id_map'] is {orig: internal}.
-    # We need internal -> orig.
-    
-    id_map = env.raw_data['id_map']
-    internal_to_orig = {v: k for k, v in id_map.items()}
-    
     while not done:
-        # Mask
         task_mask, station_mask, worker_mask = env.get_masks()
-        
-        # Action (Strictly Greedy for Final Output)
         action, _, _, _, _ = agent.select_action(
             state.to(device),
             mask_task=task_mask.to(device),
             mask_station_matrix=station_mask.to(device),
             mask_worker=worker_mask.to(device),
             deterministic=True,
-            temperature=0.0
+            temperature=0.0,
         )
-        
-        state, reward, done, info = env.step(action)
-        total_reward += reward
-        if 'error' in info:
-            print(f"Error during generation: {info['error']}")
-            break
-        
-    print(f"--- Rollout Complete. Total Reward: {total_reward:.2f} ---")
-    
-    # 运行完毕，从环境中直接抽取真实的历史记录
-    schedule_log = []
-    for (t_id, s_id, team, start_time, end_time) in env.assigned_tasks:
-        # 包含所有工序，即使是虚拟节点 (s_id == -1)，因为 verifier 需要完整拓扑
-        # Try to find original ID if map exists, else use raw internal int
-        if hasattr(env, 'raw_data') and 'task_df' in env.raw_data:
-            try:
-                original_id = env.raw_data['task_df'].iloc[t_id]['task_id']
-            except Exception:
-                original_id = t_id
-        else:
-            original_id = t_id
-            
-        schedule_log.append({
-            "TaskID": t_id,
-            "StationID": s_id + 1, # 1-based 适应物理站位习惯
-            "Team": str(team), # 记录班组信息 (内部 ID 0-based)
-            "Start": start_time,
-            "End": end_time,
-            "Duration": end_time - start_time # 计算出受效率影响的真实工时
-        })
-        
-    df = pd.DataFrame(schedule_log)
-    df = df.sort_values("Start")
-    
-    results_dir = PROJECT_ROOT / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    out_file = results_dir / "final_schedule.csv"
-    
-    df.to_csv(out_file, index=False)
-    print(f"Schedule saved to: {out_file}")
-    
-    return df
+        if action is None:
+            raise RuntimeError("模型未能产生有效动作，排程生成中止")
+        state, _, done, info = env.step(action)
+        if "error" in info:
+            raise RuntimeError(str(info["error"]))
+
+    rows = [
+        {
+            "TaskID": int(task_id),
+            "StationID": int(station_id) + 1,
+            "Team": str(list(team)),
+            "Start": float(start),
+            "End": float(end),
+            "Duration": float(end - start),
+        }
+        for task_id, station_id, team, start, end in env.assigned_tasks
+    ]
+    frame = pd.DataFrame(rows).sort_values(["Start", "TaskID"])
+    frame.to_csv(target, index=False)
+    print(f"排程已保存: {target}")
+    return frame
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="使用 checkpoint 生成确定性 APAL 排程")
+    add_common_config_arguments(parser)
+    parser.add_argument("--model-path", "--model_path", dest="model_path", required=True)
+    parser.add_argument("--output-path")
+    return parser
+
 
 if __name__ == "__main__":
-    generate_schedule()
+    parsed = build_parser().parse_args()
+    _, _, explicit = resolve_runtime_config(parsed, target=configs)
+    generate_schedule(
+        parsed.model_path,
+        explicit_fields=explicit,
+        output_path=parsed.output_path,
+    )

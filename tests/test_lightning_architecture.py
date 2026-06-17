@@ -81,6 +81,24 @@ def test_lightning_module_uses_manual_optimization_contract() -> None:
     assert module.last_eval_metrics == {"makespan": 1.0}
 
 
+def test_lightning_checkpoint_contains_apal_metadata() -> None:
+    from configs import Config
+
+    agent = _Agent()
+    service = _RolloutService()
+    service.config = Config()
+    module = APALLightningModule(agent, service, eval_freq=1)
+    checkpoint = {}
+
+    module.on_save_checkpoint(checkpoint)
+
+    assert checkpoint["apal_metadata"]["model_type"] == "HB-GAT-PN"
+    assert (
+        checkpoint["apal_metadata"]["model_spec"]["resource_graph_mode"]
+        == "skill_hub_bidirectional"
+    )
+
+
 def test_rollout_checkpoint_saves_latest_and_best(tmp_path) -> None:
     from train_lightning import RolloutCheckpoint
 

@@ -3,7 +3,11 @@ from torch_geometric.data import Batch
 import numpy as np
 from typing import Any
 from configs import configs
-from utils.resource_graph import apply_batched_resource_graph
+from utils.resource_graph import (
+    apply_batched_resource_graph,
+    build_worker_skill_edges,
+    worker_topology_key,
+)
 
 class GPUBatchGraphManager:
     """
@@ -11,22 +15,30 @@ class GPUBatchGraphManager:
     用于在 PPO 更新时，直接在 GPU 显存端批量覆写节点特征和动态边关系，
     从而彻底规避 CPU 端的 PyG DataLoader 拼接瓶颈和 CPU 图重建开销。
     """
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, config=None):
         self.device = device
+        self.config = config if config is not None else configs
         # 缓存 (dataset_idx, batch_size) 对应的 Batch 模板，防重复分配显存
         self.templates = {}
+        self.worker_skill_topologies = {}
 
     def retain_dataset(self, dataset_idx: int) -> int:
         """仅保留当前数据集的模板，避免窄区间轮换时显存逐轮累积。"""
         stale_keys = [key for key in self.templates if key[0] != dataset_idx]
         for key in stale_keys:
             del self.templates[key]
+        stale_topologies = [
+            key for key in self.worker_skill_topologies if key[0] != dataset_idx
+        ]
+        for key in stale_topologies:
+            del self.worker_skill_topologies[key]
         return len(stale_keys)
 
     def clear(self) -> int:
         """释放全部 GPU Batch 模板引用并返回清理数量。"""
         template_count = len(self.templates)
         self.templates.clear()
+        self.worker_skill_topologies.clear()
         return template_count
         
     def get_batch_template(self, env: Any, batch_size: int, dataset_idx: int):
@@ -35,8 +47,8 @@ class GPUBatchGraphManager:
         key = (
             dataset_idx,
             batch_size,
-            bool(getattr(configs, "use_skill_hub", False)),
-            bool(getattr(configs, "skill_hub_bidirectional", False)),
+            bool(getattr(self.config, "use_skill_hub", False)),
+            bool(getattr(self.config, "skill_hub_bidirectional", False)),
         )
         if key not in self.templates:
             ctx = env.dataset_pool[dataset_idx]
@@ -63,8 +75,8 @@ class GPUBatchGraphManager:
             'worker': num_workers,
             'station': num_stations,
         }
-        if bool(getattr(configs, "use_skill_hub", False)):
-            specs['skill'] = int(getattr(configs, "num_skill_types", 10))
+        if bool(getattr(self.config, "use_skill_hub", False)):
+            specs['skill'] = int(getattr(self.config, "num_skill_types", 10))
         for node_type, nodes_per_graph in specs.items():
             storage = batch[node_type]
             expected_nodes = batch_size * nodes_per_graph
@@ -151,7 +163,7 @@ class GPUBatchGraphManager:
         ts_src, ts_dst = [], []
         tw_src, tw_dst = [], []
         
-        max_slots = getattr(configs, 'max_slots_per_station', 3)
+        max_slots = getattr(self.config, 'max_slots_per_station', 3)
         
         for b_i, snap in enumerate(snapshots):
             task_offset = b_i * num_tasks
@@ -248,10 +260,10 @@ class GPUBatchGraphManager:
         batch_template['worker'].x[torch.arange(batch_size * num_workers, device=t_device), 13 + flat_locks_clamped] = 1.0
         
         # GPU 疲劳系数自适应计算
-        fatigue_recovery_ratio = getattr(configs, 'fatigue_recovery_ratio', 0.5)
-        fatigue_threshold = getattr(configs, 'fatigue_threshold_hours', 4.0)
-        fatigue_decay = getattr(configs, 'fatigue_decay_slope', 0.05)
-        fatigue_floor = getattr(configs, 'fatigue_efficiency_floor', 0.60)
+        fatigue_recovery_ratio = getattr(self.config, 'fatigue_recovery_ratio', 0.5)
+        fatigue_threshold = getattr(self.config, 'fatigue_threshold_hours', 4.0)
+        fatigue_decay = getattr(self.config, 'fatigue_decay_slope', 0.05)
+        fatigue_floor = getattr(self.config, 'fatigue_efficiency_floor', 0.60)
         
         idle_time = torch.clamp(flat_current_times_w - flat_last, min=0.0)
         has_last = (flat_last > 0) & (flat_current_times_w > flat_last)
@@ -315,6 +327,27 @@ class GPUBatchGraphManager:
             batch_template['task', 'done_by', 'worker'].edge_index = torch.empty((2, 0), dtype=torch.long, device=t_device)
             
         # ③ Can_do 关系边覆写
+        worker_skill_edges = None
+        task_skill_edges = None
+        if bool(getattr(self.config, "use_skill_hub", False)):
+            task_skill_edges = ctx["task_skill_edge_index"]
+            worker_skill_edges = []
+            for snap in snapshots:
+                base_worker_x = torch.as_tensor(snap["base_worker_x"])
+                topology_key = snap.get("worker_topology_key") or worker_topology_key(
+                    base_worker_x,
+                    int(self.config.num_skill_types),
+                )
+                cache_key = (int(dataset_idx), topology_key)
+                edges = self.worker_skill_topologies.get(cache_key)
+                if edges is None:
+                    edges = build_worker_skill_edges(
+                        base_worker_x,
+                        int(self.config.num_skill_types),
+                    )
+                    self.worker_skill_topologies[cache_key] = edges
+                worker_skill_edges.append(edges)
+
         apply_batched_resource_graph(
             batch_template,
             batch_template['task'].x,
@@ -322,7 +355,9 @@ class GPUBatchGraphManager:
             batch_size=batch_size,
             num_tasks=num_tasks,
             num_workers=num_workers,
-            config=configs,
+            config=self.config,
+            task_skill_edges=task_skill_edges,
+            worker_skill_edges=worker_skill_edges,
         )
         batch_template = self._ensure_batch_vectors(
             batch_template,

@@ -227,6 +227,7 @@ class Config:
     # 报告生成 (Report Generation)
     generate_report_every_episodes: int = 100
     report_dir: str = "results/reports"
+    result_dir: str = "results"
     
     def update_from_dict(self, kwargs: dict):
         """支持通过字典动态更新配置"""

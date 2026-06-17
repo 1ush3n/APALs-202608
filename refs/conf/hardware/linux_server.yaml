@@ -1,6 +1,0 @@
-hardware:
-  num_envs_linux: 8
-  vector_env_start_method: auto
-  log_dir: /root/tf-logs
-  report_dir: results/reports
-  generate_report_every_episodes: 100

@@ -9,11 +9,11 @@ from pathlib import Path
 import pandas as pd
 import torch
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from configs import configs, load_config_files
+from configs import configs
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
@@ -24,6 +24,12 @@ from train import (
     load_warm_start_weights_with_input_expansion,
     resolve_workspace_path,
 )
+from runtime.checkpoints import (
+    apply_checkpoint_model_spec,
+    load_checkpoint,
+    load_policy_weights,
+)
+from runtime.configuration import add_common_config_arguments, resolve_runtime_config
 
 
 def _load_policy_weights(model: torch.nn.Module, model_path: Path, device: torch.device) -> dict[str, int | str]:
@@ -32,10 +38,14 @@ def _load_policy_weights(model: torch.nn.Module, model_path: Path, device: torch
     if not model_path.exists():
         raise FileNotFoundError(f"找不到模型权重文件: {model_path}")
     try:
-        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-        state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-        model.load_state_dict(state_dict, strict=True)
-        return {"mode": "exact", "loaded_exact": len(state_dict), "loaded_expanded": 0, "skipped": 0}
+        checkpoint = load_checkpoint(model_path, map_location=device)
+        load_policy_weights(model, checkpoint, strict=True)
+        return {
+            "mode": "exact",
+            "loaded_exact": len(checkpoint.state_dict),
+            "loaded_expanded": 0,
+            "skipped": 0,
+        }
     except RuntimeError:
         stats = load_warm_start_weights_with_input_expansion(model, model_path, device)
         return {"mode": "expanded", **stats}
@@ -68,6 +78,7 @@ def evaluate_saved_reschedule_model(
         device,
         batch_size=configs.batch_size,
         total_timesteps=1,
+        config=configs,
     )
 
     start_time = time.time()
@@ -112,23 +123,30 @@ def evaluate_saved_reschedule_model(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="评估已保存的 APAL PPO 重调度模型")
-    parser.add_argument("--config", type=str, default="conf/experiment/reschedule_task_delay.yaml")
-    parser.add_argument("--model_path", type=str, default="checkpoints/reschedule_task_delay/bestmodel/best_model.pth")
+    add_common_config_arguments(parser)
+    parser.set_defaults(config=["conf/experiment/reschedule_task_delay.yaml"])
+    parser.add_argument("--model-path", "--model_path", dest="model_path", default="checkpoints/reschedule_task_delay/bestmodel/best_model.pth")
     parser.add_argument("--num_runs", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--output_dir", type=str, default="results/reschedule_ppo_eval")
     args = parser.parse_args()
+    output_dir = args.output_dir or "results/reschedule_ppo_eval"
 
-    config_path = resolve_workspace_path(args.config)
-    load_config_files([str(config_path)])
+    _, _, explicit_fields = resolve_runtime_config(args, target=configs)
+    model_path = resolve_workspace_path(args.model_path)
+    checkpoint = load_checkpoint(model_path)
+    apply_checkpoint_model_spec(
+        configs,
+        checkpoint.model_spec,
+        explicit_fields=explicit_fields,
+    )
     summary = evaluate_saved_reschedule_model(
-        model_path=resolve_workspace_path(args.model_path),
+        model_path=model_path,
         num_runs=args.num_runs,
         temperature=float(args.temperature),
-        output_dir=resolve_workspace_path(args.output_dir),
+        output_dir=resolve_workspace_path(output_dir),
     )
     print(json.dumps({key: value for key, value in summary.items() if key != "rows"}, ensure_ascii=False, indent=2))
-    print(f"PPO 重调度逐场景明细已保存到: {resolve_workspace_path(args.output_dir) / 'reschedule_ppo_eval.csv'}")
+    print(f"PPO 重调度逐场景明细已保存到: {resolve_workspace_path(output_dir) / 'reschedule_ppo_eval.csv'}")
 
 
 if __name__ == "__main__":

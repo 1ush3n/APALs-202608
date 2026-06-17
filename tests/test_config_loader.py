@@ -18,6 +18,8 @@ from configs import (
     load_training_config,
     resolve_platform_hardware_config,
 )
+from args_parser import get_base_parser
+from runtime.configuration import parse_set_overrides, resolve_runtime_config
 from train import PROJECT_ROOT, resolve_checkpoint_paths, resolve_tensorboard_log_root, write_best_model_meta
 
 
@@ -145,3 +147,33 @@ def test_experiments_do_not_embed_hardware_profiles() -> None:
 def test_unsupported_platform_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="不支持的训练平台"):
         resolve_platform_hardware_config(system_name="Darwin")
+
+
+def test_cli_overrides_yaml_and_platform_profile() -> None:
+    parser = get_base_parser()
+    args = parser.parse_args([
+        "--config", str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml"),
+        "--batch-size", "12",
+        "--num-envs", "3",
+        "--no-use-skill-hub",
+        "--set", "eval_scenarios=[standard,duration_noise]",
+    ])
+    cfg = Config()
+    _, _, explicit = resolve_runtime_config(args, target=cfg, system_name="Windows")
+
+    assert cfg.batch_size == 12
+    assert cfg.num_envs == 3
+    assert cfg.use_skill_hub is False
+    assert cfg.skill_hub_bidirectional is False
+    assert cfg.eval_scenarios == ["standard", "duration_noise"]
+    assert {"batch_size", "num_envs", "use_skill_hub", "eval_scenarios"} <= explicit
+
+
+def test_set_rejects_invalid_syntax_and_unknown_fields() -> None:
+    with pytest.raises(ValueError, match="key=value"):
+        parse_set_overrides(["batch_size"])
+
+    parser = get_base_parser()
+    args = parser.parse_args(["--set", "not_a_config_field=1"])
+    with pytest.raises(KeyError, match="未知配置字段"):
+        resolve_runtime_config(args, target=Config(), system_name="Windows")

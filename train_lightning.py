@@ -28,6 +28,8 @@ from train import (
 from training.lightning_module import APALDataModule, APALLightningModule
 from training.rollout_service import APALRolloutService
 from utils.vector_env import EnvCreator, VectorEnv
+from runtime.artifacts import write_run_manifest
+from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -90,6 +92,25 @@ def run(args, *, config_initialized: bool = False) -> None:
         initialize_training_config(args)
     set_seed(int(configs.seed))
 
+    checkpoint_paths = resolve_checkpoint_paths(configs)
+    checkpoint_dir = checkpoint_paths["model_dir"] / "lightning"
+    if args.resume:
+        resume_path = checkpoint_dir / "last.ckpt"
+        if not resume_path.exists():
+            raise FileNotFoundError(f"找不到可恢复的 Lightning checkpoint: {resume_path}")
+        resume_checkpoint = load_checkpoint(resume_path)
+        apply_checkpoint_model_spec(
+            configs,
+            resume_checkpoint.model_spec,
+            explicit_fields=getattr(args, "explicit_config_fields", set()),
+        )
+    write_run_manifest(
+        checkpoint_dir,
+        configs,
+        command="train_lightning",
+        extra={"resume": bool(args.resume)},
+    )
+
     num_envs = int(configs.num_envs)
     start_method = str(configs.vector_env_start_method)
     if start_method == "auto":
@@ -127,6 +148,7 @@ def run(args, *, config_initialized: bool = False) -> None:
         device=device,
         batch_size=int(configs.batch_size),
         total_timesteps=total_updates,
+        config=configs,
     )
     service = APALRolloutService(
         agent=agent,
@@ -137,8 +159,6 @@ def run(args, *, config_initialized: bool = False) -> None:
     )
     module = APALLightningModule(agent, service, eval_freq=int(configs.eval_freq))
     data_module = APALDataModule(service, max_episodes=total_updates)
-    checkpoint_paths = resolve_checkpoint_paths(configs)
-    checkpoint_dir = checkpoint_paths["model_dir"] / "lightning"
     callbacks = [RolloutCheckpoint(checkpoint_dir)]
     log_root = resolve_tensorboard_log_root(configs)
     tensorboard_logger = TensorBoardLogger(
@@ -158,7 +178,11 @@ def run(args, *, config_initialized: bool = False) -> None:
         log_every_n_steps=1,
         enable_model_summary=True,
     )
-    trainer.fit(module, datamodule=data_module, ckpt_path="last" if args.resume else None)
+    trainer.fit(
+        module,
+        datamodule=data_module,
+        ckpt_path=str(checkpoint_dir / "last.ckpt") if args.resume else None,
+    )
 
 
 if __name__ == "__main__":
