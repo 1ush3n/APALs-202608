@@ -118,7 +118,7 @@ def test_rollout_checkpoint_saves_latest_and_best(tmp_path) -> None:
         str(tmp_path / "best" / "best.ckpt"),
         str(tmp_path / "last.ckpt"),
     ]
-    assert callback.best_makespan == 10.0
+    assert callback.best_score == 10.0
 
     saved_paths.clear()
     module.last_completed_episode = 3
@@ -131,6 +131,30 @@ def test_rollout_checkpoint_saves_latest_and_best(tmp_path) -> None:
     module.last_eval_metrics = {"makespan": 12.0}
     callback.on_train_batch_end(trainer, module, None, None, 2)
     assert saved_paths == [str(tmp_path / "last.ckpt")]
+
+    saved_paths.clear()
+    module.last_completed_episode = 5
+    module.last_eval_metrics = {
+        "makespan": 8.0,
+        "multi_benchmark_selection_score": float("inf"),
+        "multi_benchmark_eligible": 0.0,
+    }
+    callback.on_train_batch_end(trainer, module, None, None, 3)
+    assert saved_paths == [str(tmp_path / "last.ckpt")]
+
+    saved_paths.clear()
+    module.last_completed_episode = 6
+    module.last_eval_metrics = {
+        "makespan": 8.0,
+        "multi_benchmark_selection_score": 0.9,
+        "multi_benchmark_eligible": 1.0,
+    }
+    callback.on_train_batch_end(trainer, module, None, None, 4)
+    assert saved_paths == [
+        str(tmp_path / "best" / "best.ckpt"),
+        str(tmp_path / "last.ckpt"),
+    ]
+    assert callback.best_score == 0.9
 
 
 def test_rollout_metrics_expose_expected_log_keys() -> None:

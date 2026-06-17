@@ -17,10 +17,10 @@ def test_scale_profile_mapping() -> None:
     assert scale_profile_for_task_count(1000).name == "680"
     assert scale_profile_for_task_count(1001).name == "2338"
     assert scale_profile_for_task_count(2339).name == "3182"
-    assert scale_profile_for_task_count(200).batch_size == 256
-    assert scale_profile_for_task_count(1000).batch_size == 128
-    assert scale_profile_for_task_count(2338).batch_size == 64
-    assert scale_profile_for_task_count(3182).batch_size == 32
+    assert scale_profile_for_task_count(200).batch_size == 512
+    assert scale_profile_for_task_count(1000).batch_size == 256
+    assert scale_profile_for_task_count(2338).batch_size == 128
+    assert scale_profile_for_task_count(3182).batch_size == 64
 
 
 def test_scheduled_updates_are_sublinear_and_monotonic() -> None:

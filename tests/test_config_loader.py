@@ -134,7 +134,7 @@ def test_training_config_selects_linux_profile() -> None:
     assert cfg.num_envs == 16
     assert cfg.vector_env_start_method == "forkserver"
     assert cfg.ppo_batch_size_cap == 0
-    assert cfg.batch_size == 256
+    assert cfg.batch_size == 512
     assert Path(paths[-1]).name == "linux_server.yaml"
 
 

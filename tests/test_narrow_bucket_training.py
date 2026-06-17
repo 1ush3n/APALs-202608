@@ -15,10 +15,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize(
     ("name", "data_file", "pool_dir", "workers", "batch_size"),
     [
-        ("283", "data/283.csv", "data/generated/initial_283", 80, 256),
-        ("680", "data/680.csv", "data/generated/initial_680", 100, 128),
-        ("2338", "data/2338.csv", "data/generated/initial_2338", 140, 64),
-        ("3182", "data/3182.csv", "data/generated/initial_3182", 160, 32),
+        ("283", "data/283.csv", "data/generated/initial_283", 80, 512),
+        ("680", "data/680.csv", "data/generated/initial_680", 100, 256),
+        ("2338", "data/2338.csv", "data/generated/initial_2338", 140, 128),
+        ("3182", "data/3182.csv", "data/generated/initial_3182", 160, 64),
     ],
 )
 def test_bucket_experiment_config(

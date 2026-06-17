@@ -7,7 +7,15 @@ import numpy as np
 import torch
 
 from configs import Config
-from train import Memory, evaluate_model, select_actions_batch_compat
+from environment import AirLineEnv_Graph
+from runtime.multiscale import BenchmarkScore, parse_reference_makespans, score_multi_benchmark
+from train import (
+    Memory,
+    evaluate_model,
+    refresh_env_observation,
+    resolve_workspace_path,
+    select_actions_batch_compat,
+)
 from training.heartbeat import RolloutHeartbeat
 from training.lightning_module import RolloutMetrics, RolloutUpdate
 
@@ -273,6 +281,9 @@ class APALRolloutService:
         )
 
     def evaluate(self, episode: int) -> dict[str, float]:
+        if bool(getattr(self.config, "enable_multi_benchmark_eval", False)):
+            return self.evaluate_multi_benchmark(episode)
+
         was_training = bool(self.agent.policy.training)
         config_backups = {
             name: getattr(self.config, name)
@@ -313,6 +324,133 @@ class APALRolloutService:
             f"W={metrics['worker_utilization'] * 100:.1f}% "
             f"S={metrics['station_utilization'] * 100:.1f}% "
             f"T={metrics['duration_sec']:.2f}s",
+            flush=True,
+        )
+        return metrics
+
+    def evaluate_multi_benchmark(self, episode: int) -> dict[str, float]:
+        refs = parse_reference_makespans(
+            getattr(self.config, "multi_benchmark_reference_makespans", {})
+        )
+        paths = list(getattr(self.config, "multi_benchmark_data_paths", []))
+        if not paths:
+            raise ValueError("multi_benchmark_data_paths 不能为空")
+
+        was_training = bool(self.agent.policy.training)
+        config_backups = {
+            name: getattr(self.config, name)
+            for name in (
+                "enable_dynamic_events",
+                "enable_station_breakdown",
+                "enable_material_delay",
+                "enable_online_duration_perturb",
+                "enable_worker_fatigue",
+                "randomize_durations",
+            )
+        }
+        for name in config_backups:
+            setattr(self.config, name, False)
+
+        rows: list[BenchmarkScore] = []
+        print(f"[Eval] ep={episode} start multi_benchmark={len(paths)}", flush=True)
+        try:
+            self.agent.policy.eval()
+            for raw_path in paths:
+                data_path = resolve_workspace_path(raw_path)
+                benchmark_name = data_path.stem
+                if benchmark_name not in refs:
+                    raise ValueError(f"缺少基准 {benchmark_name} 的 reference makespan")
+
+                env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)
+                state = env.reset(
+                    randomize_duration=False,
+                    randomize_workers=False,
+                    seed=2026,
+                )
+                done = False
+                invalid_step_count = 0
+                start_time = time.time()
+
+                for _ in range(int(env.num_tasks) * 3):
+                    if done:
+                        break
+                    task_mask, station_mask, worker_mask = env.get_masks()
+                    if task_mask.all():
+                        if env.try_wait_for_resources():
+                            state = refresh_env_observation(env)
+                            continue
+                        invalid_step_count += 1
+                        break
+
+                    action_ret = self.agent.select_action(
+                        state.to(self.device),
+                        mask_task=task_mask.to(self.device),
+                        mask_station_matrix=station_mask.to(self.device),
+                        mask_worker=worker_mask.to(self.device),
+                        deterministic=True,
+                        temperature=0.0,
+                        is_eval=True,
+                    )
+                    if action_ret[0] is None:
+                        invalid_step_count += 1
+                        break
+                    action, _, _, _, is_invalid = action_ret
+                    if is_invalid:
+                        invalid_step_count += 1
+                        break
+                    state, _reward, done, info = env.step(action)
+                    if info.get("invalid_action", False):
+                        invalid_step_count += 1
+                        break
+
+                complete = len(env.assigned_tasks) == env.num_tasks
+                if complete and invalid_step_count == 0:
+                    makespan = float(np.max(env.station_wall_clock))
+                else:
+                    makespan = float(env.ideal_makespan * 3.0)
+                reference = float(refs[benchmark_name])
+                row = BenchmarkScore(
+                    benchmark_name=benchmark_name,
+                    data_path=str(data_path),
+                    makespan=makespan,
+                    reference_makespan=reference,
+                    normalized_score=float(makespan / reference),
+                    complete=bool(complete),
+                    invalid_step_count=int(invalid_step_count),
+                    inference_time=float(time.time() - start_time),
+                )
+                rows.append(row)
+                print(
+                    f"[Eval][MB] {benchmark_name} Mk={row.makespan:.2f} "
+                    f"Ref={row.reference_makespan:.2f} "
+                    f"Norm={row.normalized_score:.4f} "
+                    f"Complete={int(row.complete)} Invalid={row.invalid_step_count}",
+                    flush=True,
+                )
+        finally:
+            for name, value in config_backups.items():
+                setattr(self.config, name, value)
+            self.agent.policy.train(was_training)
+
+        result = score_multi_benchmark(rows)
+        primary = result.rows[0]
+        metrics: dict[str, float] = {
+            "makespan": float(primary.makespan),
+            "multi_benchmark_composite_score": float(result.composite_score),
+            "multi_benchmark_selection_score": float(result.selection_score),
+            "multi_benchmark_eligible": float(result.eligible),
+        }
+        for row in result.rows:
+            prefix = f"multi_benchmark_{row.benchmark_name}"
+            metrics[f"{prefix}_makespan"] = float(row.makespan)
+            metrics[f"{prefix}_normalized_score"] = float(row.normalized_score)
+            metrics[f"{prefix}_complete"] = float(row.complete)
+            metrics[f"{prefix}_invalid_step_count"] = float(row.invalid_step_count)
+            metrics[f"{prefix}_inference_time"] = float(row.inference_time)
+
+        print(
+            f"[Eval][MB] ep={episode} Score={result.composite_score:.6f} "
+            f"Eligible={int(result.eligible)} Selection={result.selection_score:.6f}",
             flush=True,
         )
         return metrics

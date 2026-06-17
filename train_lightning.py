@@ -5,6 +5,7 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import math
+import platform
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -41,17 +42,19 @@ class RolloutCheckpoint(Callback):
     def __init__(self, checkpoint_dir: Path) -> None:
         super().__init__()
         self.checkpoint_dir = Path(checkpoint_dir)
-        self.best_makespan = float("inf")
+        self.best_score = float("inf")
 
     @property
     def state_key(self) -> str:
         return "RolloutCheckpoint"
 
     def state_dict(self) -> dict[str, float]:
-        return {"best_makespan": float(self.best_makespan)}
+        return {"best_score": float(self.best_score)}
 
     def load_state_dict(self, state_dict: dict[str, float]) -> None:
-        self.best_makespan = float(state_dict.get("best_makespan", float("inf")))
+        self.best_score = float(
+            state_dict.get("best_score", state_dict.get("best_makespan", float("inf")))
+        )
 
     def on_train_batch_end(
         self,
@@ -67,15 +70,23 @@ class RolloutCheckpoint(Callback):
 
         if eval_metrics is not None:
             makespan = float(eval_metrics["makespan"])
-            if makespan < self.best_makespan:
-                self.best_makespan = makespan
+            is_multi_benchmark = "multi_benchmark_selection_score" in eval_metrics
+            current_score = float(
+                eval_metrics.get("multi_benchmark_selection_score", makespan)
+            )
+            eligible = bool(
+                eval_metrics.get("multi_benchmark_eligible", 1.0) >= 1.0 - 1e-9
+            )
+            if eligible and current_score < self.best_score:
+                self.best_score = current_score
                 best_dir = self.checkpoint_dir / "best"
                 best_dir.mkdir(parents=True, exist_ok=True)
                 best_path = best_dir / "best.ckpt"
                 trainer.save_checkpoint(str(best_path))
                 print(
                     f"[Checkpoint] ep={episode} 保存最佳模型: "
-                    f"Mk={makespan:.2f} path={best_path}",
+                    f"metric={'multi_benchmark_normalized_makespan' if is_multi_benchmark else 'eval_makespan'} "
+                    f"score={current_score:.6f} Mk={makespan:.2f} path={best_path}",
                     flush=True,
                 )
 
