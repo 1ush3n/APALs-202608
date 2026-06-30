@@ -8,7 +8,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from evaluate_model import build_parser, main
+from runtime.configuration import parse_runtime_args
 
 
 if __name__ == "__main__":
-    main(build_parser().parse_args())
+    main(parse_runtime_args(build_parser()))

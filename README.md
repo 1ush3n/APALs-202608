@@ -55,7 +55,13 @@ python train.py --config conf/experiment/scale_400_800_schedule.yaml --no-use-sk
 python train.py --config conf/experiment/scale_400_800_schedule.yaml --set lr=0.00005 --set eval_scenarios=[standard]
 ```
 
-配置优先级为：代码默认值 `<` 实验 YAML `<` 平台硬件 YAML `<` 显式命令行参数 `<` `--set`。
+也兼容 Hydra 风格的 `key=value` 覆盖，分组名前缀会落到当前扁平 `Config` 字段：
+
+```powershell
+python train.py --config conf/experiment/initial_schedule_283.yaml train.batch_size=24 parallel.num_envs=4 artifacts.run_id=debug_260630-153000
+```
+
+配置优先级为：代码默认值 `<` 实验 YAML `<` 平台硬件 YAML `<` 显式命令行参数 `<` `--set` / Hydra 风格 `key=value`。
 
 ### 命令行配置参数
 
@@ -153,11 +159,26 @@ PowerShell 列表示例：
 --set "eval_scenarios=[standard]"
 ```
 
+### 使用 Hydra 风格 `key=value` 覆盖
+
+训练、评估和排程生成入口同时支持直接追加 `key=value`：
+
+```bash
+python train.py \
+  --trainer lightning \
+  --config conf/experiment/initial_schedule_283.yaml \
+  train.batch_size=24 \
+  parallel.num_envs=8 \
+  artifacts.runs_root=runs
+```
+
+当前实现仍落到扁平 `Config` 字段；`train.batch_size=24`、`batch_size=24` 和 `--set batch_size=24` 等价。未知字段会直接报错，避免拼写错误被静默忽略。
+
 常用 PPO 与性能配置示例：
 
 ```bash
 python train.py \
-  --trainer legacy \
+  --trainer lightning \
   --config conf/experiment/reschedule_task_delay.yaml \
   --batch-size 16 \
   --num-envs 16 \
@@ -201,7 +222,7 @@ python train.py --trainer legacy --config conf/experiment/initial_schedule_283.y
 
 ## 重调度训练
 
-当前重调度训练必须使用 `legacy` 入口，因为 baseline 自动生成、固定重调度验证场景和初始调度模型 warm-start 尚未接入 Lightning 入口。
+重调度训练默认使用 `lightning` 入口。Lightning 会在启动时检查 baseline 排程、固定重调度验证场景和 warm-start 初始模型；legacy 入口仅保留给历史回归对照。
 
 ### 1. 准备初始调度模型
 
@@ -278,7 +299,7 @@ results/reschedule_eval_scenarios_680.csv
 
 ```powershell
 python train.py `
-  --trainer legacy `
+  --trainer lightning `
   --config conf/experiment/reschedule_task_delay.yaml `
   --set reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt `
   --set reschedule_baseline_schedule_path=results/final_schedule.csv
@@ -288,7 +309,7 @@ Linux 写法：
 
 ```bash
 python train.py \
-  --trainer legacy \
+  --trainer lightning \
   --config conf/experiment/reschedule_task_delay.yaml \
   --set reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt \
   --set reschedule_baseline_schedule_path=results/final_schedule.csv
@@ -297,9 +318,9 @@ python train.py \
 启动日志应包含：
 
 ```text
-重调度 baseline: .../results/final_schedule.csv
-固定重调度验证场景: .../results/reschedule_eval_scenarios.csv
-重调度 warm-start: .../checkpoints/initial_schedule/best_680.ckpt
+[Reschedule] baseline=.../results/final_schedule.csv
+[Reschedule] eval_scenarios=.../results/reschedule_eval_scenarios.csv
+[Eval][Resched] ep=1 ...
 ```
 
 如果 `results/reschedule_eval_scenarios.csv` 不存在，程序会根据 baseline 和配置的固定随机种子自动生成。训练期间每个 episode 都会在这些固定场景上验证，最优模型按重调度综合得分选择，并要求所有验证场景满足保存资格。
@@ -308,7 +329,7 @@ python train.py \
 
 ```bash
 python train.py \
-  --trainer legacy \
+  --trainer lightning \
   --config conf/experiment/reschedule_task_delay.yaml \
   --data-path data/680.csv \
   --train-data-path data/680.csv \
@@ -327,20 +348,23 @@ python train.py \
 
 | 输出 | 路径 |
 |---|---|
-| 最新训练断点 | `checkpoints/reschedule_task_delay/latest_checkpoint.pth` |
-| 最优重调度模型 | `checkpoints/reschedule_task_delay/bestmodel/best_model.pth` |
-| 最优模型元数据 | `checkpoints/reschedule_task_delay/bestmodel/best_model_meta.json` |
+| 最新 Lightning 断点 | `runs/reschedule_task_delay/<run_id>/checkpoints/last.ckpt` |
+| 最优重调度模型 | `runs/reschedule_task_delay/<run_id>/checkpoints/best.ckpt` |
+| 最终配置与运行清单 | `runs/reschedule_task_delay/<run_id>/configs/` |
 | 固定验证场景 | `results/reschedule_eval_scenarios.csv` |
-| TensorBoard 日志 | `/root/tf-logs/reschedule_task_delay_ALB_PPO_<时间戳>/` |
+| TensorBoard 日志 | `runs/reschedule_task_delay/<run_id>/logs/tensorboard/` |
+
+如果显式使用 `artifact_layout=legacy` 或 `--trainer legacy`，才会写入旧的 `checkpoints/reschedule_task_delay/` 与 `/root/tf-logs/` 结构。
 
 断点续训：
 
 ```bash
 python train.py \
-  --trainer legacy \
+  --trainer lightning \
   --config conf/experiment/reschedule_task_delay.yaml \
   --set reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt \
   --set reschedule_baseline_schedule_path=results/final_schedule.csv \
+  --run-id reschedule_task_delay_260630-153000 \
   --resume
 ```
 
@@ -349,7 +373,7 @@ python train.py \
 ```bash
 python evaluate_reschedule_model.py \
   --config conf/experiment/reschedule_task_delay.yaml \
-  --model-path checkpoints/reschedule_task_delay/bestmodel/best_model.pth
+  --model-path runs/reschedule_task_delay/<run_id>/checkpoints/best.ckpt
 ```
 
 评估结果保存到：
@@ -376,7 +400,9 @@ Lightning 每个 episode 输出一行精简 rollout 摘要：
 
 自动验证默认每个 episode 执行一次，只运行 Standard 场景，并打印 Makespan、Balance、Reward、人员/站位利用率及耗时。详细指标同时写入 Lightning/TensorBoard。
 
-Lightning 每次 PPO 更新后覆盖保存最新 checkpoint；执行自动验证且 Makespan 改善时，覆盖保存最佳 checkpoint。终端会打印对应的 `[Checkpoint]` 记录。
+重调度模式会改为固定重调度场景验证，打印 `[Eval][Resched]`，并按 `reschedule_selection_score` 保存 best；只有所有固定验证场景满足资格时才允许覆盖 best。
+
+Lightning 每次 PPO 更新后覆盖保存最新 checkpoint；执行自动验证且选择指标改善时，覆盖保存最佳 checkpoint。终端会打印对应的 `[Checkpoint]` 记录。
 
 新运行默认写入统一 `runs` 目录。若使用 `artifact_layout=legacy`，或 `--resume` 但未指定 `--run-id`，会回到旧 `checkpoints/results/tf-logs` 兼容路径。
 
@@ -419,6 +445,14 @@ python train.py --trainer lightning --config conf/experiment/initial_schedule_68
 | 运行清单 | `runs/<实验名>/<run_id>/configs/run_manifest.json` | run_id、命令、Git commit 和 checkpoint 元数据 |
 | 评估结果 | `runs/<实验名>/<run_id>/eval/` | `summary.json`、`schedule.csv`、`gantt.png` 等 |
 | 附加产物 | `runs/<实验名>/<run_id>/artifacts/` | reports、traces 和后续论文实验中间文件 |
+
+生成所有运行的文件索引：
+
+```bash
+python scripts/index_runs.py --runs-root runs
+```
+
+该命令会生成 `runs/index.csv` 和 `runs/index.json`，汇总每个 run 的 `run_id`、配置来源、checkpoint、数据集、评估 summary 和核心指标。若某个 run 尚未执行手动评估，索引仍会保留运行清单，评估字段为空。
 
 ### Legacy 兼容路径
 

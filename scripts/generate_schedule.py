@@ -23,7 +23,7 @@ from runtime.artifacts import (
     write_run_manifest,
 )
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint, load_policy_weights
-from runtime.configuration import add_common_config_arguments, resolve_runtime_config
+from runtime.configuration import add_common_config_arguments, parse_runtime_args, resolve_runtime_config
 
 
 def generate_schedule(
@@ -103,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
-    parsed = build_parser().parse_args()
+    parsed = parse_runtime_args(build_parser())
     _, _, explicit = resolve_runtime_config(parsed, target=configs)
     generate_schedule(
         parsed.model_path,

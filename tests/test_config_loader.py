@@ -19,7 +19,7 @@ from configs import (
     resolve_platform_hardware_config,
 )
 from args_parser import get_base_parser
-from runtime.configuration import parse_set_overrides, resolve_runtime_config
+from runtime.configuration import parse_runtime_args, parse_set_overrides, resolve_runtime_config
 from runtime.artifacts import build_run_id, checkpoint_paths as artifact_checkpoint_paths, run_context
 from train import PROJECT_ROOT, resolve_checkpoint_paths, resolve_tensorboard_log_root, write_best_model_meta
 
@@ -219,6 +219,33 @@ def test_cli_overrides_yaml_and_platform_profile() -> None:
     assert cfg.run_id == "manual_260630-153000"
     assert cfg.eval_scenarios == ["standard", "duration_noise"]
     assert {"batch_size", "num_envs", "use_skill_hub", "run_id", "eval_scenarios"} <= explicit
+
+
+def test_hydra_style_overrides_are_compatible_with_flat_config() -> None:
+    parser = get_base_parser()
+    args = parse_runtime_args(parser, [
+        "--config", str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml"),
+        "train.batch_size=24",
+        "parallel.num_envs=5",
+        "artifacts.runs_root=tmp_runs",
+        "experiment.experiment_name=hydra_compat",
+    ])
+    cfg = Config()
+    _, _, explicit = resolve_runtime_config(args, target=cfg, system_name="Windows")
+
+    assert cfg.batch_size == 24
+    assert cfg.num_envs == 5
+    assert cfg.runs_root == "tmp_runs"
+    assert cfg.experiment_name == "hydra_compat"
+    assert {"batch_size", "num_envs", "runs_root", "experiment_name"} <= explicit
+
+
+def test_hydra_style_override_rejects_unknown_fields() -> None:
+    parser = get_base_parser()
+    args = parse_runtime_args(parser, ["train.no_such_field=1"])
+
+    with pytest.raises(KeyError, match="未知配置字段"):
+        resolve_runtime_config(args, target=Config(), system_name="Windows")
 
 
 def test_set_rejects_invalid_syntax_and_unknown_fields() -> None:

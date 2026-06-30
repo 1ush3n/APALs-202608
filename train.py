@@ -36,7 +36,7 @@ from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
 from configs import configs, load_training_config
-from runtime.configuration import resolve_runtime_config
+from runtime.configuration import parse_runtime_args, resolve_runtime_config
 from runtime.artifacts import (
     checkpoint_paths as resolve_artifact_checkpoint_paths,
     run_context as create_run_context,
@@ -2117,7 +2117,7 @@ if __name__ == "__main__":
         
     from args_parser import get_base_parser
     parser = get_base_parser()
-    args = parser.parse_args()
+    args = parse_runtime_args(parser)
     
     # 动态写入 configs 对象，由于各处都会 import configs，可实现全局透传
     # 先保持旧版 argparse 默认值行为，再加载 YAML，最后只让显式命令行参数覆盖 YAML。

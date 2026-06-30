@@ -34,7 +34,7 @@ from runtime.checkpoints import (
     load_checkpoint,
     load_policy_weights,
 )
-from runtime.configuration import add_common_config_arguments, resolve_runtime_config
+from runtime.configuration import add_common_config_arguments, parse_runtime_args, resolve_runtime_config
 from train import evaluate_model as run_evaluation
 from utils.visualization import plot_gantt
 
@@ -154,4 +154,4 @@ def main(args: argparse.Namespace) -> dict[str, object]:
 
 
 if __name__ == "__main__":
-    main(build_parser().parse_args())
+    main(parse_runtime_args(build_parser()))

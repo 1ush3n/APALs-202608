@@ -157,6 +157,43 @@ def test_rollout_checkpoint_saves_latest_and_best(tmp_path) -> None:
     assert callback.best_score == 0.9
 
 
+def test_rollout_checkpoint_uses_reschedule_selection_score(tmp_path) -> None:
+    from train_lightning import RolloutCheckpoint
+
+    saved_paths = []
+    trainer = SimpleNamespace(save_checkpoint=lambda path: saved_paths.append(path))
+    module = SimpleNamespace(
+        last_completed_episode=1,
+        last_eval_metrics={
+            "makespan": 100.0,
+            "reschedule_composite_score": 0.8,
+            "reschedule_selection_score": 0.8,
+            "reschedule_eligible_rate": 0.0,
+        },
+    )
+    callback = RolloutCheckpoint(tmp_path)
+
+    callback.on_train_batch_end(trainer, module, None, None, 0)
+    assert saved_paths == [str(tmp_path / "last.ckpt")]
+    assert callback.best_score == float("inf")
+
+    saved_paths.clear()
+    module.last_completed_episode = 2
+    module.last_eval_metrics = {
+        "makespan": 120.0,
+        "reschedule_composite_score": 0.7,
+        "reschedule_selection_score": 0.7,
+        "reschedule_eligible_rate": 1.0,
+    }
+    callback.on_train_batch_end(trainer, module, None, None, 1)
+
+    assert saved_paths == [
+        str(tmp_path / "best" / "best.ckpt"),
+        str(tmp_path / "last.ckpt"),
+    ]
+    assert callback.best_score == 0.7
+
+
 def test_rollout_metrics_expose_expected_log_keys() -> None:
     metrics = _RolloutService().collect(1).rollout_metrics[0]
     logged = metrics.as_log_dict()
@@ -209,3 +246,45 @@ def test_standard_evaluation_restores_policy_and_config(monkeypatch, capsys) -> 
     output = capsys.readouterr().out
     assert "[Eval] ep=2 start" in output
     assert "Mk=10.00" in output
+
+
+def test_reschedule_evaluation_returns_selection_metrics(monkeypatch) -> None:
+    import torch
+
+    from configs import Config
+    from training.rollout_service import APALRolloutService
+
+    config = Config()
+    config.enable_reschedule_mode = True
+    config.reschedule_eval_num_scenarios = 4
+    policy = torch.nn.Linear(1, 1)
+    policy.train()
+    agent = SimpleNamespace(policy=policy)
+    vector_env = SimpleNamespace(num_envs=1)
+
+    def fake_reschedule_eval(*args, **kwargs):
+        fake_reschedule_eval.last_metrics = {
+            "eligible_rate": 1.0,
+            "composite_score": 0.75,
+            "selection_score": 0.75,
+            "demand_violation_count": 0.0,
+        }
+        return 10.0, 2.0, 3.0, [], 0.5, 0.6, 0.7
+
+    monkeypatch.setattr("training.rollout_service.evaluate_reschedule_model", fake_reschedule_eval)
+    service = APALRolloutService(
+        agent=agent,
+        vector_env=vector_env,
+        eval_env=object(),
+        config=config,
+        device=torch.device("cpu"),
+    )
+
+    metrics = service.evaluate(3)
+
+    assert policy.training is True
+    assert metrics["makespan"] == 10.0
+    assert metrics["reschedule_composite_score"] == 0.75
+    assert metrics["reschedule_selection_score"] == 0.75
+    assert metrics["reschedule_eligible_rate"] == 1.0
+    assert metrics["demand_violation_count"] == 0.0

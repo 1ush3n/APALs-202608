@@ -12,6 +12,7 @@ from runtime.multiscale import BenchmarkScore, parse_reference_makespans, score_
 from train import (
     Memory,
     evaluate_model,
+    evaluate_reschedule_model,
     refresh_env_observation,
     resolve_workspace_path,
     select_actions_batch_compat,
@@ -286,6 +287,8 @@ class APALRolloutService:
         )
 
     def evaluate(self, episode: int) -> dict[str, float]:
+        if bool(getattr(self.config, "enable_reschedule_mode", False)):
+            return self.evaluate_reschedule(episode)
         if bool(getattr(self.config, "enable_multi_benchmark_eval", False)):
             return self.evaluate_multi_benchmark(episode)
 
@@ -329,6 +332,52 @@ class APALRolloutService:
             f"W={metrics['worker_utilization'] * 100:.1f}% "
             f"S={metrics['station_utilization'] * 100:.1f}% "
             f"T={metrics['duration_sec']:.2f}s",
+            flush=True,
+        )
+        return metrics
+
+    def evaluate_reschedule(self, episode: int) -> dict[str, float]:
+        was_training = bool(self.agent.policy.training)
+        print(f"[Eval][Resched] ep={episode} start", flush=True)
+        try:
+            self.agent.policy.eval()
+            result = evaluate_reschedule_model(
+                self.eval_env,
+                self.agent,
+                num_runs=int(getattr(self.config, "reschedule_eval_num_scenarios", 4)),
+                temperature=float(self.config.eval_temperature),
+                current_ep=episode,
+            )
+            makespan, balance, reward, _, duration, worker_util, station_util = result
+        finally:
+            self.agent.policy.train(was_training)
+
+        score_metrics = getattr(evaluate_reschedule_model, "last_metrics", {}) or {}
+        metrics: dict[str, float] = {
+            "makespan": float(makespan),
+            "balance": float(balance),
+            "reward": float(reward),
+            "duration_sec": float(duration),
+            "worker_utilization": float(worker_util),
+            "station_utilization": float(station_util),
+        }
+        for name, value in score_metrics.items():
+            if isinstance(value, (int, float, np.floating)):
+                metrics[str(name)] = float(value)
+
+        composite = float(metrics.get("composite_score", 0.0))
+        selection = float(metrics.get("selection_score", composite))
+        eligible_rate = float(metrics.get("eligible_rate", metrics.get("eligible", 0.0)))
+        metrics["reschedule_composite_score"] = composite
+        metrics["reschedule_selection_score"] = selection
+        metrics["reschedule_eligible_rate"] = eligible_rate
+
+        print(
+            f"[Eval][Resched] ep={episode} score={composite:.6f} "
+            f"selection={selection:.6f} elig={eligible_rate:.2f} "
+            f"Mk={metrics['makespan']:.2f} Bal={metrics['balance']:.2f} "
+            f"R={metrics['reward']:.2f} W={metrics['worker_utilization'] * 100:.1f}% "
+            f"S={metrics['station_utilization'] * 100:.1f}% T={metrics['duration_sec']:.2f}s",
             flush=True,
         )
         return metrics

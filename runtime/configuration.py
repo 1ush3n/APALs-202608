@@ -54,6 +54,40 @@ def parse_set_overrides(items: list[str] | None) -> dict[str, Any]:
     return overrides
 
 
+def _normalize_override_key(raw_key: str) -> str:
+    return raw_key.strip().replace("-", "_")
+
+
+def _resolve_override_key(key: str, config: Config) -> str:
+    normalized = _normalize_override_key(key)
+    if hasattr(config, normalized):
+        return normalized
+
+    dotted_as_flat = normalized.replace(".", "_")
+    if hasattr(config, dotted_as_flat):
+        return dotted_as_flat
+
+    tail = normalized.rsplit(".", 1)[-1]
+    if hasattr(config, tail):
+        return tail
+
+    raise KeyError(f"未知配置字段: {key}")
+
+
+def parse_hydra_overrides(items: list[str] | None, config: Config) -> dict[str, Any]:
+    """解析 Hydra 风格的 key=value 覆盖，但仍落到当前扁平 Config 字段。"""
+    overrides: dict[str, Any] = {}
+    for item in items or []:
+        if item.startswith("-"):
+            raise ValueError(f"未知命令行参数: {item}")
+        key, separator, raw_value = item.partition("=")
+        if not separator or not key.strip():
+            raise ValueError(f"Hydra 风格覆盖必须使用 key=value 格式: {item!r}")
+        resolved_key = _resolve_override_key(key, config)
+        overrides[resolved_key] = parse_override_value(raw_value)
+    return overrides
+
+
 def _coerce_value(config: Config, key: str, value: Any) -> Any:
     if not hasattr(config, key):
         raise KeyError(f"未知配置字段: {key}")
@@ -93,7 +127,20 @@ def collect_cli_overrides(args: argparse.Namespace) -> tuple[dict[str, Any], set
     generic = parse_set_overrides(values.get("set_values"))
     overrides.update(generic)
     explicit_fields.update(generic)
+    hydra_like = parse_hydra_overrides(values.get("hydra_overrides"), Config())
+    overrides.update(hydra_like)
+    explicit_fields.update(hydra_like)
     return overrides, explicit_fields
+
+
+def parse_runtime_args(
+    parser: argparse.ArgumentParser,
+    argv: list[str] | None = None,
+) -> argparse.Namespace:
+    """兼容 argparse 旧参数和 Hydra 风格 key=value 覆盖。"""
+    args, unknown = parser.parse_known_args(argv)
+    setattr(args, "hydra_overrides", unknown)
+    return args
 
 
 def validate_runtime_config(config: Config) -> None:

@@ -19,6 +19,8 @@ from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
 from train import (
+    ensure_reschedule_baseline_available,
+    ensure_reschedule_eval_scenarios_available,
     initialize_training_config,
     resolve_checkpoint_paths,
     resolve_tensorboard_log_root,
@@ -31,6 +33,7 @@ from training.rollout_service import APALRolloutService
 from utils.vector_env import EnvCreator, VectorEnv
 from runtime.artifacts import run_context as create_run_context, uses_runs_layout, write_run_context_files, write_run_manifest
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
+from runtime.configuration import parse_runtime_args
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -78,12 +81,19 @@ class RolloutCheckpoint(Callback):
         if eval_metrics is not None:
             makespan = float(eval_metrics["makespan"])
             is_multi_benchmark = "multi_benchmark_selection_score" in eval_metrics
-            current_score = float(
-                eval_metrics.get("multi_benchmark_selection_score", makespan)
-            )
-            eligible = bool(
-                eval_metrics.get("multi_benchmark_eligible", 1.0) >= 1.0 - 1e-9
-            )
+            is_reschedule = "reschedule_selection_score" in eval_metrics
+            if is_reschedule:
+                current_score = float(eval_metrics["reschedule_selection_score"])
+                eligible = bool(eval_metrics.get("reschedule_eligible_rate", 0.0) >= 1.0 - 1e-9)
+                metric_name = "reschedule_selection_score"
+            elif is_multi_benchmark:
+                current_score = float(eval_metrics["multi_benchmark_selection_score"])
+                eligible = bool(eval_metrics.get("multi_benchmark_eligible", 1.0) >= 1.0 - 1e-9)
+                metric_name = "multi_benchmark_normalized_makespan"
+            else:
+                current_score = makespan
+                eligible = True
+                metric_name = "eval_makespan"
             if eligible and current_score < self.best_score:
                 self.best_score = current_score
                 trainer.save_checkpoint(str(self.best_path))
@@ -96,12 +106,18 @@ class RolloutCheckpoint(Callback):
                         if k.startswith("multi_benchmark_") and k.endswith("_makespan")
                     )
                     mk_str = f"Mks=[{mk_details}]"
+                elif is_reschedule:
+                    mk_str = (
+                        f"score={float(eval_metrics.get('reschedule_composite_score', current_score)):.6f} "
+                        f"elig={float(eval_metrics.get('reschedule_eligible_rate', 0.0)):.2f} "
+                        f"Mk={makespan:.2f}"
+                    )
                 else:
                     mk_str = f"Mk={makespan:.2f}"
 
                 print(
                     f"[Checkpoint] ep={episode} 保存最佳模型: "
-                    f"metric={'multi_benchmark_normalized_makespan' if is_multi_benchmark else 'eval_makespan'} "
+                    f"metric={metric_name} "
                     f"score={current_score:.6f} {mk_str} path={self.best_path}",
                     flush=True,
                 )
@@ -148,6 +164,13 @@ def run(args, *, config_initialized: bool = False) -> None:
 
     train_path = resolve_workspace_path(configs.train_data_path_or_dir)
     eval_path = resolve_workspace_path(configs.data_file_path)
+    if bool(getattr(configs, "enable_reschedule_mode", False)):
+        baseline_path = ensure_reschedule_baseline_available(configs)
+        if baseline_path is not None:
+            print(f"[Reschedule] baseline={baseline_path}", flush=True)
+        scenario_path = ensure_reschedule_eval_scenarios_available(configs)
+        if scenario_path is not None:
+            print(f"[Reschedule] eval_scenarios={scenario_path}", flush=True)
     vector_env = VectorEnv(
         EnvCreator(str(train_path), seed_offset=int(configs.seed)),
         num_envs=int(num_envs),
@@ -222,4 +245,4 @@ def run(args, *, config_initialized: bool = False) -> None:
 
 if __name__ == "__main__":
     parser = get_base_parser()
-    run(parser.parse_args())
+    run(parse_runtime_args(parser))
