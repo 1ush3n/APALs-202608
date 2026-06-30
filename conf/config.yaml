@@ -1,0 +1,4 @@
+# Hydra/OmegaConf 迁移入口。
+# 现阶段仍由项目兼容加载器读取；后续可平滑切换到 hydra.main/compose。
+defaults:
+  - experiment/default.yaml

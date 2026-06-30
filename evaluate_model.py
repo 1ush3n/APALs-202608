@@ -28,6 +28,7 @@ from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
 from runtime.artifacts import resolve_path, write_run_manifest
+from runtime.artifacts import run_context as create_run_context, uses_runs_layout, write_run_context_files
 from runtime.checkpoints import (
     apply_checkpoint_model_spec,
     load_checkpoint,
@@ -55,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(args: argparse.Namespace) -> dict[str, object]:
     _, _, explicit_fields = resolve_runtime_config(args, target=configs)
+    context = None
+    if uses_runs_layout(configs):
+        context = create_run_context(configs, PROJECT_ROOT, create_dirs=True)
     if "verbose_eval_progress" not in explicit_fields:
         configs.verbose_eval_progress = True
     checkpoint_path = resolve_path(args.model_path, PROJECT_ROOT)
@@ -67,7 +71,10 @@ def main(args: argparse.Namespace) -> dict[str, object]:
     if args.test_data:
         configs.data_file_path = args.test_data
     data_path = resolve_path(configs.data_file_path, PROJECT_ROOT)
-    output_dir = resolve_path(configs.result_dir, PROJECT_ROOT)
+    if context is not None and "result_dir" not in explicit_fields:
+        output_dir = context.eval_dir
+    else:
+        output_dir = resolve_path(configs.result_dir, PROJECT_ROOT)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(
         "[Eval] "
@@ -76,16 +83,15 @@ def main(args: argparse.Namespace) -> dict[str, object]:
         f"output_dir={output_dir} no_gantt={bool(args.no_gantt)}",
         flush=True,
     )
-    write_run_manifest(
-        output_dir,
-        configs,
-        command="evaluate",
-        extra={
-            "checkpoint": str(checkpoint_path.resolve()),
-            "checkpoint_format": checkpoint.format_name,
-            "resource_graph_mode": checkpoint.model_spec.resource_graph_mode,
-        },
-    )
+    manifest_extra = {
+        "checkpoint": str(checkpoint_path.resolve()),
+        "checkpoint_format": checkpoint.format_name,
+        "resource_graph_mode": checkpoint.model_spec.resource_graph_mode,
+    }
+    if context is not None:
+        write_run_context_files(context, configs, command="evaluate", extra=manifest_extra)
+    else:
+        write_run_manifest(output_dir, configs, command="evaluate", extra=manifest_extra)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = HBGATPN(configs).to(device)

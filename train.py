@@ -39,8 +39,10 @@ from configs import configs, load_training_config
 from runtime.configuration import resolve_runtime_config
 from runtime.artifacts import (
     checkpoint_paths as resolve_artifact_checkpoint_paths,
+    run_context as create_run_context,
     resolve_path as resolve_artifact_path,
     sanitize_name,
+    uses_runs_layout,
 )
 from runtime.multiscale import (
     BenchmarkScore,
@@ -88,11 +90,16 @@ def resolve_checkpoint_paths(config_obj=configs) -> dict[str, Path]:
         "best_model_dir": best_model_dir,
         "best_model_path": paths["legacy_best"],
         "best_model_meta_path": paths["legacy_best_meta"],
+        "lightning_dir": paths["lightning_dir"],
+        "lightning_latest": paths["lightning_latest"],
+        "lightning_best": paths["lightning_best"],
     }
 
 
 def resolve_tensorboard_log_root(config_obj=configs) -> Path:
     """严格使用配置中的 TensorBoard 根目录，不再按平台隐式改写。"""
+    if uses_runs_layout(config_obj) and str(getattr(config_obj, "run_dir", "") or "").strip():
+        return Path(config_obj.run_dir) / "logs" / "tensorboard"
     return Path(getattr(config_obj, "log_dir", "/root/tf-logs")).expanduser()
 
 
@@ -255,6 +262,13 @@ def initialize_training_config(args, argv=None, system_name: str | None = None):
         raise ValueError(f"float32_matmul_precision 无效: {precision}")
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision(precision)
+
+    if uses_runs_layout(configs):
+        if getattr(args, "resume", False) and not str(getattr(configs, "run_id", "") or "").strip():
+            print("[Runtime] resume 未指定 run_id，使用旧 checkpoint/results 路径兼容模式。", flush=True)
+        else:
+            context = create_run_context(configs, PROJECT_ROOT, create_dirs=True)
+            print(f"[Runtime] run_id={context.run_id} run_dir={context.run_dir}", flush=True)
 
     print(
         "[Runtime] "
@@ -1101,6 +1115,8 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
 def train(args):
     try:
         from utils.report_generator import TrainingReporter
+        if uses_runs_layout(configs) and str(getattr(configs, "run_dir", "") or "").strip():
+            configs.report_dir = str(Path(configs.run_dir) / "artifacts" / "reports")
         reporter = TrainingReporter(log_dir=getattr(configs, 'report_dir', 'results/reports'))
         last_metrics = {}
         
@@ -1306,7 +1322,7 @@ def train(args):
         run_name = f"{sanitize_experiment_name(getattr(configs, 'experiment_name', 'default'))}_ALB_PPO_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         log_root = resolve_tensorboard_log_root(configs)
         configs.log_dir = str(log_root)
-        log_dir = log_root / run_name
+        log_dir = log_root if (uses_runs_layout(configs) and str(getattr(configs, "run_dir", "") or "").strip()) else log_root / run_name
         writer = SummaryWriter(str(log_dir))
         print(f"TensorBoard 日志目录: {log_dir}")
         
@@ -2053,8 +2069,13 @@ def train(args):
         print("#"*60 + "\n")
         
         # 导出最佳 PPO 与 GA 细节到各自的文件夹及画图
-        output_dir_ppo = resolve_workspace_path(Path("results") / "PPO")
-        output_dir_ga = resolve_workspace_path(Path("results") / "GA")
+        if uses_runs_layout(configs) and str(getattr(configs, "run_dir", "") or "").strip():
+            final_root = Path(configs.run_dir) / "artifacts" / "final_comparison"
+            output_dir_ppo = final_root / "PPO"
+            output_dir_ga = final_root / "GA"
+        else:
+            output_dir_ppo = resolve_workspace_path(Path("results") / "PPO")
+            output_dir_ga = resolve_workspace_path(Path("results") / "GA")
         output_dir_ppo.mkdir(parents=True, exist_ok=True)
         output_dir_ga.mkdir(parents=True, exist_ok=True)
         

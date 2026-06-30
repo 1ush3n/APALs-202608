@@ -16,6 +16,8 @@ EXPLICIT_OVERRIDES = {
     "eval_freq": "eval_freq",
     "log_dir": "log_dir",
     "output_dir": "result_dir",
+    "run_id": "run_id",
+    "runs_root": "runs_root",
     "use_skill_hub": "use_skill_hub",
     "skill_hub_bidirectional": "skill_hub_bidirectional",
     "ablation_no_gat": "ablation_no_gat",
@@ -97,6 +99,8 @@ def collect_cli_overrides(args: argparse.Namespace) -> tuple[dict[str, Any], set
 def validate_runtime_config(config: Config) -> None:
     if config.float32_matmul_precision not in {"highest", "high", "medium"}:
         raise ValueError(f"float32_matmul_precision 无效: {config.float32_matmul_precision}")
+    if str(getattr(config, "artifact_layout", "runs")).lower() not in {"runs", "legacy"}:
+        raise ValueError(f"artifact_layout 无效: {config.artifact_layout}")
     if int(config.num_envs) < 1 or int(config.batch_size) < 1 or int(config.eval_freq) < 1:
         raise ValueError("num_envs、batch_size 和 eval_freq 必须大于 0")
     if bool(getattr(config, "enable_multi_benchmark_eval", False)):
@@ -152,6 +156,8 @@ def add_common_config_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--eval-freq", dest="eval_freq", type=int)
     parser.add_argument("--log-dir", "--log_dir", dest="log_dir")
     parser.add_argument("--output-dir", "--result_dir", dest="output_dir")
+    parser.add_argument("--run-id", "--run_id", dest="run_id")
+    parser.add_argument("--runs-root", "--runs_root", dest="runs_root")
     parser.add_argument("--use-skill-hub", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument(
         "--skill-hub-bidirectional",

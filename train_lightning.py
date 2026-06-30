@@ -29,7 +29,7 @@ from train import (
 from training.lightning_module import APALDataModule, APALLightningModule
 from training.rollout_service import APALRolloutService
 from utils.vector_env import EnvCreator, VectorEnv
-from runtime.artifacts import write_run_manifest
+from runtime.artifacts import run_context as create_run_context, uses_runs_layout, write_run_context_files, write_run_manifest
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
 
 
@@ -39,9 +39,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 class RolloutCheckpoint(Callback):
     """按 PPO rollout 更新保存最新模型，并按验证 Makespan 保存最佳模型。"""
 
-    def __init__(self, checkpoint_dir: Path) -> None:
+    def __init__(self, latest_path: Path, best_path: Path | None = None) -> None:
         super().__init__()
-        self.checkpoint_dir = Path(checkpoint_dir)
+        if best_path is None:
+            checkpoint_dir = Path(latest_path)
+            self.latest_path = checkpoint_dir / "last.ckpt"
+            self.best_path = checkpoint_dir / "best" / "best.ckpt"
+        else:
+            self.latest_path = Path(latest_path)
+            self.best_path = Path(best_path)
         self.best_score = float("inf")
 
     @property
@@ -64,7 +70,8 @@ class RolloutCheckpoint(Callback):
         batch,
         batch_idx: int,
     ) -> None:
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.latest_path.parent.mkdir(parents=True, exist_ok=True)
+        self.best_path.parent.mkdir(parents=True, exist_ok=True)
         episode = int(pl_module.last_completed_episode)
         eval_metrics = pl_module.last_eval_metrics
 
@@ -79,10 +86,7 @@ class RolloutCheckpoint(Callback):
             )
             if eligible and current_score < self.best_score:
                 self.best_score = current_score
-                best_dir = self.checkpoint_dir / "best"
-                best_dir.mkdir(parents=True, exist_ok=True)
-                best_path = best_dir / "best.ckpt"
-                trainer.save_checkpoint(str(best_path))
+                trainer.save_checkpoint(str(self.best_path))
                 
                 # 多尺度评估时，打印出各个子数据集的具体完工时间明细，避免日志只显示单一数据集产生误导
                 if is_multi_benchmark:
@@ -98,14 +102,13 @@ class RolloutCheckpoint(Callback):
                 print(
                     f"[Checkpoint] ep={episode} 保存最佳模型: "
                     f"metric={'multi_benchmark_normalized_makespan' if is_multi_benchmark else 'eval_makespan'} "
-                    f"score={current_score:.6f} {mk_str} path={best_path}",
+                    f"score={current_score:.6f} {mk_str} path={self.best_path}",
                     flush=True,
                 )
 
-        latest_path = self.checkpoint_dir / "last.ckpt"
-        trainer.save_checkpoint(str(latest_path))
+        trainer.save_checkpoint(str(self.latest_path))
         print(
-            f"[Checkpoint] ep={episode} 保存最新模型: path={latest_path}",
+            f"[Checkpoint] ep={episode} 保存最新模型: path={self.latest_path}",
             flush=True,
         )
 
@@ -116,9 +119,9 @@ def run(args, *, config_initialized: bool = False) -> None:
     set_seed(int(configs.seed))
 
     checkpoint_paths = resolve_checkpoint_paths(configs)
-    checkpoint_dir = checkpoint_paths["model_dir"] / "lightning"
+    checkpoint_dir = checkpoint_paths["lightning_dir"]
     if args.resume:
-        resume_path = checkpoint_dir / "last.ckpt"
+        resume_path = checkpoint_paths["lightning_latest"]
         if not resume_path.exists():
             raise FileNotFoundError(f"找不到可恢复的 Lightning checkpoint: {resume_path}")
         resume_checkpoint = load_checkpoint(resume_path)
@@ -127,12 +130,16 @@ def run(args, *, config_initialized: bool = False) -> None:
             resume_checkpoint.model_spec,
             explicit_fields=getattr(args, "explicit_config_fields", set()),
         )
-    write_run_manifest(
-        checkpoint_dir,
-        configs,
-        command="train_lightning",
-        extra={"resume": bool(args.resume)},
-    )
+    if uses_runs_layout(configs) and str(getattr(configs, "run_dir", "") or "").strip():
+        context = create_run_context(configs, PROJECT_ROOT, create_dirs=True)
+        write_run_context_files(context, configs, command="train_lightning", extra={"resume": bool(args.resume)})
+    else:
+        write_run_manifest(
+            checkpoint_dir,
+            configs,
+            command="train_lightning",
+            extra={"resume": bool(args.resume)},
+        )
 
     num_envs = int(configs.num_envs)
     start_method = str(configs.vector_env_start_method)
@@ -182,7 +189,12 @@ def run(args, *, config_initialized: bool = False) -> None:
     )
     module = APALLightningModule(agent, service, eval_freq=int(configs.eval_freq))
     data_module = APALDataModule(service, max_episodes=total_updates)
-    callbacks = [RolloutCheckpoint(checkpoint_dir)]
+    callbacks = [
+        RolloutCheckpoint(
+            latest_path=checkpoint_paths["lightning_latest"],
+            best_path=checkpoint_paths["lightning_best"],
+        )
+    ]
     log_root = resolve_tensorboard_log_root(configs)
     tensorboard_logger = TensorBoardLogger(
         save_dir=str(log_root),
@@ -204,7 +216,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     trainer.fit(
         module,
         datamodule=data_module,
-        ckpt_path=str(checkpoint_dir / "last.ckpt") if args.resume else None,
+        ckpt_path=str(checkpoint_paths["lightning_latest"]) if args.resume else None,
     )
 
 

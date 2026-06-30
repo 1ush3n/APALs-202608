@@ -80,6 +80,8 @@ python train.py --help
 | `--eval-freq` | `eval_freq` | `--eval-freq 1` | 每隔多少个 episode 验证一次 |
 | `--log-dir` | `log_dir` | `--log-dir /root/tf-logs` | TensorBoard 日志根目录 |
 | `--output-dir` | `result_dir` | `--output-dir results` | 评估、排程等结果根目录 |
+| `--run-id` | `run_id` | `--run-id initial_schedule_680_260630-153000` | 指定统一运行 ID；不指定时自动生成 |
+| `--runs-root` | `runs_root` | `--runs-root runs` | 统一运行目录根路径 |
 | `--use-skill-hub` | `use_skill_hub` | `--use-skill-hub` | 启用 Skill Hub |
 | `--no-use-skill-hub` | `use_skill_hub` | `--no-use-skill-hub` | 使用旧版 Worker-Task 直接边 |
 | `--skill-hub-bidirectional` | `skill_hub_bidirectional` | `--skill-hub-bidirectional` | 启用 Skill Hub 反向关系 |
@@ -374,9 +376,9 @@ Lightning 每个 episode 输出一行精简 rollout 摘要：
 
 自动验证默认每个 episode 执行一次，只运行 Standard 场景，并打印 Makespan、Balance、Reward、人员/站位利用率及耗时。详细指标同时写入 Lightning/TensorBoard。
 
-Lightning 每次 PPO 更新后覆盖保存 `checkpoints/<实验名>/lightning/last.ckpt`；执行自动验证且 Makespan 改善时，覆盖保存 `checkpoints/<实验名>/lightning/best/best.ckpt`。终端会打印对应的 `[Checkpoint]` 记录。
+Lightning 每次 PPO 更新后覆盖保存最新 checkpoint；执行自动验证且 Makespan 改善时，覆盖保存最佳 checkpoint。终端会打印对应的 `[Checkpoint]` 记录。
 
-Lightning 与 legacy 的 TensorBoard 日志根目录统一由 `log_dir` 控制，当前固定为 `/root/tf-logs`。Lightning 写入 `/root/tf-logs/<实验名>/version_N/`，legacy 写入 `/root/tf-logs/<实验名>_ALB_PPO_<时间戳>/`。
+新运行默认写入统一 `runs` 目录。若使用 `artifact_layout=legacy`，或 `--resume` 但未指定 `--run-id`，会回到旧 `checkpoints/results/tf-logs` 兼容路径。
 
 Rollout 心跳默认关闭。需要诊断长时间阶段时，可在 rollout YAML 中设置：
 
@@ -387,20 +389,54 @@ rollout:
 
 ## 输出文件与目录
 
-除 `log_dir` 等绝对路径外，以下相对路径均以项目根目录为基准。`<实验名>` 来自实验 YAML 的 `experiment_name`，例如 `initial_schedule_283`。
+除绝对路径外，以下相对路径均以项目根目录为基准。`<实验名>` 来自实验 YAML 的 `experiment_name`，例如 `initial_schedule_283`。新版本默认使用统一运行目录：
+
+```text
+runs/<实验名>/<实验名>_<YYMMDD-HHMMSS>/
+```
+
+例如：
+
+```text
+runs/initial_schedule_680/initial_schedule_680_260630-153000/
+```
+
+如果需要恢复某次新目录训练，建议显式传入对应 `--run-id`：
+
+```bash
+python train.py --trainer lightning --config conf/experiment/initial_schedule_680.yaml --run-id initial_schedule_680_260630-153000 --resume
+```
+
+### 统一 Runs 输出
+
+| 输出 | 路径 | 说明 |
+|---|---|---|
+| 最新 Lightning checkpoint | `runs/<实验名>/<run_id>/checkpoints/last.ckpt` | 每个 episode 覆盖保存 |
+| 最优 Lightning checkpoint | `runs/<实验名>/<run_id>/checkpoints/best.ckpt` | 验证指标改善时覆盖保存 |
+| Legacy 兼容 checkpoint | `runs/<实验名>/<run_id>/checkpoints/legacy/` | legacy 入口过渡使用 |
+| TensorBoard event | `runs/<实验名>/<run_id>/logs/tensorboard/` | 训练、验证、rollout、OOM 和性能指标 |
+| 最终配置 | `runs/<实验名>/<run_id>/configs/resolved_config.yaml` | YAML、平台配置和 CLI 覆盖后的最终配置 |
+| 运行清单 | `runs/<实验名>/<run_id>/configs/run_manifest.json` | run_id、命令、Git commit 和 checkpoint 元数据 |
+| 评估结果 | `runs/<实验名>/<run_id>/eval/` | `summary.json`、`schedule.csv`、`gantt.png` 等 |
+| 附加产物 | `runs/<实验名>/<run_id>/artifacts/` | reports、traces 和后续论文实验中间文件 |
+
+### Legacy 兼容路径
+
+旧路径仍可读取，用于老 checkpoint、旧实验结果和未迁移脚本。
 
 ### Lightning 训练
 
 | 输出 | 路径 | 说明 |
 |---|---|---|
-| 最新完整 checkpoint | `checkpoints/<实验名>/lightning/last.ckpt` | 每个 episode 覆盖保存，可用于 `--resume` |
-| 最优完整 checkpoint | `checkpoints/<实验名>/lightning/best/best.ckpt` | Standard 验证 Makespan 改善时覆盖保存 |
+| 最新完整 checkpoint | `checkpoints/<实验名>/lightning/last.ckpt` | legacy artifact layout 下使用 |
+| 最优完整 checkpoint | `checkpoints/<实验名>/lightning/best/best.ckpt` | legacy artifact layout 下使用 |
 | TensorBoard event | `/root/tf-logs/<实验名>/version_N/events.out.tfevents.*` | rollout、PPO、验证、OOM 和性能指标 |
 | Lightning 超参数 | `/root/tf-logs/<实验名>/version_N/hparams.yaml` | Lightning Logger 生成 |
 
 查看日志：
 
 ```bash
+tensorboard --logdir runs --bind_all
 tensorboard --logdir /root/tf-logs --bind_all
 ```
 
@@ -443,7 +479,7 @@ python evaluate_model.py --model-path checkpoints/<实验目录>/<模型文件> 
 python scripts/generate_schedule.py --model-path checkpoints/<实验目录>/<模型文件> --output-path results/final_schedule.csv
 ```
 
-每次训练会在 checkpoint 目录写入 `resolved_config.yaml` 和 `run_manifest.json`，记录最终配置、配置来源、命令类型和 Git commit。训练只负责 checkpoint 与 TensorBoard；GA 对比、排程 CSV 和甘特图由独立命令按需生成。
+每次新运行会在 `runs/<实验名>/<run_id>/configs/` 写入 `resolved_config.yaml` 和 `run_manifest.json`，记录最终配置、配置来源、命令类型、run_id 和 Git commit。训练只负责 checkpoint 与 TensorBoard；GA 对比、排程 CSV 和甘特图由独立命令按需生成。
 
 验证 APAL 排程约束：
 

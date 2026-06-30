@@ -20,6 +20,7 @@ from configs import (
 )
 from args_parser import get_base_parser
 from runtime.configuration import parse_set_overrides, resolve_runtime_config
+from runtime.artifacts import build_run_id, checkpoint_paths as artifact_checkpoint_paths, run_context
 from train import PROJECT_ROOT, resolve_checkpoint_paths, resolve_tensorboard_log_root, write_best_model_meta
 
 
@@ -32,6 +33,15 @@ def test_layered_yaml_config_loads_into_flat_config() -> None:
     assert cfg.use_head_layer_norm is False
     assert cfg.use_rollout_snapshot_fastpath is True
     assert cfg.n_m == 5
+    assert cfg.batch_size == 32
+
+
+def test_hydra_root_config_loads_through_compat_loader() -> None:
+    cfg = Config()
+    load_config_files([str(PROJECT_ROOT / "conf" / "config.yaml")], target=cfg)
+
+    assert cfg.use_skill_hub is True
+    assert cfg.use_rollout_snapshot_fastpath is True
     assert cfg.batch_size == 32
 
 
@@ -105,7 +115,47 @@ def test_experiment_checkpoint_paths_and_best_model_meta_are_isolated(tmp_path: 
 def test_tensorboard_log_root_strictly_uses_config() -> None:
     cfg = Config()
     cfg.log_dir = "/root/tf-logs"
+    cfg.artifact_layout = "legacy"
     assert resolve_tensorboard_log_root(cfg) == Path("/root/tf-logs")
+
+
+def test_runs_layout_creates_stable_run_context(tmp_path: Path) -> None:
+    cfg = Config()
+    cfg.experiment_name = "initial schedule 680"
+    cfg.runs_root = str(tmp_path / "runs")
+    cfg.run_id = "initial_schedule_680_260630-153000"
+
+    context = run_context(cfg, PROJECT_ROOT, create_dirs=True)
+
+    assert context.experiment_name == "initial_schedule_680"
+    assert context.run_id == "initial_schedule_680_260630-153000"
+    assert context.run_dir == tmp_path / "runs" / "initial_schedule_680" / "initial_schedule_680_260630-153000"
+    assert context.checkpoint_dir.exists()
+    assert context.configs_dir.exists()
+    assert context.eval_dir.exists()
+    assert str(context.run_dir) == cfg.run_dir
+
+
+def test_runs_layout_checkpoint_paths_do_not_use_legacy_root(tmp_path: Path) -> None:
+    cfg = Config()
+    cfg.experiment_name = "initial_schedule_680"
+    cfg.runs_root = str(tmp_path / "runs")
+    cfg.run_id = "initial_schedule_680_260630-153000"
+
+    paths = artifact_checkpoint_paths(cfg, PROJECT_ROOT)
+
+    assert paths["lightning_latest"] == tmp_path / "runs" / "initial_schedule_680" / "initial_schedule_680_260630-153000" / "checkpoints" / "last.ckpt"
+    assert paths["lightning_best"] == tmp_path / "runs" / "initial_schedule_680" / "initial_schedule_680_260630-153000" / "checkpoints" / "best.ckpt"
+    assert paths["legacy_latest"].parent.name == "legacy"
+
+
+def test_auto_run_id_uses_experiment_and_compact_timestamp() -> None:
+    from datetime import datetime
+
+    cfg = Config()
+    cfg.experiment_name = "initial_schedule_680"
+
+    assert build_run_id(cfg, now=datetime(2026, 6, 30, 15, 30, 0)) == "initial_schedule_680_260630-153000"
 
 
 def test_training_config_selects_windows_low_memory_profile() -> None:
@@ -156,6 +206,7 @@ def test_cli_overrides_yaml_and_platform_profile() -> None:
         "--batch-size", "12",
         "--num-envs", "3",
         "--no-use-skill-hub",
+        "--run-id", "manual_260630-153000",
         "--set", "eval_scenarios=[standard,duration_noise]",
     ])
     cfg = Config()
@@ -165,8 +216,9 @@ def test_cli_overrides_yaml_and_platform_profile() -> None:
     assert cfg.num_envs == 3
     assert cfg.use_skill_hub is False
     assert cfg.skill_hub_bidirectional is False
+    assert cfg.run_id == "manual_260630-153000"
     assert cfg.eval_scenarios == ["standard", "duration_noise"]
-    assert {"batch_size", "num_envs", "use_skill_hub", "eval_scenarios"} <= explicit
+    assert {"batch_size", "num_envs", "use_skill_hub", "run_id", "eval_scenarios"} <= explicit
 
 
 def test_set_rejects_invalid_syntax_and_unknown_fields() -> None:

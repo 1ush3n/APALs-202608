@@ -238,6 +238,10 @@ class Config:
     log_dir: str = "/root/tf-logs"
     experiment_name: str = "default"
     checkpoint_root: str = "checkpoints"
+    runs_root: str = "runs"
+    run_id: str = ""
+    run_dir: str = ""
+    artifact_layout: str = "runs"          # "runs" 使用统一运行目录；"legacy" 保持旧 checkpoints/results 结构
     config_paths: tuple[str, ...] = field(default_factory=tuple)
     
     # 报告生成 (Report Generation)
