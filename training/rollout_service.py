@@ -40,6 +40,7 @@ class APALRolloutService:
         self.num_envs = int(vector_env.num_envs)
         self.episodes_per_update = max(1, int(config.update_every_episodes))
         self._last_dataset_idx: int | None = None
+        self._rng = np.random.RandomState(int(config.seed))
 
     def _append_action(
         self,
@@ -251,7 +252,11 @@ class APALRolloutService:
 
     def collect(self, update_index: int) -> RolloutUpdate:
         dataset_count = int(self.vector_env.envs[0].dataset_count)
-        dataset_idx = (int(update_index) - 1) % max(1, dataset_count)
+        if getattr(self.config, "random_sample_dataset", True):
+            dataset_idx = self._rng.randint(0, max(1, dataset_count))
+        else:
+            dataset_idx = (int(update_index) - 1) % max(1, dataset_count)
+
         if dataset_idx != self._last_dataset_idx:
             self.vector_env.switch_dataset_all(dataset_idx)
             self._last_dataset_idx = dataset_idx
@@ -361,11 +366,12 @@ class APALRolloutService:
                 if benchmark_name not in refs:
                     raise ValueError(f"缺少基准 {benchmark_name} 的 reference makespan")
 
-                env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)
+                benchmark_seed = int(self.config.seed) + len(rows)
+                env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=benchmark_seed)
                 state = env.reset(
                     randomize_duration=False,
                     randomize_workers=False,
-                    seed=2026,
+                    seed=benchmark_seed,
                 )
                 done = False
                 invalid_step_count = 0

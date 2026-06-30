@@ -14,7 +14,7 @@ reschedule_task_delay:
   reschedule_baseline_model_path: checkpoints/initial_schedule/bestmodel/best_model.pth
   reschedule_scenario_path: ""
   reschedule_eval_scenario_path: results/reschedule_eval_scenarios.csv
-  reschedule_eval_scenario_seed: 30300
+  reschedule_eval_scenario_seed: 42
   reschedule_start_time_min_ratio: 0.15
   reschedule_start_time_max_ratio: 0.65
   reschedule_delay_task_prob: 0.15

@@ -2,7 +2,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
+
+
+def _sanitize_thread_env() -> None:
+    """修正非法线程数环境变量，避免 libgomp 在导入计算库时告警或异常。"""
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        parts = [part.strip() for part in str(value).split(",")]
+        valid = bool(parts) and all(part.isdigit() and int(part) > 0 for part in parts)
+        if not valid:
+            os.environ[name] = "1"
+
+
+_sanitize_thread_env()
 
 import pandas as pd
 import torch
@@ -39,6 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(args: argparse.Namespace) -> dict[str, object]:
     _, _, explicit_fields = resolve_runtime_config(args, target=configs)
+    if "verbose_eval_progress" not in explicit_fields:
+        configs.verbose_eval_progress = True
     checkpoint_path = resolve_path(args.model_path, PROJECT_ROOT)
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     apply_checkpoint_model_spec(
@@ -51,6 +69,13 @@ def main(args: argparse.Namespace) -> dict[str, object]:
     data_path = resolve_path(configs.data_file_path, PROJECT_ROOT)
     output_dir = resolve_path(configs.result_dir, PROJECT_ROOT)
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(
+        "[Eval] "
+        f"checkpoint={checkpoint_path} data={data_path} runs={int(args.num_runs)} "
+        f"temperature={float(args.temperature)} scenarios={args.scenarios or tuple(configs.eval_scenarios)} "
+        f"output_dir={output_dir} no_gantt={bool(args.no_gantt)}",
+        flush=True,
+    )
     write_run_manifest(
         output_dir,
         configs,
@@ -106,6 +131,14 @@ def main(args: argparse.Namespace) -> dict[str, object]:
         "worker_utilization": float(worker_util),
         "station_utilization": float(station_util),
     }
+    print(
+        "[Eval][Result] "
+        f"Tasks={len(schedule)} Mk={float(makespan):.2f} Bal={float(balance):.2f} "
+        f"Reward={float(reward):.2f} Time={float(duration):.2f}s "
+        f"WUtil={float(worker_util) * 100:.1f}% SUtil={float(station_util) * 100:.1f}% "
+        f"summary={output_dir / 'summary.json'} schedule={schedule_path}",
+        flush=True,
+    )
     (output_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",

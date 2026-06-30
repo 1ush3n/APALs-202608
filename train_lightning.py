@@ -83,10 +83,22 @@ class RolloutCheckpoint(Callback):
                 best_dir.mkdir(parents=True, exist_ok=True)
                 best_path = best_dir / "best.ckpt"
                 trainer.save_checkpoint(str(best_path))
+                
+                # 多尺度评估时，打印出各个子数据集的具体完工时间明细，避免日志只显示单一数据集产生误导
+                if is_multi_benchmark:
+                    mk_details = ", ".join(
+                        f"{k.split('_')[2]}:{v:.1f}"
+                        for k, v in eval_metrics.items()
+                        if k.startswith("multi_benchmark_") and k.endswith("_makespan")
+                    )
+                    mk_str = f"Mks=[{mk_details}]"
+                else:
+                    mk_str = f"Mk={makespan:.2f}"
+
                 print(
                     f"[Checkpoint] ep={episode} 保存最佳模型: "
                     f"metric={'multi_benchmark_normalized_makespan' if is_multi_benchmark else 'eval_makespan'} "
-                    f"score={current_score:.6f} Mk={makespan:.2f} path={best_path}",
+                    f"score={current_score:.6f} {mk_str} path={best_path}",
                     flush=True,
                 )
 
@@ -137,7 +149,7 @@ def run(args, *, config_initialized: bool = False) -> None:
         init_timeout_sec=float(configs.vector_env_init_timeout_sec),
         command_timeout_sec=float(configs.vector_env_command_timeout_sec),
     )
-    eval_env = AirLineEnv_Graph(eval_path, seed=int(configs.seed) + 10000)
+    eval_env = AirLineEnv_Graph(eval_path, seed=int(configs.seed))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = HBGATPN(configs).to(device)
     if getattr(configs, 'use_compile', False):

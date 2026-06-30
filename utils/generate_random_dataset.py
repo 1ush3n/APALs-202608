@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument('--min_length', type=int, default=200, help="生成的最小数据集节点数量")
     parser.add_argument('--max_length', type=int, default=500, help="生成的最大数据集节点数量")
     parser.add_argument('--time_var', type=float, default=0.2, help="工时高斯波动的标准差系数 (如 0.2 代表上下浮动约 20%)")
-    parser.add_argument('--seed', type=int, default=None, help="随机种子")
+    parser.add_argument('--seed', type=int, default=42, help="随机种子")
     return parser.parse_args()
 
 def get_active_ancestors(node, drop_set, pred_map, memo, visited):
@@ -359,9 +359,8 @@ def generate_bucket(
 
 def main():
     args = parse_args()
-    if args.seed is not None:
-        np.random.seed(args.seed)
-        random.seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
         
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -386,7 +385,7 @@ def main():
             
             # --- 合法性验证 ---
             # 通过尝试实例化环境，如果能顺利通过拓扑排序，就证明 DAG 完全合法，无死锁环
-            env = AirLineEnv_Graph(data_path_or_dir=out_path, seed=42)
+            env = AirLineEnv_Graph(data_path_or_dir=out_path, seed=args.seed)
             actual_tasks = env.num_tasks
             
             print(f"[SUCCESS] [{i}/{args.num_samples}] 已生成且验证合法: {out_name}")

@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import json
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -17,10 +19,32 @@ parent_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(parent_dir)
 
 from args_parser import get_basic_ppo_parser
+from configs import configs
 from env_wrapper import init_env, standardize_env_reset, standardize_env_step, extract_flat_state_for_baselines
+from train import initialize_training_config, set_seed
 from utils.logger import init_logger, record_experiment_time
 from utils.device_utils import get_available_device, clear_torch_cache
 from utils.visualization import plot_gantt
+
+
+def _save_basic_ppo_checkpoint(path, agent, state_dim, action_dim_list, best_makespan, exp_dir):
+    path = Path(path)
+    best_makespan_value = float(best_makespan) if np.isfinite(best_makespan) else None
+    payload = {
+        "algorithm": "BasicPPO",
+        "model_state_dict": agent.model.state_dict(),
+        "state_dim": int(state_dim),
+        "action_dim_list": [int(v) for v in action_dim_list],
+        "seed": int(getattr(configs, "seed", 42)),
+        "data_file_path": str(getattr(configs, "data_file_path", "")),
+        "config_paths": list(getattr(configs, "config_paths", ())),
+        "best_makespan": best_makespan_value,
+    }
+    torch.save(payload, path)
+    meta_path = Path(exp_dir) / f"{path.stem}_meta.json"
+    metadata = {k: v for k, v in payload.items() if k != "model_state_dict"}
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
 
 # 基础PPO网络（仅MLP，无GAT/指针网络）
 class BasicPPO(nn.Module):
@@ -279,6 +303,7 @@ class BasicPPOAgent:
         self.masks.clear()
 
 def train_basic_ppo(args):
+    set_seed(int(getattr(configs, "seed", 42)))
     # 初始化日志
     logger, exp_dir = init_logger(args, "basic_ppo_baseline")
     start_time = time.time()
@@ -287,7 +312,7 @@ def train_basic_ppo(args):
         # 设备初始化
         device = get_available_device()
         # 环境初始化（统一接口）
-        env = init_env(args, seed=args.seed)
+        env = init_env(args, seed=getattr(args, "seed", None))
         
         # 状态维度适配
         standardize_env_reset(env)
@@ -297,8 +322,13 @@ def train_basic_ppo(args):
         action_dim_list = [env.num_tasks, env.num_stations, env.num_workers]
         
         # 初始化Agent
+        args.lr = float(args.lr if args.lr is not None else getattr(configs, "lr", 3e-4))
+        args.gamma = float(args.gamma if args.gamma is not None else getattr(configs, "gamma", 0.99))
+        args.lamda = float(args.lamda if args.lamda is not None else getattr(configs, "gae_lambda", 0.95))
+        args.clip_epsilon = float(args.clip_epsilon if args.clip_epsilon is not None else getattr(configs, "eps_clip", 0.2))
         agent = BasicPPOAgent(state_dim, action_dim_list, args, device)
-        batch_size = getattr(args, 'batch_size', 64)
+        batch_size = int(getattr(args, 'batch_size', None) or getattr(configs, 'batch_size', 64))
+        max_episodes = int(getattr(args, 'max_episodes', None) or getattr(configs, 'max_episodes', 300))
         
         # 训练指标
         episode_rewards = []
@@ -306,8 +336,8 @@ def train_basic_ppo(args):
         episode_makespans = []
         best_makespan = float('inf')
         
-        logger.info(f"开始 Basic PPO (MLP) 训练，状态维度: {state_dim}，动作维度: {action_dim_list}，最大轮次: {args.max_episodes}")
-        for ep in range(args.max_episodes):
+        logger.info(f"开始 Basic PPO (MLP) 训练，状态维度: {state_dim}，动作维度: {action_dim_list}，最大轮次: {max_episodes}")
+        for ep in range(max_episodes):
             standardize_env_reset(env)
             state = extract_flat_state_for_baselines(env)
             
@@ -355,7 +385,7 @@ def train_basic_ppo(args):
             # 记录指标
             episode_rewards.append(ep_reward)
             
-            makespan = np.max(env.station_wall_clock) if len(env.assigned_tasks) == env.num_tasks else 99999.0
+            makespan = np.max(env.station_wall_clock) if len(env.assigned_tasks) == env.num_tasks else env.ideal_makespan * 3.0
             episode_makespans.append(makespan)
             
             if makespan < best_makespan and len(env.assigned_tasks) == env.num_tasks:
@@ -373,8 +403,16 @@ def train_basic_ppo(args):
                          'Duration': end - start
                      })
                 df = pd.DataFrame(tasks_data)
-                df.to_csv(os.path.join(exp_dir, f"Best_Schedule_BasicPPO.csv"), index=False)
-                plot_gantt(best_sch, os.path.join(exp_dir, f"Best_Gantt_BasicPPO.png"))
+                df.to_csv(Path(exp_dir) / "Best_Schedule_BasicPPO.csv", index=False)
+                plot_gantt(best_sch, str(Path(exp_dir) / "Best_Gantt_BasicPPO.png"))
+                _save_basic_ppo_checkpoint(
+                    Path(exp_dir) / "basic_ppo_model_best.pth",
+                    agent,
+                    state_dim,
+                    action_dim_list,
+                    best_makespan,
+                    exp_dir,
+                )
                 logger.info(f"✨ 新的最佳 BasicPPO 调度已保存! Makespan: {best_makespan:.2f} -> {exp_dir}")
             
             loss = agent.update(batch_size)
@@ -385,28 +423,28 @@ def train_basic_ppo(args):
                 avg_reward = np.mean(episode_rewards[-10:])
                 avg_loss = np.mean(episode_losses[-10:])
                 avg_makespan = np.mean(episode_makespans[-10:])
-                logger.info(f"Episode {ep+1:04d}/{args.max_episodes} | 奖励: {ep_reward:.2f} (Avg: {avg_reward:.2f}) | Loss: {avg_loss:.4f} | Makespan: {makespan:.2f} (Avg: {avg_makespan:.2f})")
+                logger.info(f"Episode {ep+1:04d}/{max_episodes} | 奖励: {ep_reward:.2f} (Avg: {avg_reward:.2f}) | Loss: {avg_loss:.4f} | Makespan: {makespan:.2f} (Avg: {avg_makespan:.2f})")
                 
             # 每100轮清理与保存一次
             if (ep + 1) % 100 == 0:
                 clear_torch_cache()
-                model_path = os.path.join(exp_dir, f"basic_ppo_model_ep{ep+1}.pth")
-                torch.save(agent.model.state_dict(), model_path)
+                model_path = Path(exp_dir) / f"basic_ppo_model_ep{ep+1}.pth"
+                _save_basic_ppo_checkpoint(model_path, agent, state_dim, action_dim_list, best_makespan, exp_dir)
                 
         # 保存最终模型
-        model_path = os.path.join(exp_dir, "basic_ppo_model_final.pth")
-        torch.save(agent.model.state_dict(), model_path)
+        model_path = Path(exp_dir) / "basic_ppo_model_final.pth"
+        _save_basic_ppo_checkpoint(model_path, agent, state_dim, action_dim_list, best_makespan, exp_dir)
         logger.info(f"最终模型保存至: {model_path}")
         
         # 结果归档
         results = pd.DataFrame({
-            'episode': range(1, args.max_episodes+1),
+            'episode': range(1, max_episodes+1),
             'reward': episode_rewards,
             'loss': episode_losses,
             'makespan': episode_makespans
         })
         results['avg_makespan_10'] = results['makespan'].rolling(window=10).mean()
-        results.to_csv(os.path.join(exp_dir, "basic_ppo_results.csv"), index=False)
+        results.to_csv(Path(exp_dir) / "basic_ppo_results.csv", index=False)
         
     except Exception as e:
         logger.error(f"Basic PPO 训练失败: {str(e)}", exc_info=True)
@@ -419,4 +457,5 @@ def train_basic_ppo(args):
 if __name__ == "__main__":
     parser = get_basic_ppo_parser()
     args = parser.parse_args()
+    initialize_training_config(args)
     train_basic_ppo(args)

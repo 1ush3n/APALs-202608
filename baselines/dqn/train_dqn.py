@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import json
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -17,10 +19,34 @@ parent_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(parent_dir)
 
 from args_parser import get_dqn_parser
+from configs import configs
 from env_wrapper import init_env, standardize_env_reset, standardize_env_step, extract_flat_state_for_baselines
+from train import initialize_training_config, set_seed
 from utils.logger import init_logger, record_experiment_time
 from utils.device_utils import get_available_device, clear_torch_cache
 from utils.visualization import plot_gantt
+
+
+def _save_dqn_checkpoint(path, agent, state_dim, action_dim_list, best_makespan, exp_dir):
+    path = Path(path)
+    best_makespan_value = float(best_makespan) if np.isfinite(best_makespan) else None
+    payload = {
+        "algorithm": "DQN",
+        "model_state_dict": agent.model.state_dict(),
+        "target_model_state_dict": agent.target_model.state_dict(),
+        "state_dim": int(state_dim),
+        "action_dim_list": [int(v) for v in action_dim_list],
+        "seed": int(getattr(configs, "seed", 42)),
+        "data_file_path": str(getattr(configs, "data_file_path", "")),
+        "config_paths": list(getattr(configs, "config_paths", ())),
+        "best_makespan": best_makespan_value,
+        "epsilon": float(agent.epsilon),
+    }
+    torch.save(payload, path)
+    meta_path = Path(exp_dir) / f"{path.stem}_meta.json"
+    metadata = {k: v for k, v in payload.items() if not k.endswith("state_dict")}
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
 
 # DQN网络（适配环境MultiDiscrete动作空间）
 class DQN(nn.Module):
@@ -227,6 +253,7 @@ class DQNAgent:
         return loss.item()
 
 def train_dqn(args):
+    set_seed(int(getattr(configs, "seed", 42)))
     # 初始化日志
     logger, exp_dir = init_logger(args, "dqn_baseline")
     start_time = time.time()
@@ -235,7 +262,7 @@ def train_dqn(args):
         # 设备初始化
         device = get_available_device()
         # 环境初始化（统一接口）
-        env = init_env(args, seed=args.seed)
+        env = init_env(args, seed=getattr(args, "seed", None))
         
         # 状态维度适配（使用降维展平方法）
         standardize_env_reset(env)
@@ -245,8 +272,14 @@ def train_dqn(args):
         action_dim_list = [env.num_tasks, env.num_stations, env.num_workers]
         
         # 初始化Agent
+        args.gamma = float(args.gamma if args.gamma is not None else getattr(configs, "gamma", 0.99))
+        args.epsilon = float(args.epsilon if args.epsilon is not None else 1.0)
+        args.epsilon_min = float(args.epsilon_min if args.epsilon_min is not None else 0.01)
+        args.epsilon_decay = float(args.epsilon_decay if args.epsilon_decay is not None else 0.995)
+        args.memory_size = int(args.memory_size if args.memory_size is not None else 10000)
         agent = DQNAgent(state_dim, action_dim_list, args, device)
-        batch_size = getattr(args, 'batch_size', 32)
+        batch_size = int(getattr(args, 'batch_size', None) or getattr(configs, 'batch_size', 32))
+        max_episodes = int(getattr(args, 'max_episodes', None) or getattr(configs, 'max_episodes', 300))
         
         # 训练指标
         episode_rewards = []
@@ -255,8 +288,8 @@ def train_dqn(args):
         best_makespan = float('inf')
         
         # 训练循环
-        logger.info(f"开始 DQN 训练，状态维度: {state_dim}，动作维度: {action_dim_list}，最大轮次: {args.max_episodes}")
-        for ep in range(args.max_episodes):
+        logger.info(f"开始 DQN 训练，状态维度: {state_dim}，动作维度: {action_dim_list}，最大轮次: {max_episodes}")
+        for ep in range(max_episodes):
             standardize_env_reset(env)
             state = extract_flat_state_for_baselines(env)
             done = False
@@ -312,7 +345,7 @@ def train_dqn(args):
             episode_rewards.append(ep_reward)
             episode_losses.append(ep_loss / step_count if step_count > 0 else 0)
             
-            makespan = np.max(env.station_wall_clock) if len(env.assigned_tasks) == env.num_tasks else 99999.0
+            makespan = np.max(env.station_wall_clock) if len(env.assigned_tasks) == env.num_tasks else env.ideal_makespan * 3.0
             episode_makespans.append(makespan)
             
             if makespan < best_makespan and len(env.assigned_tasks) == env.num_tasks:
@@ -330,8 +363,16 @@ def train_dqn(args):
                          'Duration': end - start
                      })
                 df = pd.DataFrame(tasks_data)
-                df.to_csv(os.path.join(exp_dir, f"Best_Schedule_DQN.csv"), index=False)
-                plot_gantt(best_sch, os.path.join(exp_dir, f"Best_Gantt_DQN.png"))
+                df.to_csv(Path(exp_dir) / "Best_Schedule_DQN.csv", index=False)
+                plot_gantt(best_sch, str(Path(exp_dir) / "Best_Gantt_DQN.png"))
+                _save_dqn_checkpoint(
+                    Path(exp_dir) / "dqn_model_best.pth",
+                    agent,
+                    state_dim,
+                    action_dim_list,
+                    best_makespan,
+                    exp_dir,
+                )
                 logger.info(f"✨ 新的最佳 DQN 调度已保存! Makespan: {best_makespan:.2f} -> {exp_dir}")
             
             # 每10轮打印日志
@@ -339,7 +380,7 @@ def train_dqn(args):
                 avg_reward = np.mean(episode_rewards[-10:])
                 avg_loss = np.mean(episode_losses[-10:])
                 avg_makespan = np.mean(episode_makespans[-10:])
-                logger.info(f"Episode {ep+1}/{args.max_episodes} | 平均奖励: {avg_reward:.2f} | 损失: {avg_loss:.4f} | Makespan: {avg_makespan:.2f} | Epsilon: {agent.epsilon:.4f}")
+                logger.info(f"Episode {ep+1}/{max_episodes} | 平均奖励: {avg_reward:.2f} | 损失: {avg_loss:.4f} | Makespan: {avg_makespan:.2f} | Epsilon: {agent.epsilon:.4f}")
             
             # 每50轮更新目标网络
             if (ep + 1) % 50 == 0:
@@ -348,20 +389,20 @@ def train_dqn(args):
                 clear_torch_cache()
         
         # 保存模型
-        model_path = os.path.join(exp_dir, "dqn_model.pth")
-        torch.save(agent.model.state_dict(), model_path)
+        model_path = Path(exp_dir) / "dqn_model.pth"
+        _save_dqn_checkpoint(model_path, agent, state_dim, action_dim_list, best_makespan, exp_dir)
         logger.info(f"模型保存至: {model_path}")
         
         # 结果归档
         results = pd.DataFrame({
-            'episode': range(1, args.max_episodes+1),
+            'episode': range(1, max_episodes+1),
             'reward': episode_rewards,
             'loss': episode_losses,
             'makespan': episode_makespans
         })
         results['avg_reward_10'] = results['reward'].rolling(window=10).mean()
         results['avg_makespan_10'] = results['makespan'].rolling(window=10).mean()
-        results.to_csv(os.path.join(exp_dir, "dqn_results.csv"), index=False)
+        results.to_csv(Path(exp_dir) / "dqn_results.csv", index=False)
         
     except Exception as e:
         logger.error(f"DQN训练失败: {str(e)}", exc_info=True)
@@ -374,4 +415,5 @@ def train_dqn(args):
 if __name__ == "__main__":
     parser = get_dqn_parser()
     args = parser.parse_args()
+    initialize_training_config(args)
     train_dqn(args)

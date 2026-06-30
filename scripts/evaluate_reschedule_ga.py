@@ -20,7 +20,7 @@ def main() -> None:
     parser.add_argument("--pop_size", type=int, default=30)
     parser.add_argument("--max_gen", type=int, default=20)
     parser.add_argument("--num_runs", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="results/reschedule_ga")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()

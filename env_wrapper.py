@@ -1,26 +1,31 @@
-import os
+from pathlib import Path
 import torch
 import numpy as np
 from environment import AirLineEnv_Graph
 from configs import configs
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
 
 def init_env(args, seed=None):
     """
     统一环境初始化门面
     注意：您主干的图强化学习仍可以直接正常使用返回的 HeteroData，完全不会受到影响！
     """
-    data_path = getattr(args, 'data_path', 'data/100.csv')
-    if not os.path.isabs(data_path):
-        data_path = os.path.join(os.getcwd(), data_path)
+    data_path_value = getattr(args, 'data_path', None) or getattr(configs, 'data_file_path', None) or Path("data") / "283.csv"
+    data_path = Path(data_path_value)
+    if not data_path.is_absolute():
+        data_path = PROJECT_ROOT / data_path
     
-    if not os.path.exists(data_path):
+    if not data_path.exists():
         raise FileNotFoundError(f"数据集未找到，请检查路径: {data_path}")
         
-    env_seed = seed if seed is not None else getattr(args, 'seed', 42)
+    env_seed = seed if seed is not None else (getattr(args, 'seed', None) or getattr(configs, 'seed', 42))
     
     env = AirLineEnv_Graph(
-        data_path=data_path,
-        seed=env_seed
+        data_path_or_dir=str(data_path),
+        seed=int(env_seed)
     )
     return env
 
@@ -63,7 +68,7 @@ def extract_flat_state_for_baselines(env):
     task_status_flat = env.task_status.flatten() # [N]
     
     # 抽取任务属性
-    task_feat_flat = env.task_static_feat.flatten().numpy() # [N * TaskFeatDim]
+    task_feat_flat = env.task_static_feat.detach().cpu().flatten().numpy() # [N * TaskFeatDim]
     
     # 抽取工人空闲特征
     worker_free_flat = env.worker_free_time.flatten() # [W]

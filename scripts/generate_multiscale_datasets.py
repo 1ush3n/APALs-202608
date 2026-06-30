@@ -64,7 +64,7 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=80)
     parser.add_argument("--min-ops", type=int, default=200)
     parser.add_argument("--max-ops", type=int, default=3100)
-    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", default=str(PROJECT_ROOT / "data" / "multiscale_datasets"))
     args = parser.parse_args()
 

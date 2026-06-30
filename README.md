@@ -37,7 +37,7 @@ python scripts/generate_initial_buckets.py --bucket all --num_samples 32 --seed 
 
 ```powershell
 python train.py --trainer lightning --config conf/experiment/initial_schedule_283.yaml
-python train.py --trainer lightning --config conf/experiment/initial_schedule_680.yaml
+python train.py --config conf/experiment/scale_400_800_schedule.yaml
 python train.py --trainer lightning --config conf/experiment/initial_schedule_2338.yaml
 python train.py --trainer lightning --config conf/experiment/initial_schedule_3182.yaml
 ```
@@ -45,14 +45,14 @@ python train.py --trainer lightning --config conf/experiment/initial_schedule_31
 命令行参数会覆盖 YAML 和自动平台配置。常用参数可直接传入：
 
 ```powershell
-python train.py --config conf/experiment/initial_schedule_680.yaml --batch-size 16 --num-envs 8 --max-episodes 100
-python train.py --config conf/experiment/initial_schedule_680.yaml --no-use-skill-hub
+python train.py --config conf/experiment/scale_400_800_schedule.yaml --batch-size 256 --num-envs 16 --max-episodes 100
+python train.py --config conf/experiment/scale_400_800_schedule.yaml --no-use-skill-hub
 ```
 
 其他 `Config` 字段通过可重复的 `--set key=value` 覆盖：
 
 ```powershell
-python train.py --config conf/experiment/initial_schedule_680.yaml --set lr=0.00005 --set eval_scenarios=[standard]
+python train.py --config conf/experiment/scale_400_800_schedule.yaml --set lr=0.00005 --set eval_scenarios=[standard]
 ```
 
 配置优先级为：代码默认值 `<` 实验 YAML `<` 平台硬件 YAML `<` 显式命令行参数 `<` `--set`。
@@ -488,3 +488,249 @@ model:
 - PPO 更新首次发生 CUDA OOM 时会完整回滚模型、优化器、AMP 缩放器和随机状态，并将 batch 减半重试一次。
 - 减半后再次 OOM 将直接回滚并跳过当前 PPO 更新；TensorBoard 会记录 `OOM/RetryCount`、`OOM/SkippedUpdate` 和 `OOM/EffectiveBatchSize`。
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 用于缓解显存碎片，但不能替代 batch 上限和事务回滚。
+
+## Heuristic 与 GA 基线批量评估
+
+本项目提供了一个能够自动在 `283.csv`, `680.csv`, `2338.csv`, `3182.csv` 等多个不同规模数据集上，批量运行各类启发式规则及遗传算法（GA）的综合评估工具。它实现了对不同规模数据集物理环境参数（如工人数 `n_w`）的自适应对齐，确保与主模型的评估环境完全一致（反作弊机制）。
+
+### 支持的基线方法
+1. **SPT**：最短工时优先 (Shortest Processing Time)
+2. **LPT**：最长工时优先 (Longest Processing Time)
+3. **Random**：随机就绪工序选择 (Random Dispatching)
+4. **EDD**：最早可能开工时间优先 (Earliest Due Date/ES)
+5. **CPM**：关键路径法优先 (Critical Path Method/LS 越早越优先)
+6. **MSL**：最轻工位负载优先 (Minimum Station Load)
+7. **GA**：遗传算法基准排程 (Genetic Algorithm)
+8. **Beam / BeamSearch**：基于优先级编码的 Beam Search，保留少量候选解并逐层扰动扩展。
+9. **IG / IteratedGreedy / DestroyRepair**：迭代贪婪 Destroy-and-Repair，优先破坏并修复关键路径和高影响工序。
+10. **SA / SimulatedAnnealing**：模拟退火，在任务、工位和工人优先级邻域中搜索，并按温度接受劣解。
+
+### 运行命令
+
+在 `rag_env` 虚拟环境下，执行以下命令进行批量评估：
+
+```powershell
+python baselines/heuristic/run_all_baselines.py `
+  --data_dir data `
+  --datasets 283.csv 680.csv 2338.csv 3182.csv `
+  --methods SPT LPT Random EDD CPM MSL GA `
+  --ga_pop_size 30 `
+  --ga_max_gen 20
+```
+
+Linux 下的写法：
+
+```bash
+python baselines/heuristic/run_all_baselines.py \
+  --data_dir data \
+  --datasets 283.csv 680.csv 2338.csv 3182.csv \
+  --methods SPT LPT Random EDD CPM MSL GA \
+  --ga_pop_size 30 \
+  --ga_max_gen 20
+```
+
+运行新增的高级启发式基线：
+
+```bash
+python baselines/heuristic/run_all_baselines.py \
+  --data_dir data \
+  --datasets 283.csv 680.csv 2338.csv 3182.csv \
+  --methods Beam IG SA \
+  --beam_width 4 \
+  --beam_branch_factor 4 \
+  --beam_levels 8 \
+  --beam_patience 4 \
+  --ig_iterations 80 \
+  --ig_destroy_ratio 0.10 \
+  --ig_noise_sigma 0.25 \
+  --sa_iterations 120 \
+  --sa_initial_temp 0.05 \
+  --sa_cooling 0.96 \
+  --sa_min_temp 0.0001 \
+  --balance_weight 1.0 \
+  --seed 42
+```
+
+Windows PowerShell 写法：
+
+```powershell
+python baselines/heuristic/run_all_baselines.py `
+  --data_dir data `
+  --datasets 283.csv 680.csv 2338.csv 3182.csv `
+  --methods Beam IG SA `
+  --beam_width 4 `
+  --beam_branch_factor 4 `
+  --beam_levels 8 `
+  --beam_patience 4 `
+  --ig_iterations 80 `
+  --ig_destroy_ratio 0.10 `
+  --ig_noise_sigma 0.25 `
+  --sa_iterations 120 `
+  --sa_initial_temp 0.05 `
+  --sa_cooling 0.96 `
+  --sa_min_temp 0.0001 `
+  --balance_weight 1.0 `
+  --seed 42
+```
+
+快速冒烟测试可以先只跑 `283.csv`，并把迭代数降到很小：
+
+```bash
+python baselines/heuristic/run_all_baselines.py \
+  --datasets 283.csv \
+  --methods Beam IG SA \
+  --beam_width 2 \
+  --beam_branch_factor 1 \
+  --beam_levels 1 \
+  --beam_patience 1 \
+  --ig_iterations 1 \
+  --ig_destroy_ratio 0.05 \
+  --sa_iterations 1 \
+  --seed 42
+```
+
+### 学习型低维 baseline：Basic PPO 与 DQN
+
+`BasicPPO` 和 `DQN` 是不使用 HB-GAT-PN 图网络的 flat-state 学习型 baseline。它们会读取同一套 YAML 配置、平台硬件配置和 `--set` 覆盖，但模型输入是由 APAL 环境状态展平得到的一维向量，因此不属于 GAT、Pointer 或 mask 消融。
+
+训练 Basic PPO：
+
+```bash
+python baselines/basic_ppo/train_basic.py \
+  --config conf/experiment/initial_schedule_283.yaml \
+  --max-episodes 300 \
+  --batch-size 16 \
+  --seed 42 \
+  --output-dir results
+```
+
+训练 DQN：
+
+```bash
+python baselines/dqn/train_dqn.py \
+  --config conf/experiment/initial_schedule_283.yaml \
+  --max-episodes 300 \
+  --batch-size 16 \
+  --seed 42 \
+  --output-dir results
+```
+
+离线评估 Basic PPO，并导出到统一 baseline 结果目录：
+
+```bash
+python baselines/evaluate_flat_rl_baseline.py \
+  --algorithm basic_ppo \
+  --model-path results/basic_ppo_baseline_283_<timestamp>/basic_ppo_model_final.pth \
+  --config conf/experiment/initial_schedule_283.yaml \
+  --datasets 283.csv \
+  --seed 42
+```
+
+离线评估 DQN：
+
+```bash
+python baselines/evaluate_flat_rl_baseline.py \
+  --algorithm dqn \
+  --model-path results/dqn_baseline_283_<timestamp>/dqn_model.pth \
+  --config conf/experiment/initial_schedule_283.yaml \
+  --datasets 283.csv \
+  --seed 42
+```
+
+评估结果会写入：
+
+```text
+results/eval_logs/BasicPPO/<dataset_name>/metrics.json
+results/eval_logs/BasicPPO/<dataset_name>/schedule.csv
+results/eval_logs/DQN/<dataset_name>/metrics.json
+results/eval_logs/DQN/<dataset_name>/schedule.csv
+```
+
+### HB-GAT-PN 消融实验
+
+正式消融统一使用主 PPO Lightning 入口。当前 CAC 对比消融推荐使用 `scale_400_800_schedule.yaml`：训练集为 `data/scale_400_800_datasets`，在线验证集为 `data/680.csv`。为避免每次在线验证跑四个大规模基准，消融训练阶段建议关闭 `enable_multi_benchmark_eval`，每个实验单独设置 `experiment_name`。
+
+完整模型对照：
+
+```bash
+python train.py \
+  --config conf/experiment/scale_400_800_schedule.yaml \
+  --set experiment_name=scale_400_800_full \
+  --set enable_multi_benchmark_eval=false
+```
+
+常用三类结构消融：
+
+```bash
+python train.py \
+  --config conf/experiment/scale_400_800_schedule.yaml \
+  --ablation-no-gat \
+  --set experiment_name=scale_400_800_no_gat \
+  --set enable_multi_benchmark_eval=false
+
+python train.py \
+  --config conf/experiment/scale_400_800_schedule.yaml \
+  --ablation-no-pointer \
+  --set experiment_name=scale_400_800_no_pointer \
+  --set enable_multi_benchmark_eval=false
+
+python train.py \
+  --config conf/experiment/scale_400_800_schedule.yaml \
+  --ablation-no-mask \
+  --set experiment_name=scale_400_800_no_mask \
+  --set enable_multi_benchmark_eval=false
+```
+
+也可以通过 `--set` 做其他结构或训练机制消融：
+
+```bash
+python train.py \
+  --config conf/experiment/scale_400_800_schedule.yaml \
+  --set experiment_name=scale_400_800_no_attention_critic \
+  --set enable_multi_benchmark_eval=false \
+  --set use_attention_critic=false \
+  --set use_shared_trunk=true \
+  --set use_autoregressive_worker=false
+```
+
+如果服务器上存在旧配置残留，或者需要显式确认训练和验证路径，可在命令中强制覆盖：
+
+```bash
+python train.py \
+  --config conf/experiment/scale_400_800_schedule.yaml \
+  --train-data-path data/scale_400_800_datasets \
+  --data-path data/680.csv \
+  --set enable_multi_benchmark_eval=false
+```
+
+若需要用四基准归一化综合评分保存 best model，则去掉 `--set enable_multi_benchmark_eval=false`，使用配置文件中的 `data/283.csv`、`data/680.csv`、`data/2338.csv`、`data/3182.csv` 进行验证。旧的 `tests/test_sensitivity_analysis.py` 属于历史实验脚本，不建议作为当前论文消融入口。
+
+#### 常用参数说明：
+- `--data_dir`：数据集文件所在的根目录（默认 `data`）。
+- `--datasets`：待测试的 CSV 文件列表（默认 `283.csv 680.csv 2338.csv 3182.csv`）。
+- `--methods`：待评估的算法列表。如果想要快速评估启发式规则并跳过较慢的 GA 和高级搜索，可以只保留 `SPT LPT Random EDD CPM MSL`。新增算法可写为 `Beam IG SA`，也兼容 `BeamSearch`、`IteratedGreedy`、`DestroyRepair`、`SimulatedAnnealing` 等别名。
+- `--random_runs`：含有随机性规则的独立运行轮数（默认 `5`，如 `Random` 规则会运行 5 次求均值）。
+- `--ga_pop_size` 和 `--ga_max_gen`：遗传算法的种群大小和迭代代数。
+- `--balance_weight`：高级启发式 fitness 中负载均衡标准差的权重，fitness 为 `makespan + balance_weight * workload_balance_std`，默认 `1.0`。
+- `--beam_width`：Beam Search 每层保留的候选解数量，越大越可能找到更好排程，但运行时间也会增加。
+- `--beam_branch_factor`：Beam Search 每个候选解生成的邻域分支数量。
+- `--beam_levels`：Beam Search 最大展开层数。
+- `--beam_patience`：Beam Search 连续多少层无改进后提前停止。
+- `--ig_iterations`：Iterated Greedy / Destroy-and-Repair 的迭代次数。
+- `--ig_destroy_ratio`：每轮破坏并重新修复的工序比例，默认 `0.10`。
+- `--ig_noise_sigma`：修复阶段优先级扰动强度。
+- `--sa_iterations`：Simulated Annealing 的迭代次数。
+- `--sa_initial_temp`：模拟退火初始温度。当前实现使用相对 `ideal_makespan` 的归一化 fitness 差值，因此该值不需要随数据集规模线性放大。
+- `--sa_cooling`：降温系数，默认 `0.96`。
+- `--sa_min_temp`：最低温度，默认 `0.0001`。
+
+### 输出结果查看
+
+评估完成后，结果将按照以下规则进行多层级、结构化归档：
+
+1. **终端统计汇总表**：评估运行结束后，控制台会直接输出所有方法在各个数据集上的指标对比表格（包含 Makespan、工作量偏差 std、工人利用率、站位利用率、推理耗时以及是否死锁）。同时该汇总表格会被导出为 CSV 文件：
+   - 汇总表格路径：`results/eval_logs/baselines_summary.csv`
+2. **各算法独立数据集的指标与排程**：每个算法在对应数据集下的评估明细将被详细记录在：
+   - **度量指标**：`results/eval_logs/<method>/<dataset_name>/metrics.json`
+   - **排程明细**：`results/eval_logs/<method>/<dataset_name>/schedule.csv` (CSV 包含每个任务的 Start/End/Team/StationID)
+   - **运行日志**：`results/eval_logs/<method>/<dataset_name>/run.log`

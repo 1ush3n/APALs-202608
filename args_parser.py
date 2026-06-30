@@ -30,20 +30,20 @@ def get_base_parser() -> argparse.ArgumentParser:
 
 def get_dqn_parser() -> argparse.ArgumentParser:
     parser = get_base_parser()
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--epsilon", type=float, default=1.0)
-    parser.add_argument("--epsilon_min", type=float, default=0.01)
-    parser.add_argument("--epsilon_decay", type=float, default=0.995)
-    parser.add_argument("--memory_size", type=int, default=10000)
+    parser.add_argument("--gamma", type=float, default=None)
+    parser.add_argument("--epsilon", type=float, default=None)
+    parser.add_argument("--epsilon_min", type=float, default=None)
+    parser.add_argument("--epsilon_decay", type=float, default=None)
+    parser.add_argument("--memory_size", type=int, default=None)
     return parser
 
 
 def get_basic_ppo_parser() -> argparse.ArgumentParser:
     parser = get_base_parser()
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--gamma", type=float, default=0.99)
-    parser.add_argument("--lamda", type=float, default=0.95)
-    parser.add_argument("--clip_epsilon", type=float, default=0.2)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--gamma", type=float, default=None)
+    parser.add_argument("--lamda", type=float, default=None)
+    parser.add_argument("--clip_epsilon", type=float, default=None)
     return parser
 
 

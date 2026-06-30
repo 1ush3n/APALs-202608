@@ -307,7 +307,7 @@ if __name__ == "__main__":
     if not os.path.exists(data_path) and os.path.exists(os.path.join(os.getcwd(), data_path)):
          data_path = os.path.join(os.getcwd(), data_path)
          
-    env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=2026)
+    env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=42)
     
     ga_solver = GeneticAlgorithmScheduler(env, pop_size=args.pop_size, max_gen=args.max_gen)
     ga_solver.run()

@@ -1,13 +1,19 @@
 import time
 import logging
-import pandas as pd
 from datetime import datetime
 from pathlib import Path
+from configs import configs
 
 def init_logger(args, experiment_name):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    data_basename = Path(getattr(args, 'data_path', 'default')).stem
-    exp_dir = Path(getattr(args, 'result_dir', 'results')) / f"{experiment_name}_{data_basename}_{timestamp}"
+    data_path = getattr(args, 'data_path', None) or getattr(configs, 'data_file_path', 'default')
+    data_basename = Path(data_path).stem
+    output_root = (
+        getattr(args, 'output_dir', None)
+        or getattr(args, 'result_dir', None)
+        or getattr(configs, 'result_dir', 'results')
+    )
+    exp_dir = Path(output_root) / f"{experiment_name}_{data_basename}_{timestamp}"
     exp_dir.mkdir(parents=True, exist_ok=True)
     
     log_file = exp_dir / f"{experiment_name}.log"

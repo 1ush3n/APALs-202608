@@ -10,8 +10,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from configs import configs
 
 def generate_worker_pool():
-    np.random.seed(2026)
-    random.seed(2026)
+    seed = int(getattr(configs, "seed", 42))
+    np.random.seed(seed)
+    random.seed(seed)
     
     # 根据用户请求，为了满足3000级别超大订单集的鲁棒性，直接生成 1000 名全技能库超级备用池！
     n_w_max = 1000

@@ -47,6 +47,7 @@ class Config:
     # ------------------
     train_data_path_or_dir: str = "data/generated/initial_283"
     switch_dataset_every_updates: int = 1                 # 频繁切换以增强泛化能力
+    random_sample_dataset: bool = True                   # 是否启用随机抽取数据集图纸，默认开启，可配置为 false 恢复顺序轮询
     dataset_context_cache_size: int = 2                   # 每个环境最多缓存的完整图上下文数量
     enable_multiscale_training: bool = False              # 是否启用多规模 APAL 反规模采样训练
     multiscale_min_ops: int = 200                         # 多规模训练纳入的最小工序数
@@ -105,7 +106,7 @@ class Config:
     reschedule_baseline_model_path: str = "checkpoints/initial_schedule/bestmodel/best_model.pth"
     reschedule_scenario_path: str = ""
     reschedule_eval_scenario_path: str = "results/reschedule_eval_scenarios.csv"
-    reschedule_eval_scenario_seed: int = 30300
+    reschedule_eval_scenario_seed: int = 42
     reschedule_start_time_min_ratio: float = 0.15
     reschedule_start_time_max_ratio: float = 0.65
     reschedule_delay_task_prob: float = 0.08
@@ -229,6 +230,7 @@ class Config:
     lightning_devices: int = 1
     float32_matmul_precision: str = "high"
     eval_scenarios: list[str] = field(default_factory=lambda: ["standard"])
+    verbose_eval_progress: bool = False
 
     # ------------------
     # 日志与监控 (Logging)

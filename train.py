@@ -209,7 +209,7 @@ def ensure_reschedule_eval_scenarios_available(config_obj=configs) -> Path | Non
         return None
     baseline = load_baseline_schedule(baseline_path)
     num_scenarios = max(1, int(getattr(config_obj, "reschedule_eval_num_scenarios", 4)))
-    seed = int(getattr(config_obj, "reschedule_eval_scenario_seed", 30300))
+    seed = int(getattr(config_obj, "reschedule_eval_scenario_seed", 42))
     scenarios = []
     for idx in range(num_scenarios):
         scenario = sample_task_delay_scenario(
@@ -229,11 +229,16 @@ def ensure_reschedule_eval_scenarios_available(config_obj=configs) -> Path | Non
 # 设置全局随机种子
 def set_seed(seed=42):
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except TypeError:
+        torch.use_deterministic_algorithms(True)
 
 
 def initialize_training_config(args, argv=None, system_name: str | None = None):
@@ -467,6 +472,7 @@ def evaluate_model(
 
     # 评估期间必须关闭 Dropout 等机制
     agent.policy.eval()
+    verbose_eval = bool(getattr(configs, "verbose_eval_progress", writer is None))
     
     # 备份当前 configs 状态，以防评估过程污染训练中的全局超参
     backup_dynamic_events = getattr(configs, 'enable_dynamic_events', False)
@@ -480,7 +486,7 @@ def evaluate_model(
             'rand_dur': False,
             'rand_w': False,
             'dyn_ev': False,
-            'seed': 20260
+            'seed': None
         },
         # Scenario 1: Duration Noise (工时固定加噪)
         {
@@ -488,7 +494,7 @@ def evaluate_model(
             'rand_dur': True,
             'rand_w': False,
             'dyn_ev': False,
-            'seed': 20261
+            'seed': None
         },
         # Scenario 2: Worker Perturbation (工人固定缺损)
         {
@@ -496,7 +502,7 @@ def evaluate_model(
             'rand_dur': False,
             'rand_w': True,
             'dyn_ev': False,
-            'seed': 20262
+            'seed': None
         },
         # Scenario 3: Dynamic Events (固定事件扰动)
         {
@@ -504,7 +510,7 @@ def evaluate_model(
             'rand_dur': False,
             'rand_w': False,
             'dyn_ev': True,
-            'seed': 20263
+            'seed': None
         }
     ]
     if scenario_names is not None:
@@ -518,7 +524,10 @@ def evaluate_model(
         scenarios = [scenario for scenario in scenarios if scenario["name"] in selected]
         if not scenarios:
             raise ValueError(f"未选择任何有效评估场景: {scenario_names}")
-    
+    base_eval_seed = int(getattr(configs, "seed", 42))
+    runs_per_scenario = max(1, int(num_runs))
+    for scenario_idx, scenario in enumerate(scenarios):
+        scenario["seed"] = base_eval_seed + scenario_idx * runs_per_scenario
     scenario_results = []
     
     # 依次执行各情景推演
@@ -541,12 +550,12 @@ def evaluate_model(
         sc_worker_utils = []
         sc_station_utils = []
 
-        for _ in range(num_runs):
-            state = env.reset(randomize_duration=sc['rand_dur'], randomize_workers=sc['rand_w'], seed=sc['seed'])
+        for run_idx in range(runs_per_scenario):
+            state = env.reset(randomize_duration=sc['rand_dur'], randomize_workers=sc['rand_w'], seed=sc['seed'] + run_idx)
             done = False
             total_reward = 0
             device = agent.device
-            
+             
             start_time = time.time()
             while not done:
                 task_mask, station_mask, worker_mask = env.get_masks()
@@ -579,7 +588,7 @@ def evaluate_model(
                 
                 state, reward, done, _ = env.step(action)
                 total_reward += reward
-                
+                 
             end_time = time.time()
             
             if len(env.assigned_tasks) != env.num_tasks:
@@ -610,10 +619,19 @@ def evaluate_model(
                 w_util = worker_busy_time / (env.num_workers * final_makespan) if final_makespan > 0 else 0.0
                 max_slots = getattr(configs, 'max_slots_per_station', 3)
                 s_util = np.sum(station_busy_time) / (env.num_stations * max_slots * final_makespan) if final_makespan > 0 else 0.0
-                
+                 
                 sc_worker_utils.append(w_util)
                 sc_station_utils.append(s_util)
-                
+            if verbose_eval:
+                assigned_count = len(getattr(env, "assigned_tasks", []))
+                complete = assigned_count == getattr(env, "num_tasks", assigned_count)
+                print(
+                    f"[Eval][RunResult] scenario={sc['name']} run={run_idx + 1}/{runs_per_scenario} "
+                    f"complete={int(complete)} tasks={assigned_count}/{getattr(env, 'num_tasks', '?')} "
+                    f"Mk={float(sc_makespans[-1]):.2f} Time={float(sc_durations[-1]):.2f}s",
+                    flush=True,
+                )
+                 
         best_idx = np.argmin(sc_makespans)
         sc_res = {
             'name': sc['name'],
@@ -626,7 +644,14 @@ def evaluate_model(
             's_util': float(np.mean(sc_station_utils))
         }
         scenario_results.append(sc_res)
-        
+        if verbose_eval:
+            print(
+                f"[Eval][ScenarioResult] scenario={sc['name']} "
+                f"Mk={sc_res['makespan']:.2f} Bal={sc_res['balance']:.2f} "
+                f"Reward={sc_res['reward']:.2f} AvgTime={sc_res['duration']:.2f}s",
+                flush=True,
+            )
+         
         if writer is not None:
             writer.add_scalar(f'Eval_Scenario/{sc["name"]}_Makespan', sc_res['makespan'], current_ep)
             writer.add_scalar(f'Eval_Scenario/{sc["name"]}_Reward', sc_res['reward'], current_ep)
@@ -648,6 +673,14 @@ def evaluate_model(
     
     # 最佳排程图纸返回 Standard (0_Standard) 下的结果，以方便正常绘制与检查
     best_sch = scenario_results[0]['schedule']
+    if verbose_eval:
+        print(
+            "[Eval][Result] "
+            f"Mk={avg_makespan:.2f} Bal={avg_balance:.2f} Reward={avg_reward:.2f} "
+            f"AvgTime={avg_duration:.2f}s WUtil={avg_w_util * 100:.1f}% "
+            f"SUtil={avg_s_util * 100:.1f}% BestTasks={len(best_sch)}",
+            flush=True,
+        )
     
     return avg_makespan, avg_balance, avg_reward, best_sch, avg_duration, avg_w_util, avg_s_util
 
@@ -678,8 +711,9 @@ def evaluate_initial_multi_benchmark(agent, config_obj=configs, writer=None, cur
             benchmark_name = data_path.stem
             if benchmark_name not in refs:
                 raise ValueError(f"缺少基准 {benchmark_name} 的 reference makespan")
-            env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)
-            state = env.reset(randomize_duration=False, randomize_workers=False, seed=2026)
+            benchmark_seed = int(getattr(config_obj, "seed", 42)) + len(rows)
+            env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=benchmark_seed)
+            state = env.reset(randomize_duration=False, randomize_workers=False, seed=benchmark_seed)
             done = False
             invalid_step_count = 0
             start_time = time.time()
@@ -908,7 +942,7 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
         scenario_items = scenario_items[: max(1, int(num_runs))]
 
     try:
-        base_seed = int(getattr(configs, "reschedule_eval_scenario_seed", 30300))
+        base_seed = int(getattr(configs, "reschedule_eval_scenario_seed", 42))
         for idx, (scenario_id, scenario) in enumerate(scenario_items):
             setattr(env, "_forced_reschedule_scenario", scenario)
             state = env.reset(randomize_duration=False, randomize_workers=False, seed=base_seed + idx)
@@ -1119,7 +1153,7 @@ def train(args):
             raise RuntimeError("平台硬件配置必须显式指定 vector_env_start_method")
         print(f"初始化 DPPO 向量化环境，并行数量: {num_envs} (平台: {plat}, start_method: {start_method})")
         from utils.vector_env import EnvCreator
-        make_env = EnvCreator(str(train_dir), seed_offset=42)
+        make_env = EnvCreator(str(train_dir), seed_offset=int(configs.seed))
         vec_env = VectorEnv(
             make_env,
             num_envs=num_envs,
@@ -1132,7 +1166,7 @@ def train(args):
         
         # [Validation] 验证环境：绑定单一的稳定基准图，防止评估基准浮动
         print(f"基准评估图 (Eval Graph): {data_path}")
-        eval_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)
+        eval_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(configs.seed))
         multiscale_sampler = None
         current_multiscale_candidate = None
         if getattr(configs, "enable_multiscale_training", False):
@@ -1282,6 +1316,7 @@ def train(args):
         max_episodes = configs.max_episodes 
         update_every_episodes = configs.update_every_episodes
         eval_freq = configs.eval_freq
+        dataset_rng = np.random.RandomState(int(configs.seed))
         
         print(f"开始 DPPO Episode 循环 (Max: {max_episodes}, Envs: {num_envs})...")
         use_fast_path = getattr(configs, 'use_rollout_snapshot_fastpath', True)
@@ -1693,7 +1728,10 @@ def train(args):
                 current_update_count = ep // update_every_episodes
                 if multiscale_sampler is None and current_update_count % getattr(configs, 'switch_dataset_every_updates', 1) == 0:
                     if env.dataset_count > 1:
-                        next_idx = current_update_count % env.dataset_count
+                        if getattr(configs, 'random_sample_dataset', True):
+                            next_idx = dataset_rng.randint(0, env.dataset_count)
+                        else:
+                            next_idx = current_update_count % env.dataset_count
                         vec_env.switch_dataset_all(next_idx)
                         descriptor = env.dataset_pool[next_idx] or {}
                         print(
@@ -1979,7 +2017,7 @@ def train(args):
         # 配置 PPO 最终推演
         print("\n>>> [1/2] 开始执行 PPO Agent 的终局推演...")
         # 重新实例环境，避免脏数据
-        eval_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)
+        eval_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(configs.seed))
         if getattr(configs, "enable_reschedule_mode", False):
             ppo_makespan, ppo_balance, _, ppo_assigned, ppo_duration, *rest = evaluate_reschedule_model(
                 eval_env,
@@ -1997,7 +2035,7 @@ def train(args):
 
         # 配置 GA 基准对抗
         print("\n>>> [2/2] 开始执行 Genetic Algorithm (GA) 基线推演...")
-        ga_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=2026)
+        ga_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(configs.seed))
         ga_scheduler = GeneticAlgorithmScheduler(ga_env, pop_size=30, max_gen=20)
         ga_start = time.time()
         ga_makespan, ga_balance, ga_assigned = ga_scheduler.run()

@@ -47,7 +47,10 @@ def write_run_manifest(
     )
     try:
         git_commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True, encoding="utf-8"
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            encoding="utf-8",
+            stderr=subprocess.DEVNULL,
         ).strip()
     except Exception:
         git_commit = None

@@ -28,16 +28,32 @@ class bcolors:
     BOLD = '\033[1m'
 
 def verify_schedule(data_path, schedule_path):
-    print(f"正在加载环境数据: {data_path} ...")
-    # 初始化环境仅为了提取 Ground Truth 物理信息，杜绝污染
-    env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=2026)
-    
     print(f"正在加载排程结果: {schedule_path} ...")
     try:
         df = pd.read_csv(schedule_path)
     except Exception as e:
          print(f"{bcolors.FAIL}无法读取排程文件: {e}{bcolors.ENDC}")
          return False
+
+    # 自动从排程 CSV 中探测最大工人数，避免环境初始化时数组越界
+    try:
+        max_w = 0
+        for idx, row in df.iterrows():
+            team_str = str(row.get('Team', '[]')).strip()
+            if team_str.startswith('[') and team_str.endswith(']'):
+                content = team_str[1:-1].replace(',', ' ')
+                team = [int(x) for x in content.split() if x.strip()]
+                if team:
+                    max_w = max(max_w, max(team))
+        if max_w > 0:
+            configs.n_w = max(configs.n_w, max_w + 1)
+            print(f"{bcolors.OKGREEN}[Verifier] 自动探测到最大工人 ID 为 {max_w}，已将 env 工人数动态调整为 {configs.n_w}{bcolors.ENDC}")
+    except Exception as e:
+        print(f"{bcolors.WARNING}警告: 自动探测最大工人数失败 ({e})，将使用默认配置。{bcolors.ENDC}")
+
+    print(f"正在加载环境数据: {data_path} ...")
+    # 初始化环境仅为了提取 Ground Truth 物理信息，杜绝污染
+    env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=int(getattr(configs, "seed", 42)))
 
     all_passed = True
     

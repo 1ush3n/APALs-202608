@@ -304,7 +304,7 @@ class RescheduleGeneticAlgorithmScheduler:
             population = next_population[: self.pop_size]
 
         assert best_individual is not None
-        final_fitness, final_metrics, final_env = self._decode_individual(best_individual, seed_offset=10_000)
+        final_fitness, final_metrics, final_env = self._decode_individual(best_individual, seed_offset=0)
         duration = time.time() - start_wall
         metrics = best_metrics or final_metrics
         metrics.update(final_metrics)
@@ -356,7 +356,7 @@ def evaluate_reschedule_ga(
         scenario_items = scenario_items[: max(1, int(num_runs))]
 
     results: list[RescheduleGAResult] = []
-    base_seed = int(seed if seed is not None else getattr(configs, "reschedule_eval_scenario_seed", 30300))
+    base_seed = int(seed if seed is not None else getattr(configs, "reschedule_eval_scenario_seed", 42))
     for idx, (scenario_id, scenario) in enumerate(scenario_items):
         solver = RescheduleGeneticAlgorithmScheduler(
             data_path_or_dir=data_path,
@@ -441,7 +441,7 @@ def main() -> None:
     parser.add_argument("--pop_size", type=int, default=30)
     parser.add_argument("--max_gen", type=int, default=20)
     parser.add_argument("--num_runs", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="results/reschedule_ga")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()

@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import argparse
+import random
 import json
 import time
 import copy
@@ -115,10 +116,16 @@ PRESET_PARAM_GRID = {
 
 def set_seed(seed: int = 42):
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
+    random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=True)
+    except TypeError:
+        torch.use_deterministic_algorithms(True)
 
 
 def run_short_training(
@@ -153,7 +160,7 @@ def run_short_training(
 
     try:
         env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=_cfg.seed)
-        eval_env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=2026)
+        eval_env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=_cfg.seed)
 
         try:
             model = HBGATPN(_cfg).to(device)
