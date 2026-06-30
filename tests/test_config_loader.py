@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -20,7 +21,12 @@ from configs import (
 )
 from args_parser import get_base_parser
 from runtime.configuration import parse_runtime_args, parse_set_overrides, resolve_runtime_config
-from runtime.artifacts import build_run_id, checkpoint_paths as artifact_checkpoint_paths, run_context
+from runtime.artifacts import (
+    build_run_id,
+    checkpoint_paths as artifact_checkpoint_paths,
+    resolve_run_output_dir,
+    run_context,
+)
 from train import PROJECT_ROOT, resolve_checkpoint_paths, resolve_tensorboard_log_root, write_best_model_meta
 
 
@@ -246,6 +252,31 @@ def test_hydra_style_override_rejects_unknown_fields() -> None:
 
     with pytest.raises(KeyError, match="未知配置字段"):
         resolve_runtime_config(args, target=Config(), system_name="Windows")
+
+
+def test_single_string_config_and_run_output_dir_are_supported(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        config=str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml"),
+        set_values=[],
+        hydra_overrides=[],
+    )
+    cfg = Config()
+    resolve_runtime_config(args, target=cfg, system_name="Windows")
+    cfg.runs_root = str(tmp_path / "runs")
+    cfg.run_id = "tool_run_260630-153000"
+
+    output_dir, context = resolve_run_output_dir(
+        cfg,
+        PROJECT_ROOT,
+        default_legacy_dir="results/eval_logs",
+        run_subdir="baselines/heuristic",
+        explicit_dir=None,
+        section="artifacts",
+    )
+
+    assert context is not None
+    assert output_dir == tmp_path / "runs" / cfg.experiment_name / "tool_run_260630-153000" / "artifacts" / "baselines" / "heuristic"
+    assert output_dir.exists()
 
 
 def test_set_rejects_invalid_syntax_and_unknown_fields() -> None:

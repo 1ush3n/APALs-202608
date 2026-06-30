@@ -22,8 +22,17 @@ from baselines.dqn.train_dqn import DQN
 from baselines.heuristic.advanced_schedulers import build_metrics
 from configs import configs, load_config_files
 from env_wrapper import extract_flat_state_for_baselines
-from runtime.configuration import add_common_config_arguments
-from train import initialize_training_config, set_seed
+from runtime.artifacts import (
+    resolve_run_output_dir,
+    write_run_context_files,
+    write_run_manifest,
+)
+from runtime.configuration import (
+    add_common_config_arguments,
+    parse_runtime_args,
+    resolve_runtime_config,
+)
+from train import set_seed
 from environment import AirLineEnv_Graph
 
 
@@ -254,9 +263,11 @@ def save_eval_results(
     metrics: dict[str, Any], 
     assigned_tasks: list[Any], 
     env: AirLineEnv_Graph, 
-    run_metrics_list: List[Dict[str, Any]] | None = None
+    run_metrics_list: List[Dict[str, Any]] | None = None,
+    output_root: Path | None = None,
 ) -> None:
-    output_dir = PROJECT_ROOT / "results" / "eval_logs" / method / dataset_name
+    root = output_root or PROJECT_ROOT / "results" / "eval_logs"
+    output_dir = Path(root) / method / dataset_name
     output_dir.mkdir(parents=True, exist_ok=True)
     
     full_metrics = dict(metrics)
@@ -305,9 +316,30 @@ def main() -> None:
     parser.add_argument("--datasets", nargs="+", default=["283.csv"])
     parser.add_argument("--num-runs", "--num_runs", dest="num_runs", type=int, default=1)
     parser.add_argument("--temperature", type=float, default=0.0)
-    args = parser.parse_args()
+    args = parse_runtime_args(parser)
 
     method_name = "BasicPPO" if args.algorithm == "basic_ppo" else "DQN"
+    resolve_runtime_config(args, target=configs)
+    output_root, context = resolve_run_output_dir(
+        configs,
+        PROJECT_ROOT,
+        default_legacy_dir="results/eval_logs",
+        run_subdir="baselines/flat_state",
+        explicit_dir=getattr(args, "output_dir", None),
+        section="artifacts",
+    )
+    manifest_extra = {
+        "run_type": "baseline",
+        "artifact_kind": "flat_state_baseline",
+        "method": method_name,
+        "checkpoint": str((PROJECT_ROOT / args.model_path).resolve() if not Path(args.model_path).is_absolute() else Path(args.model_path).resolve()),
+        "datasets": list(args.datasets),
+        "output_dir": str(output_root.resolve()),
+    }
+    if context is not None:
+        write_run_context_files(context, configs, command="evaluate_flat_rl_baseline", extra=manifest_extra)
+    else:
+        write_run_manifest(output_root, configs, command="evaluate_flat_rl_baseline", extra=manifest_extra)
     checkpoint_path = Path(args.model_path)
     if not checkpoint_path.is_absolute():
         checkpoint_path = PROJECT_ROOT / checkpoint_path
@@ -316,7 +348,7 @@ def main() -> None:
 
     summary_rows = []
     for dataset_file in args.datasets:
-        initialize_training_config(args)
+        resolve_runtime_config(args, target=configs)
         set_seed(int(getattr(configs, "seed", 42)))
         dataset_path = Path(args.data_dir) / dataset_file
         if not dataset_path.is_absolute():
@@ -340,7 +372,15 @@ def main() -> None:
             num_runs=int(args.num_runs), 
             temperature=float(args.temperature)
         )
-        save_eval_results(method_name, dataset_path.stem, metrics, schedule, env, run_metrics_list)
+        save_eval_results(
+            method_name,
+            dataset_path.stem,
+            metrics,
+            schedule,
+            env,
+            run_metrics_list,
+            output_root=output_root,
+        )
         for r_idx, r_metrics in enumerate(run_metrics_list):
             summary_rows.append({
                 "Dataset": dataset_path.stem,
@@ -355,7 +395,7 @@ def main() -> None:
                 "Valid": r_metrics["valid"],
             })
 
-    summary_path = PROJECT_ROOT / "results" / "eval_logs" / f"{method_name}_summary.csv"
+    summary_path = output_root / f"{method_name}_summary.csv"
     pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
     print(f"[*] 汇总结果已导出: {summary_path}")
 

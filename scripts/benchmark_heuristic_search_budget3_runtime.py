@@ -4,7 +4,6 @@ import argparse
 import csv
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -15,6 +14,21 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from configs import configs
+from runtime.artifacts import (
+    resolve_run_output_dir,
+    write_run_context_files,
+    write_run_manifest,
+)
+from runtime.configuration import (
+    add_common_config_arguments,
+    parse_runtime_args,
+    resolve_runtime_config,
+)
+
 DEFAULT_DATASETS = ["283.csv", "680.csv", "2338.csv", "3182.csv"]
 DEFAULT_METHODS = ["SPT", "LPT", "Random", "EDD", "CPM", "MSL", "Beam", "IG", "SA"]
 HEURISTIC_METHODS = {"SPT", "LPT", "Random", "EDD", "CPM", "MSL"}
@@ -164,7 +178,12 @@ def pivot_rows(rows: list[dict[str, Any]], *, value_key: str) -> list[dict[str, 
     return output
 
 
-def build_baseline_command(method: str, dataset: str, args: argparse.Namespace) -> list[str]:
+def build_baseline_command(
+    method: str,
+    dataset: str,
+    args: argparse.Namespace,
+    artifact_root: Path,
+) -> list[str]:
     budget = int(args.search_budget)
     return [
         args.python,
@@ -209,6 +228,8 @@ def build_baseline_command(method: str, dataset: str, args: argparse.Namespace) 
         str(args.balance_weight),
         "--seed",
         str(args.seed),
+        "--output-dir",
+        str(artifact_root),
     ]
 
 
@@ -285,11 +306,6 @@ def parse_metrics(metrics_path: Path) -> dict[str, Any]:
     }
 
 
-def copy_artifacts(source_dir: Path, target_dir: Path) -> None:
-    if source_dir.exists():
-        shutil.copytree(source_dir, target_dir / "artifacts", dirs_exist_ok=True)
-
-
 def estimate_eta(done_count: int, total_count: int, overall_start: float) -> float | None:
     if done_count <= 0:
         return None
@@ -301,7 +317,8 @@ def estimate_eta(done_count: int, total_count: int, overall_start: float) -> flo
 def run_one(method: str, dataset: str, args: argparse.Namespace, output_dir: Path) -> dict[str, Any]:
     stem = dataset_stem(dataset)
     raw_dir = output_dir / "raw" / method / stem
-    command = build_baseline_command(method, dataset, args)
+    artifact_root = raw_dir / "artifacts"
+    command = build_baseline_command(method, dataset, args, artifact_root)
     print(f"  命令: {command_to_string(command)}", flush=True)
     result = run_command(
         command,
@@ -310,7 +327,7 @@ def run_one(method: str, dataset: str, args: argparse.Namespace, output_dir: Pat
         progress_interval_sec=float(args.progress_interval_sec),
     )
 
-    artifact_dir = PROJECT_ROOT / "results" / "eval_logs" / method / stem
+    artifact_dir = artifact_root / method / stem
     metrics_path = artifact_dir / "metrics.json"
     row: dict[str, Any] = {
         "method": method,
@@ -329,7 +346,6 @@ def run_one(method: str, dataset: str, args: argparse.Namespace, output_dir: Pat
         return row
 
     try:
-        copy_artifacts(artifact_dir, raw_dir)
         row.update(parse_metrics(metrics_path))
     except Exception as exc:
         row["status"] = "missing_metrics"
@@ -438,8 +454,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--datasets", nargs="+", default=DEFAULT_DATASETS)
     parser.add_argument("--methods", nargs="+", default=DEFAULT_METHODS)
     parser.add_argument("--search-budget", type=int, default=3)
-    parser.add_argument("--output-dir", default="results/runtime_benchmark/heuristic_search_budget3")
-    parser.add_argument("--docs-path", default="docs/heuristic_search_budget3_runtime.md")
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--docs-path", default=None)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--command-timeout-sec", type=int, default=0)
@@ -455,20 +471,38 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sa-initial-temp", type=float, default=0.05)
     parser.add_argument("--sa-cooling", type=float, default=0.96)
     parser.add_argument("--sa-min-temp", type=float, default=1e-4)
+    add_common_config_arguments(parser)
     return parser
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    args = parse_runtime_args(build_parser())
     if int(args.search_budget) < 1:
         raise ValueError("--search-budget 必须大于等于 1")
 
-    output_dir = Path(args.output_dir)
-    if not output_dir.is_absolute():
-        output_dir = PROJECT_ROOT / output_dir
-    docs_path = Path(args.docs_path)
+    resolve_runtime_config(args, target=configs)
+    output_dir, context = resolve_run_output_dir(
+        configs,
+        PROJECT_ROOT,
+        default_legacy_dir="results/runtime_benchmark/heuristic_search_budget3",
+        run_subdir="benchmark/heuristic_search_budget3",
+        explicit_dir=args.output_dir,
+        section="artifacts",
+    )
+    docs_path = Path(args.docs_path) if args.docs_path else output_dir / "heuristic_search_budget3_runtime.md"
     if not docs_path.is_absolute():
         docs_path = PROJECT_ROOT / docs_path
+    manifest_extra = {
+        "run_type": "benchmark",
+        "artifact_kind": "heuristic_search_budget3",
+        "methods": list(args.methods),
+        "datasets": list(args.datasets),
+        "output_dir": str(output_dir.resolve()),
+    }
+    if context is not None:
+        write_run_context_files(context, configs, command="benchmark_heuristic_search_budget3_runtime", extra=manifest_extra)
+    else:
+        write_run_manifest(output_dir, configs, command="benchmark_heuristic_search_budget3_runtime", extra=manifest_extra)
 
     args.datasets = [str(dataset) for dataset in args.datasets]
     args.methods = [str(method) for method in args.methods]

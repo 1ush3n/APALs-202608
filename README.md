@@ -379,9 +379,11 @@ python evaluate_reschedule_model.py \
 评估结果保存到：
 
 ```text
-results/reschedule_ppo_eval/reschedule_ppo_eval.csv
-results/reschedule_ppo_eval/reschedule_ppo_eval_summary.json
+runs/reschedule_task_delay/<run_id>/eval/reschedule/reschedule_ppo_eval.csv
+runs/reschedule_task_delay/<run_id>/eval/reschedule/reschedule_ppo_eval_summary.json
 ```
+
+显式传 `--output-dir results/reschedule_ppo_eval` 时会写回旧目录。
 
 ## 运行日志
 
@@ -445,6 +447,10 @@ python train.py --trainer lightning --config conf/experiment/initial_schedule_68
 | 运行清单 | `runs/<实验名>/<run_id>/configs/run_manifest.json` | run_id、命令、Git commit 和 checkpoint 元数据 |
 | 评估结果 | `runs/<实验名>/<run_id>/eval/` | `summary.json`、`schedule.csv`、`gantt.png` 等 |
 | 附加产物 | `runs/<实验名>/<run_id>/artifacts/` | reports、traces 和后续论文实验中间文件 |
+| Baseline 评估 | `runs/<实验名>/<run_id>/artifacts/baselines/` | Heuristic、GA、BasicPPO、DQN 的 metrics、schedule 和 run.log |
+| Benchmark 结果 | `runs/<实验名>/<run_id>/artifacts/benchmark/` | runtime summary、raw 子进程输出和论文表格 CSV |
+
+实验工具默认也写入 `runs`。若需要旧路径，显式传入 `--output-dir results/eval_logs`、`--output-dir results/runtime_benchmark/...`，或使用 `--set artifact_layout=legacy`。
 
 生成所有运行的文件索引：
 
@@ -452,7 +458,7 @@ python train.py --trainer lightning --config conf/experiment/initial_schedule_68
 python scripts/index_runs.py --runs-root runs
 ```
 
-该命令会生成 `runs/index.csv` 和 `runs/index.json`，汇总每个 run 的 `run_id`、配置来源、checkpoint、数据集、评估 summary 和核心指标。若某个 run 尚未执行手动评估，索引仍会保留运行清单，评估字段为空。
+该命令会生成 `runs/index.csv` 和 `runs/index.json`，汇总每个 run 的 `run_id`、配置来源、checkpoint、数据集、评估 summary、baseline metrics、benchmark rows 和核心指标。若某个 run 尚未执行手动评估，索引仍会保留运行清单，评估字段为空。
 
 ### Legacy 兼容路径
 
@@ -710,11 +716,13 @@ python baselines/evaluate_flat_rl_baseline.py \
 评估结果会写入：
 
 ```text
-results/eval_logs/BasicPPO/<dataset_name>/metrics.json
-results/eval_logs/BasicPPO/<dataset_name>/schedule.csv
-results/eval_logs/DQN/<dataset_name>/metrics.json
-results/eval_logs/DQN/<dataset_name>/schedule.csv
+runs/<实验名>/<run_id>/artifacts/baselines/flat_state/BasicPPO/<dataset_name>/metrics.json
+runs/<实验名>/<run_id>/artifacts/baselines/flat_state/BasicPPO/<dataset_name>/schedule.csv
+runs/<实验名>/<run_id>/artifacts/baselines/flat_state/DQN/<dataset_name>/metrics.json
+runs/<实验名>/<run_id>/artifacts/baselines/flat_state/DQN/<dataset_name>/schedule.csv
 ```
+
+若要恢复旧目录，显式追加 `--output-dir results/eval_logs`。
 
 ### HB-GAT-PN 消融实验
 
@@ -799,8 +807,9 @@ python train.py \
 评估完成后，结果将按照以下规则进行多层级、结构化归档：
 
 1. **终端统计汇总表**：评估运行结束后，控制台会直接输出所有方法在各个数据集上的指标对比表格（包含 Makespan、工作量偏差 std、工人利用率、站位利用率、推理耗时以及是否死锁）。同时该汇总表格会被导出为 CSV 文件：
-   - 汇总表格路径：`results/eval_logs/baselines_summary.csv`
+   - 默认汇总表格路径：`runs/<实验名>/<run_id>/artifacts/baselines/heuristic/baselines_summary.csv`
+   - 旧路径兼容：显式传 `--output-dir results/eval_logs` 后写入 `results/eval_logs/baselines_summary.csv`
 2. **各算法独立数据集的指标与排程**：每个算法在对应数据集下的评估明细将被详细记录在：
-   - **度量指标**：`results/eval_logs/<method>/<dataset_name>/metrics.json`
-   - **排程明细**：`results/eval_logs/<method>/<dataset_name>/schedule.csv` (CSV 包含每个任务的 Start/End/Team/StationID)
-   - **运行日志**：`results/eval_logs/<method>/<dataset_name>/run.log`
+   - **度量指标**：`runs/<实验名>/<run_id>/artifacts/baselines/heuristic/<method>/<dataset_name>/metrics.json`
+   - **排程明细**：`runs/<实验名>/<run_id>/artifacts/baselines/heuristic/<method>/<dataset_name>/schedule.csv`
+   - **运行日志**：`runs/<实验名>/<run_id>/artifacts/baselines/heuristic/<method>/<dataset_name>/run.log`

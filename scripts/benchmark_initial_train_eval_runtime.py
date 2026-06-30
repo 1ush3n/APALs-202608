@@ -4,7 +4,6 @@ import argparse
 import csv
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -16,6 +15,21 @@ from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from configs import configs
+from runtime.artifacts import (
+    resolve_run_output_dir,
+    write_run_context_files,
+    write_run_manifest,
+)
+from runtime.configuration import (
+    add_common_config_arguments,
+    parse_runtime_args,
+    resolve_runtime_config,
+)
+
 INITIAL_CKPT_DIR = PROJECT_ROOT / "checkpoints" / "initial_schedule"
 
 DEFAULT_DATASETS = ["283.csv", "680.csv", "2338.csv", "3182.csv"]
@@ -767,11 +781,6 @@ def parse_metrics_json(path: Path) -> dict[str, Any]:
     }
 
 
-def copy_artifacts(source_dir: Path, target_dir: Path) -> None:
-    if source_dir.exists():
-        shutil.copytree(source_dir, target_dir / "artifacts", dirs_exist_ok=True)
-
-
 def build_hbgat_eval_command(
     method: str,
     checkpoint_path: Path,
@@ -819,6 +828,7 @@ def build_flat_eval_command(
     checkpoint_path: Path,
     dataset: str,
     args: argparse.Namespace,
+    artifact_root: Path,
 ) -> list[str]:
     algorithm = "basic_ppo" if method == "ppo" else "dqn"
     return [
@@ -840,10 +850,17 @@ def build_flat_eval_command(
         str(args.temperature),
         "--seed",
         str(args.seed),
+        "--output-dir",
+        str(artifact_root),
     ]
 
 
-def build_heuristic_eval_command(method: str, dataset: str, args: argparse.Namespace) -> list[str]:
+def build_heuristic_eval_command(
+    method: str,
+    dataset: str,
+    args: argparse.Namespace,
+    artifact_root: Path,
+) -> list[str]:
     return [
         args.python,
         str(PROJECT_ROOT / "baselines" / "heuristic" / "run_all_baselines.py"),
@@ -887,6 +904,8 @@ def build_heuristic_eval_command(method: str, dataset: str, args: argparse.Names
         str(args.balance_weight),
         "--seed",
         str(args.seed),
+        "--output-dir",
+        str(artifact_root),
     ]
 
 
@@ -954,6 +973,7 @@ def run_flat_eval(
     dataset_path = resolve_data_path(data_dir, dataset)
     stem = dataset_path.stem
     raw_dir = output_dir / "raw" / "eval" / method / stem
+    artifact_root = raw_dir / "artifacts"
     checkpoint_path = flat_eval_checkpoint(method, stem)
     if not checkpoint_path.exists():
         error = f"模型不存在: {checkpoint_path}"
@@ -968,11 +988,10 @@ def run_flat_eval(
             raw_dir=raw_dir,
             error=error,
         )
-    command = build_flat_eval_command(method, checkpoint_path, dataset, args)
+    command = build_flat_eval_command(method, checkpoint_path, dataset, args, artifact_root)
     result = run_command(command, raw_dir, args.command_timeout_sec, progress)
     output_method = "BasicPPO" if method == "ppo" else "DQN"
-    artifact_dir = PROJECT_ROOT / "results" / "eval_logs" / output_method / stem
-    copy_artifacts(artifact_dir, raw_dir)
+    artifact_dir = artifact_root / output_method / stem
     row = {
         "method": method,
         "method_family": method_family(method),
@@ -1010,10 +1029,10 @@ def run_heuristic_eval(
     dataset_path = resolve_data_path(data_dir, dataset)
     stem = dataset_path.stem
     raw_dir = output_dir / "raw" / "eval" / method / stem
-    command = build_heuristic_eval_command(method, dataset, args)
+    artifact_root = raw_dir / "artifacts"
+    command = build_heuristic_eval_command(method, dataset, args, artifact_root)
     result = run_command(command, raw_dir, args.command_timeout_sec, progress)
-    artifact_dir = PROJECT_ROOT / "results" / "eval_logs" / method / stem
-    copy_artifacts(artifact_dir, raw_dir)
+    artifact_dir = artifact_root / method / stem
     row = {
         "method": method,
         "method_family": method_family(method),
@@ -1277,7 +1296,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--num-runs", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", default="results/runtime_benchmark/initial_train_eval_temperature0")
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--command-timeout-sec", type=int, default=0)
     parser.add_argument("--progress-interval-sec", type=float, default=30.0)
@@ -1299,11 +1318,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sa-initial-temp", type=float, default=0.05)
     parser.add_argument("--sa-cooling", type=float, default=0.96)
     parser.add_argument("--sa-min-temp", type=float, default=1e-4)
+    add_common_config_arguments(parser)
     return parser
 
 
 def main() -> None:
-    args = build_parser().parse_args()
+    args = parse_runtime_args(build_parser())
     if args.train_probe_episodes < 1:
         raise ValueError("--train-probe-episodes 必须大于等于 1")
     if args.hbgat_train_batch_size < 1 or args.flat_train_batch_size < 1:
@@ -1311,10 +1331,27 @@ def main() -> None:
     if args.train_num_envs < 1:
         raise ValueError("--train-num-envs 必须大于等于 1")
     script_start = time.perf_counter()
-    output_dir = Path(args.output_dir)
-    if not output_dir.is_absolute():
-        output_dir = PROJECT_ROOT / output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
+    resolve_runtime_config(args, target=configs)
+    output_dir, context = resolve_run_output_dir(
+        configs,
+        PROJECT_ROOT,
+        default_legacy_dir="results/runtime_benchmark/initial_train_eval_temperature0",
+        run_subdir="benchmark/initial_train_eval_temperature0",
+        explicit_dir=args.output_dir,
+        section="artifacts",
+    )
+    manifest_extra = {
+        "run_type": "benchmark",
+        "artifact_kind": "initial_train_eval_runtime",
+        "mode": str(args.mode),
+        "methods": list(args.methods),
+        "datasets": list(args.datasets),
+        "output_dir": str(output_dir.resolve()),
+    }
+    if context is not None:
+        write_run_context_files(context, configs, command="benchmark_initial_train_eval_runtime", extra=manifest_extra)
+    else:
+        write_run_manifest(output_dir, configs, command="benchmark_initial_train_eval_runtime", extra=manifest_extra)
 
     methods = [str(method) for method in args.methods]
     datasets = [str(dataset) for dataset in args.datasets]

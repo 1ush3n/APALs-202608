@@ -29,7 +29,16 @@ from runtime.checkpoints import (
     load_checkpoint,
     load_policy_weights,
 )
-from runtime.configuration import add_common_config_arguments, resolve_runtime_config
+from runtime.artifacts import (
+    resolve_run_output_dir,
+    write_run_context_files,
+    write_run_manifest,
+)
+from runtime.configuration import (
+    add_common_config_arguments,
+    parse_runtime_args,
+    resolve_runtime_config,
+)
 
 
 def _load_policy_weights(model: torch.nn.Module, model_path: Path, device: torch.device) -> dict[str, int | str]:
@@ -103,6 +112,9 @@ def evaluate_saved_reschedule_model(
         "scenario_path": str(Path(scenario_path).resolve()),
         "data_path": str(resolve_workspace_path(configs.data_file_path).resolve()),
         "scenario_count": int(len(rows)),
+        "makespan": float(makespan),
+        "balance_std": float(balance),
+        "reward": float(reward),
         "avg_makespan": float(makespan),
         "avg_balance_std": float(balance),
         "avg_reward": float(reward),
@@ -128,8 +140,7 @@ def main() -> None:
     parser.add_argument("--model-path", "--model_path", dest="model_path", default="checkpoints/reschedule_task_delay/bestmodel/best_model.pth")
     parser.add_argument("--num_runs", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=0.0)
-    args = parser.parse_args()
-    output_dir = args.output_dir or "results/reschedule_ppo_eval"
+    args = parse_runtime_args(parser)
 
     _, _, explicit_fields = resolve_runtime_config(args, target=configs)
     model_path = resolve_workspace_path(args.model_path)
@@ -139,14 +150,33 @@ def main() -> None:
         checkpoint.model_spec,
         explicit_fields=explicit_fields,
     )
+    output_dir, context = resolve_run_output_dir(
+        configs,
+        PROJECT_ROOT,
+        default_legacy_dir="results/reschedule_ppo_eval",
+        run_subdir="reschedule",
+        explicit_dir=getattr(args, "output_dir", None),
+        section="eval",
+    )
+    manifest_extra = {
+        "run_type": "evaluation",
+        "artifact_kind": "reschedule_ppo",
+        "checkpoint": str(model_path.resolve()),
+        "model_format": checkpoint.format_name,
+        "output_dir": str(output_dir.resolve()),
+    }
+    if context is not None:
+        write_run_context_files(context, configs, command="evaluate_reschedule_model", extra=manifest_extra)
+    else:
+        write_run_manifest(output_dir, configs, command="evaluate_reschedule_model", extra=manifest_extra)
     summary = evaluate_saved_reschedule_model(
         model_path=model_path,
         num_runs=args.num_runs,
         temperature=float(args.temperature),
-        output_dir=resolve_workspace_path(output_dir),
+        output_dir=output_dir,
     )
     print(json.dumps({key: value for key, value in summary.items() if key != "rows"}, ensure_ascii=False, indent=2))
-    print(f"PPO 重调度逐场景明细已保存到: {resolve_workspace_path(output_dir) / 'reschedule_ppo_eval.csv'}")
+    print(f"PPO 重调度逐场景明细已保存到: {output_dir / 'reschedule_ppo_eval.csv'}")
 
 
 if __name__ == "__main__":

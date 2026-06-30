@@ -176,8 +176,13 @@ def resolve_runtime_config(
     target: Config,
     system_name: str | None = None,
 ) -> tuple[Config, tuple[str, ...], set[str]]:
+    raw_config = getattr(args, "config", ()) or ()
+    if isinstance(raw_config, str):
+        config_paths = (raw_config,)
+    else:
+        config_paths = tuple(raw_config)
     _, loaded_paths = load_training_config(
-        tuple(getattr(args, "config", ()) or ()),
+        config_paths,
         target=target,
         system_name=system_name,
     )
@@ -191,22 +196,33 @@ def resolve_runtime_config(
     return target, loaded_paths, explicit_fields
 
 
+def _add_argument_if_missing(
+    parser: argparse.ArgumentParser,
+    *flags: str,
+    **kwargs: Any,
+) -> None:
+    if any(flag in parser._option_string_actions for flag in flags):
+        return
+    parser.add_argument(*flags, **kwargs)
+
+
 def add_common_config_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", action="append", default=[])
-    parser.add_argument("--set", dest="set_values", action="append", default=[])
-    parser.add_argument("--data-path", "--data_path", dest="data_path")
-    parser.add_argument("--train-data-path", dest="train_data_path")
-    parser.add_argument("--seed", type=int)
-    parser.add_argument("--max-episodes", "--max_episodes", dest="max_episodes", type=int)
-    parser.add_argument("--num-envs", dest="num_envs", type=int)
-    parser.add_argument("--batch-size", "--batch_size", dest="batch_size", type=int)
-    parser.add_argument("--eval-freq", dest="eval_freq", type=int)
-    parser.add_argument("--log-dir", "--log_dir", dest="log_dir")
-    parser.add_argument("--output-dir", "--result_dir", dest="output_dir")
-    parser.add_argument("--run-id", "--run_id", dest="run_id")
-    parser.add_argument("--runs-root", "--runs_root", dest="runs_root")
-    parser.add_argument("--use-skill-hub", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument(
+    _add_argument_if_missing(parser, "--config", action="append", default=[])
+    _add_argument_if_missing(parser, "--set", dest="set_values", action="append", default=[])
+    _add_argument_if_missing(parser, "--data-path", "--data_path", dest="data_path")
+    _add_argument_if_missing(parser, "--train-data-path", dest="train_data_path")
+    _add_argument_if_missing(parser, "--seed", type=int)
+    _add_argument_if_missing(parser, "--max-episodes", "--max_episodes", dest="max_episodes", type=int)
+    _add_argument_if_missing(parser, "--num-envs", dest="num_envs", type=int)
+    _add_argument_if_missing(parser, "--batch-size", "--batch_size", dest="batch_size", type=int)
+    _add_argument_if_missing(parser, "--eval-freq", dest="eval_freq", type=int)
+    _add_argument_if_missing(parser, "--log-dir", "--log_dir", dest="log_dir")
+    _add_argument_if_missing(parser, "--output-dir", "--output_dir", "--result_dir", dest="output_dir")
+    _add_argument_if_missing(parser, "--run-id", "--run_id", dest="run_id")
+    _add_argument_if_missing(parser, "--runs-root", "--runs_root", dest="runs_root")
+    _add_argument_if_missing(parser, "--use-skill-hub", action=argparse.BooleanOptionalAction, default=None)
+    _add_argument_if_missing(
+        parser,
         "--skill-hub-bidirectional",
         action=argparse.BooleanOptionalAction,
         default=None,

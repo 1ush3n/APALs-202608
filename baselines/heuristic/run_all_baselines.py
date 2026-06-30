@@ -18,6 +18,16 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 from environment import AirLineEnv_Graph
 from configs import configs, load_training_config, load_config_files
+from runtime.artifacts import (
+    resolve_run_output_dir,
+    write_run_context_files,
+    write_run_manifest,
+)
+from runtime.configuration import (
+    add_common_config_arguments,
+    parse_runtime_args,
+    resolve_runtime_config,
+)
 from baselines.heuristic.baseline_ga import GeneticAlgorithmScheduler
 from baselines.heuristic.advanced_schedulers import (
     BeamSearchScheduler,
@@ -316,13 +326,13 @@ def run_advanced_eval(env, method, args, seed=42):
     metrics = build_metrics(env, makespan, balance_std, assigned_tasks, duration)
     return metrics, assigned_tasks
 
-def save_eval_results(method, dataset_name, metrics, assigned_tasks, env):
+def save_eval_results(method, dataset_name, metrics, assigned_tasks, env, output_root):
     """
     将评估结果以结构化的形式导出到文件
-    保存目录：results/eval_logs/<method>/<dataset_name>/
+    保存目录：<output_root>/<method>/<dataset_name>/
     包含文件：metrics.json, schedule.csv, run.log
     """
-    output_dir = PROJECT_ROOT / "results" / "eval_logs" / method / dataset_name
+    output_dir = Path(output_root) / method / dataset_name
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # 1. 保存 metrics.json
@@ -378,12 +388,34 @@ def main():
     parser.add_argument("--random_runs", type=int, default=5, help="Random 规则的多轮评测次数")
     parser.add_argument("--seed", type=int, default=42, help="随机数种子")
     parser.add_argument("--config", type=str, default=None, help="加载实验配置文件 (YAML) 以保证运行环境的物理参数与主模型百分之百完全一致")
-    args = parser.parse_args()
+    add_common_config_arguments(parser)
+    args = parse_runtime_args(parser)
     
     if args.config:
-        load_training_config([args.config])
+        resolve_runtime_config(args, target=configs)
         print(f"[*] 成功加载实验配置 YAML: {args.config}")
         print(f"[*] 全局环境参数已同步: n_w={configs.n_w}, n_m={configs.n_m}, max_slots_per_station={configs.max_slots_per_station}")
+    else:
+        resolve_runtime_config(args, target=configs)
+    output_root, context = resolve_run_output_dir(
+        configs,
+        PROJECT_ROOT,
+        default_legacy_dir="results/eval_logs",
+        run_subdir="baselines/heuristic",
+        explicit_dir=getattr(args, "output_dir", None),
+        section="artifacts",
+    )
+    manifest_extra = {
+        "run_type": "baseline",
+        "artifact_kind": "heuristic_baselines",
+        "methods": list(args.methods),
+        "datasets": list(args.datasets),
+        "output_dir": str(output_root.resolve()),
+    }
+    if context is not None:
+        write_run_context_files(context, configs, command="run_all_baselines", extra=manifest_extra)
+    else:
+        write_run_manifest(output_root, configs, command="run_all_baselines", extra=manifest_extra)
     
     print("="*60)
     print("      APAL 批量基线评估工具 (Heuristics & Genetic Algorithm)")
@@ -408,7 +440,7 @@ def main():
             
         # 1. 动态对齐和加载全局/特定规模环境参数
         if args.config:
-            load_training_config([args.config])
+            resolve_runtime_config(args, target=configs)
         else:
             default_env_yaml = PROJECT_ROOT / "conf" / "env" / "apal_default.yaml"
             if default_env_yaml.exists():
@@ -442,7 +474,7 @@ def main():
                     metrics, schedule = run_heuristic_eval(env, rule=method, num_runs=runs, seed=args.seed)
                 
                 # 导出结果
-                save_eval_results(method, dataset_name, metrics, schedule, env)
+                save_eval_results(method, dataset_name, metrics, schedule, env, output_root)
                 
                 # 记录汇总表格
                 summary_data.append({
@@ -472,7 +504,7 @@ def main():
         print("="*80)
         
         # 保存汇总表到 csv
-        summary_csv = PROJECT_ROOT / "results" / "eval_logs" / "baselines_summary.csv"
+        summary_csv = output_root / "baselines_summary.csv"
         df_summary.to_csv(summary_csv, index=False)
         print(f"[*] 汇总结果已导出至: {summary_csv}")
 

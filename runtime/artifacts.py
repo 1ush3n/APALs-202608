@@ -174,3 +174,33 @@ def write_run_context_files(
             **(extra or {}),
         },
     )
+
+
+def resolve_run_output_dir(
+    config: Config,
+    project_root: Path,
+    *,
+    default_legacy_dir: str | Path,
+    run_subdir: str | Path,
+    explicit_dir: str | Path | None = None,
+    section: str = "artifacts",
+    create_dirs: bool = True,
+) -> tuple[Path, RunContext | None]:
+    """解析工具脚本输出目录；默认进入 runs，显式 output-dir 时尊重用户路径。"""
+    if explicit_dir:
+        output_dir = resolve_path(explicit_dir, project_root)
+        if create_dirs:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir, None
+
+    if uses_runs_layout(config):
+        context = run_context(config, project_root, create_dirs=create_dirs)
+        base = context.eval_dir if section == "eval" else context.artifacts_dir
+        output_dir = base / Path(run_subdir)
+    else:
+        context = None
+        output_dir = resolve_path(default_legacy_dir, project_root)
+
+    if create_dirs:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir, context
