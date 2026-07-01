@@ -170,8 +170,10 @@ class PPOAgent:
         if isinstance(exc, torch.cuda.OutOfMemoryError):
             return True
         message = str(exc).lower()
-        return "out of memory" in message and any(
-            token in message for token in ("cuda", "gpu", "device")
+        return (
+            ("out of memory" in message and any(token in message for token in ("cuda", "gpu", "device")))
+            or "defaultcpuallocator" in message
+            or "not enough memory" in message
         )
 
     def _capture_update_transaction(self) -> Dict[str, Any]:
@@ -860,7 +862,32 @@ class PPOAgent:
         min_batch_size = max(1, int(getattr(self.config, "oom_min_batch_size", 2)))
         max_retries = max(0, int(getattr(self.config, "oom_max_retries", 1)))
         original_batch_size = int(self.batch_size)
-        transaction = self._capture_update_transaction() if transactional else None
+        try:
+            transaction = self._capture_update_transaction() if transactional else None
+        except RuntimeError as exc:
+            if not self._is_cuda_oom_error(exc):
+                raise
+            self._cleanup_failed_update()
+            if skip_on_oom:
+                memory_snapshot = self.get_memory_snapshot()
+                print(
+                    "WARNING: PPO 更新在事务快照阶段发生 OOM；"
+                    f"episode={current_ep}, batch_size={self.batch_size}，本轮更新已跳过。"
+                )
+                return {
+                    "OOM/RetryCount": 0.0,
+                    "OOM/SkippedUpdate": 1.0,
+                    "OOM/EffectiveBatchSize": float(self.batch_size),
+                    "Memory/Allocated_GB": memory_snapshot["allocated_gb"],
+                    "Memory/Reserved_GB": memory_snapshot["reserved_gb"],
+                    "Loss/Total": 0.0,
+                    "Loss/Policy": 0.0,
+                    "Loss/Value": 0.0,
+                    "Loss/Entropy": 0.0,
+                }
+            raise RuntimeError(
+                "PPO 更新在事务快照阶段发生 OOM，且 skip_update_on_oom=false。"
+            ) from exc
         retry_count = 0
 
         while True:

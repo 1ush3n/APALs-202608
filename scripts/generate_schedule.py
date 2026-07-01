@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
 
@@ -23,7 +22,19 @@ from runtime.artifacts import (
     write_run_manifest,
 )
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint, load_policy_weights
-from runtime.configuration import add_common_config_arguments, parse_runtime_args, resolve_runtime_config
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_hydra_runtime,
+    should_show_help,
+)
+
+
+GENERATE_EXTRA_ARGS = {
+    "model_path": ExtraArgument(required=True, help="用于生成排程的 checkpoint 路径"),
+    "output_path": ExtraArgument(default=None, help="可选输出 CSV 路径；缺省写入本次 run 的 eval 目录"),
+}
 
 
 def generate_schedule(
@@ -94,19 +105,29 @@ def generate_schedule(
     return frame
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="使用 checkpoint 生成确定性 APAL 排程")
-    add_common_config_arguments(parser)
-    parser.add_argument("--model-path", "--model_path", dest="model_path", required=True)
-    parser.add_argument("--output-path")
-    return parser
+def main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if should_show_help(raw_args):
+        print(hydra_help(GENERATE_EXTRA_ARGS))
+        return 0
+    try:
+        parsed = initialize_hydra_runtime(
+            raw_args,
+            target=configs,
+            project_root=PROJECT_ROOT,
+            default_experiment="initial_schedule_283",
+            extra_arguments=GENERATE_EXTRA_ARGS,
+        )
+        generate_schedule(
+            parsed.model_path,
+            explicit_fields=set(getattr(parsed, "explicit_config_fields", set())),
+            output_path=parsed.output_path,
+        )
+    except (HydraCliError, KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
+        print(f"[CLI] {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    parsed = parse_runtime_args(build_parser())
-    _, _, explicit = resolve_runtime_config(parsed, target=configs)
-    generate_schedule(
-        parsed.model_path,
-        explicit_fields=explicit,
-        output_path=parsed.output_path,
-    )
+    raise SystemExit(main())

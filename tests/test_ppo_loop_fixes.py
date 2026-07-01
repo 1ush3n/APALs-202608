@@ -165,7 +165,7 @@ def test_train_import_has_no_debug_stdout() -> None:
 
 def test_legacy_profiler_initializes_sps_before_progress_display() -> None:
     """legacy 进度条读取 SPS 前必须已有初始化，避免首轮 UnboundLocalError。"""
-    source = (PROJECT_ROOT / "train.py").read_text(encoding="utf-8")
+    source = (PROJECT_ROOT / "archive" / "legacy_train.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     train_fn = next(
         node

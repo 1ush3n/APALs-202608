@@ -1,12 +1,13 @@
 defaults:
-  - ../model/hb_gat_pn.yaml
-  - ../env/apal_default.yaml
-  - ../env/initial_schedule.yaml
-  - ../env/initial_bucket_680.yaml
-  - ../reward/default.yaml
-  - ../train/ppo_default.yaml
-  - ../train/batch_16.yaml
-  - ../rollout/fastpath.yaml
+  - /model/hb_gat_pn@_global_
+  - /env/apal_default@_global_
+  - /env/initial_schedule@_global_
+  - /env/initial_bucket_680@_global_
+  - /reward/default@_global_
+  - /train/ppo_default@_global_
+  - /train/batch_16@_global_
+  - /rollout/fastpath@_global_
+  - _self_
 
 experiment:
   experiment_name: initial_schedule_680

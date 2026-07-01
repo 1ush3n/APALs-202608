@@ -18,13 +18,38 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.append(parent_dir)
 
-from args_parser import get_basic_ppo_parser
 from configs import configs
 from env_wrapper import init_env, standardize_env_reset, standardize_env_step, extract_flat_state_for_baselines
-from train import initialize_training_config, set_seed
+from runtime.artifacts import resolve_run_output_dir, write_run_context_files, write_run_manifest
+from runtime.hydra_config import ExtraArgument, HydraCliError, hydra_help, initialize_hydra_runtime, should_show_help
+from train import PROJECT_ROOT, set_seed
 from utils.logger import init_logger, record_experiment_time
 from utils.device_utils import get_available_device, clear_torch_cache
 from utils.visualization import plot_gantt
+
+
+BASELINE_NAME = "basic_ppo_baseline"
+BASELINE_EXTRA_ARGS = {
+    "output_dir": ExtraArgument(default=None, help="可选输出目录；缺省写入本次 run 的 artifacts/baselines 目录"),
+}
+
+
+def _prepare_output_root(args):
+    """将 BasicPPO 的产物接入统一 runs 目录，算法内部保存逻辑保持不变。"""
+    output_root, context = resolve_run_output_dir(
+        configs,
+        PROJECT_ROOT,
+        default_legacy_dir=getattr(configs, "result_dir", "results"),
+        run_subdir=Path("baselines") / "flat_state_training" / "BasicPPO",
+        explicit_dir=getattr(args, "output_dir", None),
+        section="artifacts",
+    )
+    setattr(args, "output_dir", str(output_root))
+    extra = {"baseline": "BasicPPO", "entrypoint": "baselines/basic_ppo/train_basic.py"}
+    if context is not None:
+        write_run_context_files(context, configs, command="basic_ppo_train", extra=extra)
+    else:
+        write_run_manifest(output_root, configs, command="basic_ppo_train", extra=extra)
 
 
 def _save_basic_ppo_checkpoint(path, agent, state_dim, action_dim_list, best_makespan, exp_dir):
@@ -304,8 +329,9 @@ class BasicPPOAgent:
 
 def train_basic_ppo(args):
     set_seed(int(getattr(configs, "seed", 42)))
+    _prepare_output_root(args)
     # 初始化日志
-    logger, exp_dir = init_logger(args, "basic_ppo_baseline")
+    logger, exp_dir = init_logger(args, BASELINE_NAME)
     start_time = time.time()
     
     try:
@@ -454,8 +480,25 @@ def train_basic_ppo(args):
         record_experiment_time(logger, start_time)
         clear_torch_cache()
 
+def main(argv=None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if should_show_help(raw_args):
+        print(hydra_help(BASELINE_EXTRA_ARGS))
+        return 0
+    try:
+        args = initialize_hydra_runtime(
+            raw_args,
+            target=configs,
+            project_root=PROJECT_ROOT,
+            default_experiment="initial_schedule_283",
+            extra_arguments=BASELINE_EXTRA_ARGS,
+        )
+        train_basic_ppo(args)
+    except (HydraCliError, KeyError, ValueError, RuntimeError) as exc:
+        print(f"[CLI] {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 if __name__ == "__main__":
-    parser = get_basic_ppo_parser()
-    args = parser.parse_args()
-    initialize_training_config(args)
-    train_basic_ppo(args)
+    raise SystemExit(main())

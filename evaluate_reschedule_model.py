@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import torch
@@ -34,11 +34,24 @@ from runtime.artifacts import (
     write_run_context_files,
     write_run_manifest,
 )
-from runtime.configuration import (
-    add_common_config_arguments,
-    parse_runtime_args,
-    resolve_runtime_config,
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_hydra_runtime,
+    should_show_help,
 )
+
+
+RESCHEDULE_EVAL_EXTRA_ARGS = {
+    "model_path": ExtraArgument(
+        default="checkpoints/reschedule_task_delay/bestmodel/best_model.pth",
+        help="待评估重调度 PPO checkpoint 路径",
+    ),
+    "num_runs": ExtraArgument(default=None, help="可选评估轮数；缺省使用配置"),
+    "temperature": ExtraArgument(default=0.0, help="动作采样温度，0 表示确定性"),
+    "output_dir": ExtraArgument(default=None, help="可选输出目录；缺省写入本次 run 的 eval 目录"),
+}
 
 
 def _load_policy_weights(model: torch.nn.Module, model_path: Path, device: torch.device) -> dict[str, int | str]:
@@ -133,16 +146,24 @@ def evaluate_saved_reschedule_model(
     return summary
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="评估已保存的 APAL PPO 重调度模型")
-    add_common_config_arguments(parser)
-    parser.set_defaults(config=["conf/experiment/reschedule_task_delay.yaml"])
-    parser.add_argument("--model-path", "--model_path", dest="model_path", default="checkpoints/reschedule_task_delay/bestmodel/best_model.pth")
-    parser.add_argument("--num_runs", type=int, default=None)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    args = parse_runtime_args(parser)
+def main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if should_show_help(raw_args):
+        print(hydra_help(RESCHEDULE_EVAL_EXTRA_ARGS))
+        return 0
+    try:
+        args = initialize_hydra_runtime(
+            raw_args,
+            target=configs,
+            project_root=PROJECT_ROOT,
+            default_experiment="reschedule_task_delay",
+            extra_arguments=RESCHEDULE_EVAL_EXTRA_ARGS,
+        )
+    except (HydraCliError, KeyError, ValueError, RuntimeError) as exc:
+        print(f"[CLI] {exc}", file=sys.stderr)
+        return 2
 
-    _, _, explicit_fields = resolve_runtime_config(args, target=configs)
+    explicit_fields = set(getattr(args, "explicit_config_fields", set()))
     model_path = resolve_workspace_path(args.model_path)
     checkpoint = load_checkpoint(model_path)
     apply_checkpoint_model_spec(
@@ -177,7 +198,8 @@ def main() -> None:
     )
     print(json.dumps({key: value for key, value in summary.items() if key != "rows"}, ensure_ascii=False, indent=2))
     print(f"PPO 重调度逐场景明细已保存到: {output_dir / 'reschedule_ppo_eval.csv'}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

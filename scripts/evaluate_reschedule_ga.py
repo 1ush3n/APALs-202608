@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from pathlib import Path
@@ -16,25 +15,42 @@ from runtime.artifacts import (
     write_run_context_files,
     write_run_manifest,
 )
-from runtime.configuration import (
-    add_common_config_arguments,
-    parse_runtime_args,
-    resolve_runtime_config,
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_hydra_runtime,
+    should_show_help,
 )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="评估 APAL 预测-反应式重调度 GA 基线")
-    parser.add_argument("--config", type=str, default="conf/experiment/reschedule_task_delay.yaml")
-    parser.add_argument("--pop_size", type=int, default=30)
-    parser.add_argument("--max_gen", type=int, default=20)
-    parser.add_argument("--num_runs", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--quiet", action="store_true")
-    add_common_config_arguments(parser)
-    args = parse_runtime_args(parser)
+GA_EXTRA_ARGS = {
+    "pop_size": ExtraArgument(default=30, help="GA 种群规模"),
+    "max_gen": ExtraArgument(default=20, help="GA 最大迭代代数"),
+    "num_runs": ExtraArgument(default=None, help="可选评估轮数；缺省使用配置"),
+    "seed": ExtraArgument(default=42, help="随机种子"),
+    "quiet": ExtraArgument(default=False, help="是否关闭逐场景输出"),
+    "output_dir": ExtraArgument(default=None, help="可选输出目录；缺省写入本次 run 的 eval 目录"),
+}
 
-    resolve_runtime_config(args, target=configs)
+
+def main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if should_show_help(raw_args):
+        print(hydra_help(GA_EXTRA_ARGS))
+        return 0
+    try:
+        args = initialize_hydra_runtime(
+            raw_args,
+            target=configs,
+            project_root=PROJECT_ROOT,
+            default_experiment="reschedule_task_delay",
+            extra_arguments=GA_EXTRA_ARGS,
+        )
+    except (HydraCliError, KeyError, ValueError, RuntimeError) as exc:
+        print(f"[CLI] {exc}", file=sys.stderr)
+        return 2
+
     output_dir, context = resolve_run_output_dir(
         configs,
         PROJECT_ROOT,
@@ -67,7 +83,8 @@ def main() -> None:
     )
     print(json.dumps({k: v for k, v in summary.items() if k != "rows"}, ensure_ascii=False, indent=2))
     print(f"GA 重调度明细已保存到: {output_dir / 'reschedule_ga_eval.csv'}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

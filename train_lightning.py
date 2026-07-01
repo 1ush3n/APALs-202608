@@ -13,7 +13,6 @@ import torch
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import TensorBoardLogger
 
-from args_parser import get_base_parser
 from configs import configs
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
@@ -33,7 +32,6 @@ from training.rollout_service import APALRolloutService
 from utils.vector_env import EnvCreator, VectorEnv
 from runtime.artifacts import run_context as create_run_context, uses_runs_layout, write_run_context_files, write_run_manifest
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
-from runtime.configuration import parse_runtime_args
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -244,5 +242,6 @@ def run(args, *, config_initialized: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    parser = get_base_parser()
-    run(parse_runtime_args(parser))
+    from train import main
+
+    raise SystemExit(main())

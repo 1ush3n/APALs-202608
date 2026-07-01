@@ -19,8 +19,13 @@ from configs import (
     load_training_config,
     resolve_platform_hardware_config,
 )
-from args_parser import get_base_parser
-from runtime.configuration import parse_runtime_args, parse_set_overrides, resolve_runtime_config
+from runtime.configuration import parse_set_overrides, resolve_runtime_config
+from runtime.hydra_config import (
+    HydraCliError,
+    apply_hydra_config,
+    compose_hydra_config,
+    parse_hydra_args,
+)
 from runtime.artifacts import (
     build_run_id,
     checkpoint_paths as artifact_checkpoint_paths,
@@ -206,17 +211,27 @@ def test_unsupported_platform_is_rejected() -> None:
 
 
 def test_cli_overrides_yaml_and_platform_profile() -> None:
-    parser = get_base_parser()
-    args = parser.parse_args([
-        "--config", str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml"),
-        "--batch-size", "12",
-        "--num-envs", "3",
-        "--no-use-skill-hub",
-        "--run-id", "manual_260630-153000",
-        "--set", "eval_scenarios=[standard,duration_noise]",
-    ])
     cfg = Config()
-    _, _, explicit = resolve_runtime_config(args, target=cfg, system_name="Windows")
+    parsed = parse_hydra_args(
+        [
+            "experiment=initial_schedule_283",
+            "train.batch_size=12",
+            "parallel.num_envs=3",
+            "use_skill_hub=false",
+            "run_id=manual_260630-153000",
+            "eval_scenarios=[standard,duration_noise]",
+        ],
+        system_name="Windows",
+    )
+    hydra_cfg = compose_hydra_config(parsed, config_dir=PROJECT_ROOT / "conf")
+    explicit = apply_hydra_config(
+        hydra_cfg,
+        target=cfg,
+        config_paths=(
+            str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml"),
+            str(PROJECT_ROOT / "conf" / "hardware" / "windows_4060_low_memory.yaml"),
+        ),
+    )
 
     assert cfg.batch_size == 12
     assert cfg.num_envs == 3
@@ -228,16 +243,26 @@ def test_cli_overrides_yaml_and_platform_profile() -> None:
 
 
 def test_hydra_style_overrides_are_compatible_with_flat_config() -> None:
-    parser = get_base_parser()
-    args = parse_runtime_args(parser, [
-        "--config", str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml"),
-        "train.batch_size=24",
-        "parallel.num_envs=5",
-        "artifacts.runs_root=tmp_runs",
-        "experiment.experiment_name=hydra_compat",
-    ])
     cfg = Config()
-    _, _, explicit = resolve_runtime_config(args, target=cfg, system_name="Windows")
+    parsed = parse_hydra_args(
+        [
+            "experiment=initial_schedule_283",
+            "train.batch_size=24",
+            "parallel.num_envs=5",
+            "artifacts.runs_root=tmp_runs",
+            "experiment.experiment_name=hydra_compat",
+        ],
+        system_name="Windows",
+    )
+    hydra_cfg = compose_hydra_config(parsed, config_dir=PROJECT_ROOT / "conf")
+    explicit = apply_hydra_config(
+        hydra_cfg,
+        target=cfg,
+        config_paths=(
+            str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml"),
+            str(PROJECT_ROOT / "conf" / "hardware" / "windows_4060_low_memory.yaml"),
+        ),
+    )
 
     assert cfg.batch_size == 24
     assert cfg.num_envs == 5
@@ -247,11 +272,26 @@ def test_hydra_style_overrides_are_compatible_with_flat_config() -> None:
 
 
 def test_hydra_style_override_rejects_unknown_fields() -> None:
-    parser = get_base_parser()
-    args = parse_runtime_args(parser, ["train.no_such_field=1"])
+    parsed = parse_hydra_args(["experiment=initial_schedule_283", "train.no_such_field=1"], system_name="Windows")
+    hydra_cfg = compose_hydra_config(parsed, config_dir=PROJECT_ROOT / "conf")
 
-    with pytest.raises(KeyError, match="未知配置字段"):
-        resolve_runtime_config(args, target=Config(), system_name="Windows")
+    with pytest.raises(KeyError, match="未知字段"):
+        apply_hydra_config(
+            hydra_cfg,
+            target=Config(),
+            config_paths=(
+                str(PROJECT_ROOT / "conf" / "experiment" / "initial_schedule_283.yaml"),
+                str(PROJECT_ROOT / "conf" / "hardware" / "windows_4060_low_memory.yaml"),
+            ),
+        )
+
+
+def test_old_public_cli_flags_are_rejected() -> None:
+    with pytest.raises(HydraCliError, match="不再支持旧 argparse 参数"):
+        parse_hydra_args(["--config", "conf/experiment/initial_schedule_283.yaml"], system_name="Windows")
+
+    with pytest.raises(HydraCliError, match="legacy 训练入口已归档"):
+        parse_hydra_args(["trainer=legacy"], system_name="Windows")
 
 
 def test_single_string_config_and_run_output_dir_are_supported(tmp_path: Path) -> None:
@@ -283,7 +323,10 @@ def test_set_rejects_invalid_syntax_and_unknown_fields() -> None:
     with pytest.raises(ValueError, match="key=value"):
         parse_set_overrides(["batch_size"])
 
-    parser = get_base_parser()
-    args = parser.parse_args(["--set", "not_a_config_field=1"])
+    args = argparse.Namespace(
+        config=[],
+        set_values=["not_a_config_field=1"],
+        hydra_overrides=[],
+    )
     with pytest.raises(KeyError, match="未知配置字段"):
         resolve_runtime_config(args, target=Config(), system_name="Windows")

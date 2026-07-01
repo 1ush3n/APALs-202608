@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 import time
@@ -27,13 +26,34 @@ from runtime.artifacts import (
     write_run_context_files,
     write_run_manifest,
 )
-from runtime.configuration import (
-    add_common_config_arguments,
-    parse_runtime_args,
-    resolve_runtime_config,
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_hydra_runtime,
+    should_show_help,
 )
 from train import set_seed
 from environment import AirLineEnv_Graph
+
+
+FLAT_EVAL_EXTRA_ARGS = {
+    "algorithm": ExtraArgument(required=True, help="basic_ppo 或 dqn"),
+    "model_path": ExtraArgument(required=True, help="待评估 flat-state baseline checkpoint"),
+    "data_dir": ExtraArgument(default="data", help="数据文件所在目录"),
+    "datasets": ExtraArgument(default=["283.csv"], help="数据集列表，例如 datasets=[283.csv,680.csv]"),
+    "num_runs": ExtraArgument(default=1, help="重复评估次数"),
+    "temperature": ExtraArgument(default=0.0, help="动作采样温度，0 表示确定性"),
+    "output_dir": ExtraArgument(default=None, help="可选输出目录；缺省写入本次 run 的 artifacts 目录"),
+}
+
+
+def _as_dataset_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    raise ValueError(f"无法解析 datasets 参数: {value!r}")
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -307,19 +327,28 @@ def save_eval_results(
         f.write(f"Metrics:\n{json.dumps(full_metrics, indent=2, ensure_ascii=False)}\n")
     print(f"[Export Complete] {output_dir}")
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="评估 flat-state 学习型 APAL baseline")
-    add_common_config_arguments(parser)
-    parser.add_argument("--algorithm", choices=("basic_ppo", "dqn"), required=True)
-    parser.add_argument("--model-path", required=True)
-    parser.add_argument("--data-dir", default="data")
-    parser.add_argument("--datasets", nargs="+", default=["283.csv"])
-    parser.add_argument("--num-runs", "--num_runs", dest="num_runs", type=int, default=1)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    args = parse_runtime_args(parser)
+def main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if should_show_help(raw_args):
+        print(hydra_help(FLAT_EVAL_EXTRA_ARGS))
+        return 0
+    try:
+        args = initialize_hydra_runtime(
+            raw_args,
+            target=configs,
+            project_root=PROJECT_ROOT,
+            default_experiment="initial_schedule_283",
+            extra_arguments=FLAT_EVAL_EXTRA_ARGS,
+        )
+    except (HydraCliError, KeyError, ValueError, RuntimeError) as exc:
+        print(f"[CLI] {exc}", file=sys.stderr)
+        return 2
 
+    if args.algorithm not in {"basic_ppo", "dqn"}:
+        print("[CLI] algorithm 必须是 basic_ppo 或 dqn", file=sys.stderr)
+        return 2
+    args.datasets = _as_dataset_list(args.datasets)
     method_name = "BasicPPO" if args.algorithm == "basic_ppo" else "DQN"
-    resolve_runtime_config(args, target=configs)
     output_root, context = resolve_run_output_dir(
         configs,
         PROJECT_ROOT,
@@ -348,7 +377,6 @@ def main() -> None:
 
     summary_rows = []
     for dataset_file in args.datasets:
-        resolve_runtime_config(args, target=configs)
         set_seed(int(getattr(configs, "seed", 42)))
         dataset_path = Path(args.data_dir) / dataset_file
         if not dataset_path.is_absolute():
@@ -398,7 +426,8 @@ def main() -> None:
     summary_path = output_root / f"{method_name}_summary.csv"
     pd.DataFrame(summary_rows).to_csv(summary_path, index=False)
     print(f"[*] 汇总结果已导出: {summary_path}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -350,6 +350,37 @@ def _deep_merge_mapping(base: Mapping[str, Any], override: Mapping[str, Any]) ->
     return merged
 
 
+def _resolve_default_path(path: Path, item: Any) -> Path | None:
+    if item == "_self_":
+        return None
+
+    conf_root = Path(__file__).resolve().parent / "conf"
+    if isinstance(item, Mapping):
+        if len(item) != 1:
+            raise ValueError(f"defaults 映射项只能包含一个键值: {item}")
+        raw_group, raw_name = next(iter(item.items()))
+        if raw_name in (None, "_self_"):
+            return None
+        group = str(raw_group).replace("\\", "/").split("@", 1)[0]
+        name = str(raw_name).replace("\\", "/")
+        if group.startswith("/"):
+            group_path = conf_root / group.lstrip("/")
+        else:
+            group_path = conf_root / group
+        return group_path / f"{name}.yaml"
+
+    raw = str(item).replace("\\", "/").split("@", 1)[0]
+    if raw == "_self_":
+        return None
+    if raw.startswith("/"):
+        default_path = conf_root / raw.lstrip("/")
+    else:
+        default_path = path.parent / raw
+    if default_path.suffix:
+        return default_path
+    return default_path.with_suffix(".yaml")
+
+
 def _load_yaml_mapping(path: Path, yaml_module: Any, visited: set[Path]) -> dict:
     """加载单个 YAML，并递归展开 defaults 列表。"""
     resolved = path.resolve()
@@ -371,7 +402,9 @@ def _load_yaml_mapping(path: Path, yaml_module: Any, visited: set[Path]) -> dict
     if not isinstance(defaults, list):
         raise ValueError(f"defaults 必须是列表: {path}")
     for item in defaults:
-        default_path = path.parent / str(item)
+        default_path = _resolve_default_path(path, item)
+        if default_path is None:
+            continue
         merged = _deep_merge_mapping(
             merged,
             _load_yaml_mapping(default_path, yaml_module, visited),

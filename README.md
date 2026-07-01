@@ -36,32 +36,32 @@ python scripts/generate_initial_buckets.py --bucket all --num_samples 32 --seed 
 训练入口会根据操作系统自动追加硬件配置，不需要手动传入 `conf/hardware/*.yaml`。
 
 ```powershell
-python train.py --trainer lightning --config conf/experiment/initial_schedule_283.yaml
-python train.py --config conf/experiment/scale_400_800_schedule.yaml
-python train.py --trainer lightning --config conf/experiment/initial_schedule_2338.yaml
-python train.py --trainer lightning --config conf/experiment/initial_schedule_3182.yaml
+python train.py experiment=initial_schedule_283
+python train.py experiment=scale_400_800_schedule
+python train.py experiment=initial_schedule_2338
+python train.py experiment=initial_schedule_3182
 ```
 
 命令行参数会覆盖 YAML 和自动平台配置。常用参数可直接传入：
 
 ```powershell
-python train.py --config conf/experiment/scale_400_800_schedule.yaml --batch-size 256 --num-envs 16 --max-episodes 100
-python train.py --config conf/experiment/scale_400_800_schedule.yaml --no-use-skill-hub
+python train.py experiment=scale_400_800_schedule train.batch_size=256 train.num_envs=16 train.max_episodes=100
+python train.py experiment=scale_400_800_schedule use_skill_hub=false
 ```
 
-其他 `Config` 字段通过可重复的 `--set key=value` 覆盖：
+其他 `Config` 字段直接使用 Hydra `key=value` 覆盖：
 
 ```powershell
-python train.py --config conf/experiment/scale_400_800_schedule.yaml --set lr=0.00005 --set eval_scenarios=[standard]
+python train.py experiment=scale_400_800_schedule lr=0.00005 eval_scenarios=[standard]
 ```
 
-也兼容 Hydra 风格的 `key=value` 覆盖，分组名前缀会落到当前扁平 `Config` 字段：
+分组名前缀会落到当前扁平 `Config` 字段：
 
 ```powershell
-python train.py --config conf/experiment/initial_schedule_283.yaml train.batch_size=24 parallel.num_envs=4 artifacts.run_id=debug_260630-153000
+python train.py experiment=initial_schedule_283 train.batch_size=24 parallel.num_envs=4 artifacts.run_id=debug_260630-153000
 ```
 
-配置优先级为：代码默认值 `<` 实验 YAML `<` 平台硬件 YAML `<` 显式命令行参数 `<` `--set` / Hydra 风格 `key=value`。
+配置优先级为：代码默认值 `<` 实验 YAML `<` 平台硬件 YAML `<` Hydra 命令行 `key=value`。
 
 ### 命令行配置参数
 
@@ -75,88 +75,83 @@ python train.py --help
 
 | 参数 | 配置字段 | 示例 | 说明 |
 |---|---|---|---|
-| `--trainer` | 训练入口 | `--trainer lightning` | 可选 `lightning` 或 `legacy` |
-| `--config` | YAML 配置 | `--config conf/experiment/initial_schedule_283.yaml` | 可重复使用，后加载的配置优先 |
-| `--data-path` | `data_file_path` | `--data-path data/283.csv` | 验证和评估使用的数据集 |
-| `--train-data-path` | `train_data_path_or_dir` | `--train-data-path data/generated/initial_283` | 训练文件或训练池目录 |
-| `--seed` | `seed` | `--seed 42` | 全局随机种子 |
-| `--max-episodes` | `max_episodes` | `--max-episodes 300` | 最大训练 episode 数 |
-| `--num-envs` | `num_envs` | `--num-envs 16` | 并行环境进程数 |
-| `--batch-size` | `batch_size` | `--batch-size 16` | PPO mini-batch 大小 |
-| `--eval-freq` | `eval_freq` | `--eval-freq 1` | 每隔多少个 episode 验证一次 |
-| `--log-dir` | `log_dir` | `--log-dir /root/tf-logs` | TensorBoard 日志根目录 |
-| `--output-dir` | `result_dir` | `--output-dir results` | 评估、排程等结果根目录 |
-| `--run-id` | `run_id` | `--run-id initial_schedule_680_260630-153000` | 指定统一运行 ID；不指定时自动生成 |
-| `--runs-root` | `runs_root` | `--runs-root runs` | 统一运行目录根路径 |
-| `--use-skill-hub` | `use_skill_hub` | `--use-skill-hub` | 启用 Skill Hub |
-| `--no-use-skill-hub` | `use_skill_hub` | `--no-use-skill-hub` | 使用旧版 Worker-Task 直接边 |
-| `--skill-hub-bidirectional` | `skill_hub_bidirectional` | `--skill-hub-bidirectional` | 启用 Skill Hub 反向关系 |
-| `--no-skill-hub-bidirectional` | `skill_hub_bidirectional` | `--no-skill-hub-bidirectional` | 仅使用正向 Skill Hub |
-| `--resume` | 恢复训练 | `--resume` | Lightning/legacy 分别读取各自最近断点 |
-| `--ablation-no-gat` | `ablation_no_gat` | `--ablation-no-gat` | GAT 消融实验 |
-| `--ablation-no-pointer` | `ablation_no_pointer` | `--ablation-no-pointer` | Pointer 消融实验 |
-| `--ablation-no-mask` | `ablation_no_mask` | `--ablation-no-mask` | 动作掩码消融实验 |
+| `experiment` | 实验配置 | `experiment=initial_schedule_283` | 对应 `conf/experiment/<name>.yaml` |
+| `data_file_path` | `data_file_path` | `data_file_path=data/283.csv` | 验证和评估使用的数据集 |
+| `train_data_path_or_dir` | `train_data_path_or_dir` | `train_data_path_or_dir=data/generated/initial_283` | 训练文件或训练池目录 |
+| `seed` | `seed` | `seed=42` | 全局随机种子 |
+| `train.max_episodes` | `max_episodes` | `train.max_episodes=300` | 最大训练 episode 数 |
+| `train.num_envs` | `num_envs` | `train.num_envs=16` | 并行环境进程数 |
+| `train.batch_size` | `batch_size` | `train.batch_size=16` | PPO mini-batch 大小 |
+| `eval_freq` | `eval_freq` | `eval_freq=1` | 每隔多少个 episode 验证一次 |
+| `log_dir` | `log_dir` | `log_dir=/root/tf-logs` | TensorBoard 日志根目录 |
+| `run_id` | `run_id` | `run_id=initial_schedule_680_260630-153000` | 指定统一运行 ID；不指定时自动生成 |
+| `runs_root` | `runs_root` | `runs_root=runs` | 统一运行目录根路径 |
+| `use_skill_hub` | `use_skill_hub` | `use_skill_hub=true` | 启用 Skill Hub |
+| `skill_hub_bidirectional` | `skill_hub_bidirectional` | `skill_hub_bidirectional=true` | 启用 Skill Hub 反向关系 |
+| `resume` | 恢复训练 | `resume=true` | Lightning 读取当前 run 的最近断点 |
+| `ablation_no_gat` | `ablation_no_gat` | `ablation_no_gat=true` | GAT 消融实验 |
+| `ablation_no_pointer` | `ablation_no_pointer` | `ablation_no_pointer=true` | Pointer 消融实验 |
+| `ablation_no_mask` | `ablation_no_mask` | `ablation_no_mask=true` | 动作掩码消融实验 |
 
-参数名称必须包含分隔符。例如 batch size 的正确写法是：
+参数覆盖必须使用 `key=value`。例如 batch size 的推荐写法是：
 
 ```bash
---batch-size 16
+train.batch_size=16
 ```
 
-兼容的下划线别名为：
+当前过渡实现仍会按叶子字段写入扁平 `Config`，因此下面写法也可用：
 
 ```bash
---batch_size 16
+batch_size=16
 ```
 
 `--batchsize` 不是有效参数。
 
-### 使用 `--set` 覆盖其他配置
+### 使用 Hydra `key=value` 覆盖其他配置
 
-没有独立命令行参数的 `Config` 字段统一使用：
+所有 `Config` 字段统一使用：
 
 ```bash
---set key=value
+key=value
 ```
 
-每个配置项使用一个独立的 `--set`，可以重复指定：
+每个配置项使用一个独立的 `key=value`，可以重复指定：
 
 ```bash
 python train.py \
-  --trainer lightning \
-  --config conf/experiment/initial_schedule_283.yaml \
-  --batch-size 16 \
-  --num-envs 8 \
-  --set lr=0.00005 \
-  --set gamma=0.999 \
-  --set accumulation_steps=8
+  experiment=initial_schedule_283 \
+  train.batch_size=16 \
+  train.num_envs=8 \
+  lr=0.00005 \
+  gamma=0.999 \
+  accumulation_steps=8
 ```
 
 不同数据类型的正确写法：
 
 ```bash
 # 整数
---set k_epochs=2
+k_epochs=2
 
 # 浮点数
---set sample_temperature=1.0
+sample_temperature=1.0
 
 # 布尔值必须写 true 或 false，不能写 0/1
---set enable_rollout_profiler=true
---set use_compile=false
+enable_rollout_profiler=true
+use_compile=false
 
 # 字符串和路径
---set experiment_name=reschedule_task_delay
---set reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt
+experiment_name=reschedule_task_delay
+reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt
 
 # 列表；Linux 建议用引号防止 shell 解释特殊字符
---set 'eval_scenarios=[standard]'
+'eval_scenarios=[standard]'
 ```
 
 PowerShell 列表示例：
 
 ```powershell
---set "eval_scenarios=[standard]"
+"eval_scenarios=[standard]"
 ```
 
 ### 使用 Hydra 风格 `key=value` 覆盖
@@ -165,39 +160,37 @@ PowerShell 列表示例：
 
 ```bash
 python train.py \
-  --trainer lightning \
-  --config conf/experiment/initial_schedule_283.yaml \
+  experiment=initial_schedule_283 \
   train.batch_size=24 \
   parallel.num_envs=8 \
   artifacts.runs_root=runs
 ```
 
-当前实现仍落到扁平 `Config` 字段；`train.batch_size=24`、`batch_size=24` 和 `--set batch_size=24` 等价。未知字段会直接报错，避免拼写错误被静默忽略。
+当前实现仍落到扁平 `Config` 字段；`train.batch_size=24` 和 `batch_size=24` 等价。未知字段会直接报错，避免拼写错误被静默忽略。
 
 常用 PPO 与性能配置示例：
 
 ```bash
 python train.py \
-  --trainer lightning \
-  --config conf/experiment/reschedule_task_delay.yaml \
-  --batch-size 16 \
-  --num-envs 16 \
-  --max-episodes 300 \
-  --eval-freq 1 \
-  --set accumulation_steps=16 \
-  --set auto_oom_retry=true \
-  --set oom_max_retries=1 \
-  --set enable_gpu_batch_rebuild=true \
-  --set enable_rollout_profiler=true
+  experiment=reschedule_task_delay \
+  train.batch_size=16 \
+  train.num_envs=16 \
+  train.max_episodes=300 \
+  eval_freq=1 \
+  accumulation_steps=16 \
+  auto_oom_retry=true \
+  oom_max_retries=1 \
+  enable_gpu_batch_rebuild=true \
+  enable_rollout_profiler=true
 ```
 
-结构性参数也可通过 `--set` 指定，例如：
+结构性参数也可通过 `key=value` 指定，例如：
 
 ```bash
---set hidden_dim=128
---set num_gat_layers=5
---set num_heads=4
---set use_shared_trunk=false
+hidden_dim=128
+num_gat_layers=5
+num_heads=4
+use_shared_trunk=false
 ```
 
 加载 checkpoint 时，程序会自动识别其模型结构。若命令行显式指定的结构参数与 checkpoint 不一致，程序会报错并拒绝加载，避免静默使用错误结构。
@@ -205,20 +198,22 @@ python train.py \
 恢复最近的 Lightning checkpoint：
 
 ```powershell
-python train.py --trainer lightning --config conf/experiment/initial_schedule_283.yaml --resume
+python train.py experiment=initial_schedule_283 resume=true
 ```
 
 Windows GPU 冒烟测试（5 步 rollout、一次 PPO 更新和一次 Standard 验证）：
 
 ```powershell
-python train.py --trainer lightning --config conf/experiment/smoke_lightning.yaml
+python train.py experiment=smoke_lightning
 ```
 
 历史训练循环仅用于回归对照：
 
 ```powershell
-python train.py --trainer legacy --config conf/experiment/initial_schedule_283.yaml
+python train.py trainer=legacy experiment=initial_schedule_283
 ```
+
+该命令会明确报错；legacy 训练入口已经移动到 `archive/legacy_train.py`，只用于历史对照阅读，不再作为当前训练入口。
 
 ## 重调度训练
 
@@ -252,18 +247,18 @@ checkpoints/initial_schedule/best_680.ckpt
 
 ```powershell
 python scripts/generate_schedule.py `
-  --config conf/experiment/initial_schedule_283.yaml `
-  --model-path checkpoints/initial_schedule/best_680.ckpt `
-  --output-path results/final_schedule.csv
+  experiment=initial_schedule_283 `
+  model_path=checkpoints/initial_schedule/best_680.ckpt `
+  output_path=results/final_schedule.csv
 ```
 
 Linux 写法：
 
 ```bash
 python scripts/generate_schedule.py \
-  --config conf/experiment/initial_schedule_283.yaml \
-  --model-path checkpoints/initial_schedule/best_680.ckpt \
-  --output-path results/final_schedule.csv
+  experiment=initial_schedule_283 \
+  model_path=checkpoints/initial_schedule/best_680.ckpt \
+  output_path=results/final_schedule.csv
 ```
 
 生成后建议先验证 APAL 约束：
@@ -276,9 +271,9 @@ python utils/verify_schedule.py --data_path data/283.csv --schedule_path results
 
 ```bash
 python scripts/generate_schedule.py \
-  --config conf/experiment/initial_schedule_680.yaml \
-  --model-path checkpoints/initial_schedule/best_680.ckpt \
-  --output-path results/final_schedule_680.csv
+  experiment=initial_schedule_680 \
+  model_path=checkpoints/initial_schedule/best_680.ckpt \
+  output_path=results/final_schedule_680.csv
 ```
 
 不要让 680 重调度继续读取默认的：
@@ -299,20 +294,18 @@ results/reschedule_eval_scenarios_680.csv
 
 ```powershell
 python train.py `
-  --trainer lightning `
-  --config conf/experiment/reschedule_task_delay.yaml `
-  --set reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt `
-  --set reschedule_baseline_schedule_path=results/final_schedule.csv
+  experiment=reschedule_task_delay `
+  reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt `
+  reschedule_baseline_schedule_path=results/final_schedule.csv
 ```
 
 Linux 写法：
 
 ```bash
 python train.py \
-  --trainer lightning \
-  --config conf/experiment/reschedule_task_delay.yaml \
-  --set reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt \
-  --set reschedule_baseline_schedule_path=results/final_schedule.csv
+  experiment=reschedule_task_delay \
+  reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt \
+  reschedule_baseline_schedule_path=results/final_schedule.csv
 ```
 
 启动日志应包含：
@@ -329,15 +322,14 @@ python train.py \
 
 ```bash
 python train.py \
-  --trainer lightning \
-  --config conf/experiment/reschedule_task_delay.yaml \
-  --data-path data/680.csv \
-  --train-data-path data/680.csv \
-  --set n_w=100 \
-  --set n_w_min=100 \
-  --set reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt \
-  --set reschedule_baseline_schedule_path=results/final_schedule_680.csv \
-  --set reschedule_eval_scenario_path=results/reschedule_eval_scenarios_680.csv
+  experiment=reschedule_task_delay \
+  data_file_path=data/680.csv \
+  train_data_path_or_dir=data/680.csv \
+  n_w=100 \
+  n_w_min=100 \
+  reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt \
+  reschedule_baseline_schedule_path=results/final_schedule_680.csv \
+  reschedule_eval_scenario_path=results/reschedule_eval_scenarios_680.csv
 ```
 
 如果此前已经生成了其他规模的验证场景，必须更换 `reschedule_eval_scenario_path` 或删除旧文件后重新生成。程序只会在目标文件不存在时自动生成场景，不会自动判断已有场景是否属于当前 baseline。
@@ -354,26 +346,25 @@ python train.py \
 | 固定验证场景 | `results/reschedule_eval_scenarios.csv` |
 | TensorBoard 日志 | `runs/reschedule_task_delay/<run_id>/logs/tensorboard/` |
 
-如果显式使用 `artifact_layout=legacy` 或 `--trainer legacy`，才会写入旧的 `checkpoints/reschedule_task_delay/` 与 `/root/tf-logs/` 结构。
+如果显式使用 `artifact_layout=legacy`，才会写入旧的 `checkpoints/reschedule_task_delay/` 与 `/root/tf-logs/` 结构。`trainer=legacy` 现在会明确报错。
 
 断点续训：
 
 ```bash
 python train.py \
-  --trainer lightning \
-  --config conf/experiment/reschedule_task_delay.yaml \
-  --set reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt \
-  --set reschedule_baseline_schedule_path=results/final_schedule.csv \
-  --run-id reschedule_task_delay_260630-153000 \
-  --resume
+  experiment=reschedule_task_delay \
+  reschedule_baseline_model_path=checkpoints/initial_schedule/best_680.ckpt \
+  reschedule_baseline_schedule_path=results/final_schedule.csv \
+  run_id=reschedule_task_delay_260630-153000 \
+  resume=true
 ```
 
 ### 5. 评估重调度模型
 
 ```bash
 python evaluate_reschedule_model.py \
-  --config conf/experiment/reschedule_task_delay.yaml \
-  --model-path runs/reschedule_task_delay/<run_id>/checkpoints/best.ckpt
+  experiment=reschedule_task_delay \
+  model_path=runs/reschedule_task_delay/<run_id>/checkpoints/best.ckpt
 ```
 
 评估结果保存到：
@@ -383,7 +374,7 @@ runs/reschedule_task_delay/<run_id>/eval/reschedule/reschedule_ppo_eval.csv
 runs/reschedule_task_delay/<run_id>/eval/reschedule/reschedule_ppo_eval_summary.json
 ```
 
-显式传 `--output-dir results/reschedule_ppo_eval` 时会写回旧目录。
+显式传 `output_dir=results/reschedule_ppo_eval` 时会写回旧目录。
 
 ## 运行日志
 
@@ -406,7 +397,7 @@ Lightning 每个 episode 输出一行精简 rollout 摘要：
 
 Lightning 每次 PPO 更新后覆盖保存最新 checkpoint；执行自动验证且选择指标改善时，覆盖保存最佳 checkpoint。终端会打印对应的 `[Checkpoint]` 记录。
 
-新运行默认写入统一 `runs` 目录。若使用 `artifact_layout=legacy`，或 `--resume` 但未指定 `--run-id`，会回到旧 `checkpoints/results/tf-logs` 兼容路径。
+新运行默认写入统一 `runs` 目录。若使用 `artifact_layout=legacy`，或 `resume=true` 但未指定 `run_id=...`，会回到旧 `checkpoints/results/tf-logs` 兼容路径。
 
 Rollout 心跳默认关闭。需要诊断长时间阶段时，可在 rollout YAML 中设置：
 
@@ -429,10 +420,10 @@ runs/<实验名>/<实验名>_<YYMMDD-HHMMSS>/
 runs/initial_schedule_680/initial_schedule_680_260630-153000/
 ```
 
-如果需要恢复某次新目录训练，建议显式传入对应 `--run-id`：
+如果需要恢复某次新目录训练，建议显式传入对应 `run_id=...`：
 
 ```bash
-python train.py --trainer lightning --config conf/experiment/initial_schedule_680.yaml --run-id initial_schedule_680_260630-153000 --resume
+python train.py experiment=initial_schedule_680 run_id=initial_schedule_680_260630-153000 resume=true
 ```
 
 ### 统一 Runs 输出
@@ -450,7 +441,7 @@ python train.py --trainer lightning --config conf/experiment/initial_schedule_68
 | Baseline 评估 | `runs/<实验名>/<run_id>/artifacts/baselines/` | Heuristic、GA、BasicPPO、DQN 的 metrics、schedule 和 run.log |
 | Benchmark 结果 | `runs/<实验名>/<run_id>/artifacts/benchmark/` | runtime summary、raw 子进程输出和论文表格 CSV |
 
-实验工具默认也写入 `runs`。若需要旧路径，显式传入 `--output-dir results/eval_logs`、`--output-dir results/runtime_benchmark/...`，或使用 `--set artifact_layout=legacy`。
+实验工具默认也写入 `runs`。若需要旧路径，显式传入 `output_dir=results/eval_logs`、`output_dir=results/runtime_benchmark/...`，或使用 `artifact_layout=legacy`。
 
 生成所有运行的文件索引：
 
@@ -510,13 +501,13 @@ tensorboard --logdir /root/tf-logs --bind_all
 手动评估保留 Standard、工时扰动、人员扰动和动态事件四场景：
 
 ```powershell
-python evaluate_model.py --model-path checkpoints/<实验目录>/<模型文件> --test-data data/283.csv --num-runs 3 --temperature 0 --output-dir results/evaluation
+python evaluate_model.py experiment=initial_schedule_283 model_path=checkpoints/<实验目录>/<模型文件> test_data=data/283.csv num_runs=3 temperature=0 output_dir=results/evaluation
 ```
 
 生成排程：
 
 ```powershell
-python scripts/generate_schedule.py --model-path checkpoints/<实验目录>/<模型文件> --output-path results/final_schedule.csv
+python scripts/generate_schedule.py experiment=initial_schedule_283 model_path=checkpoints/<实验目录>/<模型文件> output_path=results/final_schedule.csv
 ```
 
 每次新运行会在 `runs/<实验名>/<run_id>/configs/` 写入 `resolved_config.yaml` 和 `run_manifest.json`，记录最终配置、配置来源、命令类型、run_id 和 Git commit。训练只负责 checkpoint 与 TensorBoard；GA 对比、排程 CSV 和甘特图由独立命令按需生成。
@@ -667,50 +658,50 @@ python baselines/heuristic/run_all_baselines.py \
 
 ### 学习型低维 baseline：Basic PPO 与 DQN
 
-`BasicPPO` 和 `DQN` 是不使用 HB-GAT-PN 图网络的 flat-state 学习型 baseline。它们会读取同一套 YAML 配置、平台硬件配置和 `--set` 覆盖，但模型输入是由 APAL 环境状态展平得到的一维向量，因此不属于 GAT、Pointer 或 mask 消融。
+`BasicPPO` 和 `DQN` 是不使用 HB-GAT-PN 图网络的 flat-state 学习型 baseline。它们会读取同一套实验 YAML、平台硬件配置和 Hydra `key=value` 覆盖，但模型输入是由 APAL 环境状态展平得到的一维向量，因此不属于 GAT、Pointer 或 mask 消融。
 
 训练 Basic PPO：
 
 ```bash
 python baselines/basic_ppo/train_basic.py \
-  --config conf/experiment/initial_schedule_283.yaml \
-  --max-episodes 300 \
-  --batch-size 16 \
-  --seed 42 \
-  --output-dir results
+  experiment=initial_schedule_283 \
+  train.max_episodes=300 \
+  train.batch_size=16 \
+  seed=42 \
+  output_dir=results
 ```
 
 训练 DQN：
 
 ```bash
 python baselines/dqn/train_dqn.py \
-  --config conf/experiment/initial_schedule_283.yaml \
-  --max-episodes 300 \
-  --batch-size 16 \
-  --seed 42 \
-  --output-dir results
+  experiment=initial_schedule_283 \
+  train.max_episodes=300 \
+  train.batch_size=16 \
+  seed=42 \
+  output_dir=results
 ```
 
 离线评估 Basic PPO，并导出到统一 baseline 结果目录：
 
 ```bash
 python baselines/evaluate_flat_rl_baseline.py \
-  --algorithm basic_ppo \
-  --model-path results/basic_ppo_baseline_283_<timestamp>/basic_ppo_model_final.pth \
-  --config conf/experiment/initial_schedule_283.yaml \
-  --datasets 283.csv \
-  --seed 42
+  experiment=initial_schedule_283 \
+  algorithm=basic_ppo \
+  model_path=results/basic_ppo_baseline_283_<timestamp>/basic_ppo_model_final.pth \
+  datasets=[283.csv] \
+  seed=42
 ```
 
 离线评估 DQN：
 
 ```bash
 python baselines/evaluate_flat_rl_baseline.py \
-  --algorithm dqn \
-  --model-path results/dqn_baseline_283_<timestamp>/dqn_model.pth \
-  --config conf/experiment/initial_schedule_283.yaml \
-  --datasets 283.csv \
-  --seed 42
+  experiment=initial_schedule_283 \
+  algorithm=dqn \
+  model_path=results/dqn_baseline_283_<timestamp>/dqn_model.pth \
+  datasets=[283.csv] \
+  seed=42
 ```
 
 评估结果会写入：
@@ -722,7 +713,7 @@ runs/<实验名>/<run_id>/artifacts/baselines/flat_state/DQN/<dataset_name>/metr
 runs/<实验名>/<run_id>/artifacts/baselines/flat_state/DQN/<dataset_name>/schedule.csv
 ```
 
-若要恢复旧目录，显式追加 `--output-dir results/eval_logs`。
+若要恢复旧目录，显式追加 `output_dir=results/eval_logs`。
 
 ### HB-GAT-PN 消融实验
 
@@ -732,56 +723,56 @@ runs/<实验名>/<run_id>/artifacts/baselines/flat_state/DQN/<dataset_name>/sche
 
 ```bash
 python train.py \
-  --config conf/experiment/scale_400_800_schedule.yaml \
-  --set experiment_name=scale_400_800_full \
-  --set enable_multi_benchmark_eval=false
+  experiment=scale_400_800_schedule \
+  experiment_name=scale_400_800_full \
+  enable_multi_benchmark_eval=false
 ```
 
 常用三类结构消融：
 
 ```bash
 python train.py \
-  --config conf/experiment/scale_400_800_schedule.yaml \
-  --ablation-no-gat \
-  --set experiment_name=scale_400_800_no_gat \
-  --set enable_multi_benchmark_eval=false
+  experiment=scale_400_800_schedule \
+  ablation_no_gat=true \
+  experiment_name=scale_400_800_no_gat \
+  enable_multi_benchmark_eval=false
 
 python train.py \
-  --config conf/experiment/scale_400_800_schedule.yaml \
-  --ablation-no-pointer \
-  --set experiment_name=scale_400_800_no_pointer \
-  --set enable_multi_benchmark_eval=false
+  experiment=scale_400_800_schedule \
+  ablation_no_pointer=true \
+  experiment_name=scale_400_800_no_pointer \
+  enable_multi_benchmark_eval=false
 
 python train.py \
-  --config conf/experiment/scale_400_800_schedule.yaml \
-  --ablation-no-mask \
-  --set experiment_name=scale_400_800_no_mask \
-  --set enable_multi_benchmark_eval=false
+  experiment=scale_400_800_schedule \
+  ablation_no_mask=true \
+  experiment_name=scale_400_800_no_mask \
+  enable_multi_benchmark_eval=false
 ```
 
-也可以通过 `--set` 做其他结构或训练机制消融：
+也可以通过 `key=value` 做其他结构或训练机制消融：
 
 ```bash
 python train.py \
-  --config conf/experiment/scale_400_800_schedule.yaml \
-  --set experiment_name=scale_400_800_no_attention_critic \
-  --set enable_multi_benchmark_eval=false \
-  --set use_attention_critic=false \
-  --set use_shared_trunk=true \
-  --set use_autoregressive_worker=false
+  experiment=scale_400_800_schedule \
+  experiment_name=scale_400_800_no_attention_critic \
+  enable_multi_benchmark_eval=false \
+  use_attention_critic=false \
+  use_shared_trunk=true \
+  use_autoregressive_worker=false
 ```
 
 如果服务器上存在旧配置残留，或者需要显式确认训练和验证路径，可在命令中强制覆盖：
 
 ```bash
 python train.py \
-  --config conf/experiment/scale_400_800_schedule.yaml \
-  --train-data-path data/scale_400_800_datasets \
-  --data-path data/680.csv \
-  --set enable_multi_benchmark_eval=false
+  experiment=scale_400_800_schedule \
+  train_data_path_or_dir=data/scale_400_800_datasets \
+  data_file_path=data/680.csv \
+  enable_multi_benchmark_eval=false
 ```
 
-若需要用四基准归一化综合评分保存 best model，则去掉 `--set enable_multi_benchmark_eval=false`，使用配置文件中的 `data/283.csv`、`data/680.csv`、`data/2338.csv`、`data/3182.csv` 进行验证。旧的 `tests/test_sensitivity_analysis.py` 属于历史实验脚本，不建议作为当前论文消融入口。
+若需要用四基准归一化综合评分保存 best model，则去掉 `enable_multi_benchmark_eval=false`，使用配置文件中的 `data/283.csv`、`data/680.csv`、`data/2338.csv`、`data/3182.csv` 进行验证。旧的 `tests/test_sensitivity_analysis.py` 属于历史实验脚本，不建议作为当前论文消融入口。
 
 #### 常用参数说明：
 - `--data_dir`：数据集文件所在的根目录（默认 `data`）。
@@ -808,7 +799,7 @@ python train.py \
 
 1. **终端统计汇总表**：评估运行结束后，控制台会直接输出所有方法在各个数据集上的指标对比表格（包含 Makespan、工作量偏差 std、工人利用率、站位利用率、推理耗时以及是否死锁）。同时该汇总表格会被导出为 CSV 文件：
    - 默认汇总表格路径：`runs/<实验名>/<run_id>/artifacts/baselines/heuristic/baselines_summary.csv`
-   - 旧路径兼容：显式传 `--output-dir results/eval_logs` 后写入 `results/eval_logs/baselines_summary.csv`
+   - 旧路径兼容：显式传 `output_dir=results/eval_logs` 后写入 `results/eval_logs/baselines_summary.csv`
 2. **各算法独立数据集的指标与排程**：每个算法在对应数据集下的评估明细将被详细记录在：
    - **度量指标**：`runs/<实验名>/<run_id>/artifacts/baselines/heuristic/<method>/<dataset_name>/metrics.json`
    - **排程明细**：`runs/<实验名>/<run_id>/artifacts/baselines/heuristic/<method>/<dataset_name>/schedule.csv`

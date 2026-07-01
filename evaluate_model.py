@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import argparse
 import json
 import os
+import sys
 from pathlib import Path
+from typing import Any
 
 
 def _sanitize_thread_env() -> None:
@@ -34,28 +35,46 @@ from runtime.checkpoints import (
     load_checkpoint,
     load_policy_weights,
 )
-from runtime.configuration import add_common_config_arguments, parse_runtime_args, resolve_runtime_config
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_hydra_runtime,
+    should_show_help,
+)
 from train import evaluate_model as run_evaluation
 from utils.visualization import plot_gantt
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+EVAL_EXTRA_ARGS = {
+    "model_path": ExtraArgument(required=True, help="待评估 checkpoint 路径"),
+    "test_data": ExtraArgument(default=None, help="可选测试数据路径；缺省使用实验配置"),
+    "num_runs": ExtraArgument(default=1, help="重复评估次数"),
+    "temperature": ExtraArgument(default=0.0, help="动作采样温度，0 表示确定性"),
+    "scenario": ExtraArgument(default=None, help="单个评估场景，例如 scenario=standard"),
+    "scenarios": ExtraArgument(default=None, help="场景列表，例如 scenarios=[standard,mb]"),
+    "no_gantt": ExtraArgument(default=False, help="是否跳过甘特图输出"),
+    "output_dir": ExtraArgument(default=None, help="可选输出目录；缺省写入本次 run 的 eval 目录"),
+}
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="评估 APAL PPO checkpoint")
-    add_common_config_arguments(parser)
-    parser.add_argument("--model-path", "--model_path", dest="model_path", required=True)
-    parser.add_argument("--test-data", "--test_data", dest="test_data")
-    parser.add_argument("--num-runs", "--num_runs", dest="num_runs", type=int, default=1)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--scenario", action="append", dest="scenarios")
-    parser.add_argument("--no-gantt", action="store_true")
-    return parser
+
+def _resolve_scenarios(args: Any) -> list[str] | tuple[str, ...]:
+    raw = getattr(args, "scenarios", None)
+    single = getattr(args, "scenario", None)
+    if raw is None and single is None:
+        return tuple(configs.eval_scenarios)
+    values = raw if raw is not None else single
+    if isinstance(values, str):
+        return [values]
+    if isinstance(values, (list, tuple)):
+        return [str(item) for item in values]
+    raise ValueError(f"无法解析评估场景参数: {values!r}")
 
 
-def main(args: argparse.Namespace) -> dict[str, object]:
-    _, _, explicit_fields = resolve_runtime_config(args, target=configs)
+def main(args: Any) -> dict[str, object]:
+    explicit_fields = set(getattr(args, "explicit_config_fields", set()))
     context = None
     if uses_runs_layout(configs):
         context = create_run_context(configs, PROJECT_ROOT, create_dirs=True)
@@ -71,15 +90,18 @@ def main(args: argparse.Namespace) -> dict[str, object]:
     if args.test_data:
         configs.data_file_path = args.test_data
     data_path = resolve_path(configs.data_file_path, PROJECT_ROOT)
-    if context is not None and "result_dir" not in explicit_fields:
+    if args.output_dir:
+        output_dir = resolve_path(args.output_dir, PROJECT_ROOT)
+    elif context is not None and "result_dir" not in explicit_fields:
         output_dir = context.eval_dir
     else:
         output_dir = resolve_path(configs.result_dir, PROJECT_ROOT)
     output_dir.mkdir(parents=True, exist_ok=True)
+    scenarios = _resolve_scenarios(args)
     print(
         "[Eval] "
         f"checkpoint={checkpoint_path} data={data_path} runs={int(args.num_runs)} "
-        f"temperature={float(args.temperature)} scenarios={args.scenarios or tuple(configs.eval_scenarios)} "
+        f"temperature={float(args.temperature)} scenarios={scenarios} "
         f"output_dir={output_dir} no_gantt={bool(args.no_gantt)}",
         flush=True,
     )
@@ -106,7 +128,7 @@ def main(args: argparse.Namespace) -> dict[str, object]:
         agent,
         num_runs=int(args.num_runs),
         temperature=float(args.temperature),
-        scenario_names=args.scenarios or tuple(configs.eval_scenarios),
+        scenario_names=scenarios,
     )
     makespan, balance, reward, schedule, duration, worker_util, station_util = result
     rows = [
@@ -153,5 +175,25 @@ def main(args: argparse.Namespace) -> dict[str, object]:
     return summary
 
 
+def cli_main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if should_show_help(raw_args):
+        print(hydra_help(EVAL_EXTRA_ARGS))
+        return 0
+    try:
+        runtime_args = initialize_hydra_runtime(
+            raw_args,
+            target=configs,
+            project_root=PROJECT_ROOT,
+            default_experiment="initial_schedule_283",
+            extra_arguments=EVAL_EXTRA_ARGS,
+        )
+        main(runtime_args)
+    except (HydraCliError, KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
+        print(f"[CLI] {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 if __name__ == "__main__":
-    main(parse_runtime_args(build_parser()))
+    raise SystemExit(cli_main())
