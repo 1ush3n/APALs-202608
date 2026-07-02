@@ -42,15 +42,15 @@ def test_gpu_graph_manager_evicts_other_datasets() -> None:
     assert manager.templates == {}
 
 
-def test_oom_retry_rolls_back_partial_update_and_reduces_batch() -> None:
+def test_oom_rolls_back_partial_update_and_keeps_batch_size() -> None:
     overrides = {
         "use_schedule_free": False,
         "use_ema": False,
         "ppo_batch_size_cap": 0,
-        "auto_oom_retry": True,
+        "auto_oom_retry": False,
         "skip_update_on_oom": True,
         "oom_min_batch_size": 1,
-        "oom_max_retries": 1,
+        "oom_max_retries": 0,
         "oom_transactional_updates": True,
     }
     with temporary_config(configs, overrides):
@@ -59,29 +59,21 @@ def test_oom_retry_rolls_back_partial_update_and_reduces_batch() -> None:
             name: value.detach().clone()
             for name, value in agent.policy.state_dict().items()
         }
-        calls = 0
-
         def fake_update_once(self, memory, env=None, current_ep=1):
-            nonlocal calls
-            calls += 1
-            if calls == 1:
-                with torch.no_grad():
-                    next(self.policy.parameters()).add_(10.0)
-                self.current_step = 9
-                raise torch.cuda.OutOfMemoryError("CUDA out of memory")
-            for name, value in self.policy.state_dict().items():
-                assert torch.equal(value, initial[name])
-            assert self.current_step == 0
-            return {"Loss/Total": 0.25}
+            with torch.no_grad():
+                next(self.policy.parameters()).add_(10.0)
+            self.current_step = 9
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
 
         agent._update_once = MethodType(fake_update_once, agent)
         metrics = agent.update(SimpleNamespace(), current_ep=3)
 
-    assert calls == 2
-    assert agent.batch_size == 2
-    assert metrics["OOM/RetryCount"] == 1.0
-    assert metrics["OOM/SkippedUpdate"] == 0.0
-    assert metrics["OOM/EffectiveBatchSize"] == 2.0
+    assert agent.batch_size == 4
+    assert metrics["OOM/SkippedUpdate"] == 1.0
+    assert metrics["_skip_training_log"] == 1.0
+    assert agent.current_step == 0
+    for name, value in agent.policy.state_dict().items():
+        assert torch.equal(value, initial[name])
 
 
 def test_oom_retry_exhaustion_safely_skips_update() -> None:
@@ -112,7 +104,8 @@ def test_oom_retry_exhaustion_safely_skips_update() -> None:
         metrics = agent.update(SimpleNamespace(), current_ep=5)
 
     assert metrics["OOM/SkippedUpdate"] == 1.0
-    assert metrics["OOM/RetryCount"] == 0.0
+    assert metrics["_skip_training_log"] == 1.0
+    assert agent.batch_size == 2
     assert agent.current_step == 0
     for name, value in agent.policy.state_dict().items():
         assert torch.equal(value, initial[name])

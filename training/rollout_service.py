@@ -8,17 +8,14 @@ import torch
 
 from configs import Config
 from environment import AirLineEnv_Graph
+from runtime.evaluation import compute_apal_rollout_diagnostics, evaluate_model
 from runtime.multiscale import BenchmarkScore, parse_reference_makespans, score_multi_benchmark
-from train import (
-    Memory,
-    evaluate_model,
-    evaluate_reschedule_model,
-    refresh_env_observation,
-    resolve_workspace_path,
-    select_actions_batch_compat,
-)
+from runtime.paths import resolve_workspace_path
+from runtime.reschedule_eval import evaluate_reschedule_model
 from training.heartbeat import RolloutHeartbeat
 from training.lightning_module import RolloutMetrics, RolloutUpdate
+from training.memory import Memory
+from training.observation import refresh_env_observation
 
 
 class APALRolloutService:
@@ -116,15 +113,18 @@ class APALRolloutService:
                 ipc_seconds += time.perf_counter() - stage_started
                 active = [idx for idx, done in enumerate(dones) if not done]
 
-                for idx in list(active):
+                waiting_indices = [idx for idx in active if masks_list[idx][0].all()]
+                stage_started = time.perf_counter()
+                wait_results = self.vector_env.try_wait_for_resources_indices(waiting_indices)
+                refreshed_indices = [idx for idx in waiting_indices if wait_results[idx]]
+                refreshed_states = self.vector_env.get_rollout_state_indices(refreshed_indices)
+                ipc_seconds += time.perf_counter() - stage_started
+
+                for idx in waiting_indices:
                     if not masks_list[idx][0].all():
                         continue
-                    if self.vector_env.envs[idx].try_wait_for_resources():
-                        stage_started = time.perf_counter()
-                        masks_list[idx], snapshots[idx] = (
-                            self.vector_env.envs[idx].get_rollout_state()
-                        )
-                        ipc_seconds += time.perf_counter() - stage_started
+                    if wait_results[idx]:
+                        masks_list[idx], snapshots[idx] = refreshed_states[idx]
                         stage_started = time.perf_counter()
                         states[idx] = self.vector_env.envs[
                             idx
@@ -152,8 +152,7 @@ class APALRolloutService:
                 )
                 stage_started = time.perf_counter()
                 with torch.inference_mode():
-                    results = select_actions_batch_compat(
-                        self.agent,
+                    results = self.agent.select_actions_batch(
                         obs_list=[states[idx] for idx in active],
                         mask_task_list=[masks_list[idx][0] for idx in active],
                         mask_station_matrix_list=[

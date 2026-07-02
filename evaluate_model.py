@@ -42,7 +42,7 @@ from runtime.hydra_config import (
     initialize_hydra_runtime,
     should_show_help,
 )
-from train import evaluate_model as run_evaluation
+from runtime.evaluation import evaluate_model as run_evaluation
 from utils.visualization import plot_gantt
 
 

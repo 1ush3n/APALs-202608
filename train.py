@@ -14,38 +14,9 @@ from runtime.hydra_config import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
-# 过渡期兼容导出：现有评估与测试代码仍会导入这些公共能力。
-# 后续应继续把这些符号迁移到 runtime/evaluation/training 模块。
-from archive.legacy_train import (  # noqa: E402,F401
-    Memory,
-    _compute_assignment_utilization,
-    _compute_reschedule_constraint_metrics,
-    compute_apal_rollout_diagnostics,
-    ensure_reschedule_baseline_available,
-    ensure_reschedule_eval_scenarios_available,
-    evaluate_initial_multi_benchmark,
-    evaluate_model,
-    evaluate_reschedule_model,
-    load_warm_start_weights_with_input_expansion,
-    refresh_env_observation,
-    resolve_checkpoint_paths,
-    resolve_tensorboard_log_root,
-    resolve_workspace_path,
-    sanitize_experiment_name,
-    select_actions_batch_compat,
-    set_seed,
-    write_best_model_meta,
-)
-
-
-def initialize_training_config(args, argv=None, system_name: str | None = None):
-    """兼容旧内部调用；新命令行入口应使用 Hydra key=value。"""
-    from archive.legacy_train import initialize_training_config as _legacy_initialize
-
-    return _legacy_initialize(args, argv=argv, system_name=system_name)
-
 
 def train(_args) -> None:
+    """历史 legacy 训练入口已归档；主入口固定使用 Lightning。"""
     raise RuntimeError("legacy 训练入口已归档；请使用 `python train.py experiment=...` 启动 Lightning。")
 
 

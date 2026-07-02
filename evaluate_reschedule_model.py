@@ -17,12 +17,12 @@ from configs import configs
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
-from train import (
+from runtime.paths import resolve_workspace_path
+from runtime.reschedule_eval import (
     ensure_reschedule_baseline_available,
     ensure_reschedule_eval_scenarios_available,
     evaluate_reschedule_model,
     load_warm_start_weights_with_input_expansion,
-    resolve_workspace_path,
 )
 from runtime.checkpoints import (
     apply_checkpoint_model_spec,

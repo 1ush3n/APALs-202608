@@ -22,13 +22,13 @@ PyTorch 应根据官方安装矩阵单独安装与显卡驱动兼容的 CUDA whe
 生成 283、680、2338、3182 四档训练池，每档默认 32 个变体：
 
 ```powershell
-python scripts/generate_initial_buckets.py --bucket all --num_samples 32 --seed 42
+python scripts/generate_initial_buckets.py bucket=all num_samples=32 seed=42
 ```
 
 覆盖已有训练池：
 
 ```powershell
-python scripts/generate_initial_buckets.py --bucket all --num_samples 32 --seed 42 --overwrite
+python scripts/generate_initial_buckets.py bucket=all num_samples=32 seed=42 overwrite=true
 ```
 
 ## 训练
@@ -178,8 +178,7 @@ python train.py \
   train.max_episodes=300 \
   eval_freq=1 \
   accumulation_steps=16 \
-  auto_oom_retry=true \
-  oom_max_retries=1 \
+  skip_update_on_oom=true \
   enable_gpu_batch_rebuild=true \
   enable_rollout_profiler=true
 ```
@@ -264,7 +263,7 @@ python scripts/generate_schedule.py \
 生成后建议先验证 APAL 约束：
 
 ```powershell
-python utils/verify_schedule.py --data_path data/283.csv --schedule_path results/final_schedule.csv
+python utils/verify_schedule.py data_path=data/283.csv schedule_path=results/final_schedule.csv
 ```
 
 不同规模应使用独立文件名，避免意外复用。例如 680：
@@ -334,7 +333,55 @@ python train.py \
 
 如果此前已经生成了其他规模的验证场景，必须更换 `reschedule_eval_scenario_path` 或删除旧文件后重新生成。程序只会在目标文件不存在时自动生成场景，不会自动判断已有场景是否属于当前 baseline。
 
-### 4. 输出与续训
+### 4. 推荐论文实验：多实例重调度训练
+
+论文主实验建议先准备 manifest：生成 30 个 400-600 工序随机训练实例，使用显式传入的初始调度模型为每个实例和真实 `283/680/2338/3182` 数据生成 baseline schedule，并为真实数据生成固定 low/medium/high 扰动场景。
+
+```bash
+python scripts/prepare_reschedule_data.py \
+  experiment=reschedule_task_delay \
+  initial_model_path=checkpoints/initial_schedule/bestmodel/best_model.pth \
+  train_count=30 \
+  min_ops=400 \
+  max_ops=600 \
+  seed=20260701 \
+  output_manifest=data/reschedule_manifests/reschedule_400_600_seed20260701.json
+```
+
+训练时使用 manifest，环境会按当前随机数据集自动匹配自己的 baseline；`reschedule_baseline_model_path` 用于 warm start 初始化重调度策略，自动验证固定使用真实 680：
+
+```bash
+python train.py \
+  experiment=reschedule_task_delay \
+  train_data_path_or_dir=data/generated/reschedule_train_400_600 \
+  reschedule_baseline_model_path=checkpoints/initial_schedule/bestmodel/best_model.pth \
+  reschedule_manifest_path=data/reschedule_manifests/reschedule_400_600_seed20260701.json \
+  reschedule_eval_instance_id=real_680 \
+  train.batch_size=128
+```
+
+训练完成后评估真实多规模数据：
+
+```bash
+python scripts/evaluate_reschedule_manifest.py \
+  experiment=reschedule_task_delay \
+  model_path=checkpoints/reschedule_task_delay/bestmodel/best_model.pth \
+  manifest_path=data/reschedule_manifests/reschedule_400_600_seed20260701.json \
+  instance_ids=[real_283,real_680,real_2338,real_3182] \
+  output_dir=results/reschedule_manifest_eval
+```
+
+与规则/搜索式 baseline 做公平比较时，也使用同一个 manifest 和同一个 `instance_ids`：
+
+```bash
+python scripts/evaluate_reschedule_rules.py \
+  experiment=reschedule_task_delay \
+  manifest_path=data/reschedule_manifests/reschedule_400_600_seed20260701.json \
+  instance_ids=[real_680] \
+  output_dir=results/reschedule_rules_real_680
+```
+
+### 5. 输出与续训
 
 重调度主要输出：
 
@@ -359,7 +406,7 @@ python train.py \
   resume=true
 ```
 
-### 5. 评估重调度模型
+### 6. 评估重调度模型
 
 ```bash
 python evaluate_reschedule_model.py \
@@ -515,7 +562,7 @@ python scripts/generate_schedule.py experiment=initial_schedule_283 model_path=c
 验证 APAL 排程约束：
 
 ```powershell
-python utils/verify_schedule.py --data_path data/283.csv --schedule_path results/final_schedule.csv
+python utils/verify_schedule.py data_path=data/283.csv schedule_path=results/final_schedule.csv
 ```
 
 ## 测试
@@ -552,8 +599,8 @@ model:
 
 - Windows 低显存配置将 PPO batch 上限设为 `4`；Linux 不设置上限，使用实验配置的默认 batch。
 - GPU 图模板仅保留当前数据集，避免训练池轮换时显存逐轮累积。
-- PPO 更新首次发生 CUDA OOM 时会完整回滚模型、优化器、AMP 缩放器和随机状态，并将 batch 减半重试一次。
-- 减半后再次 OOM 将直接回滚并跳过当前 PPO 更新；TensorBoard 会记录 `OOM/RetryCount`、`OOM/SkippedUpdate` 和 `OOM/EffectiveBatchSize`。
+- PPO 更新发生 CUDA OOM 时会完整回滚模型、优化器、AMP 缩放器和随机状态，然后直接跳过当前 PPO 更新。
+- OOM 后不会自动降低 PPO batch size，也不会记录该轮 rollout、loss 或 eval 指标；下一轮继续使用原 batch size。
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 用于缓解显存碎片，但不能替代 batch 上限和事务回滚。
 
 ## Heuristic 与 GA 基线批量评估

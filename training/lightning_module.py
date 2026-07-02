@@ -136,6 +136,15 @@ class APALLightningModule(pl.LightningModule):
     def training_step(self, batch: RolloutUpdate, batch_idx: int):
         assert isinstance(batch, RolloutUpdate), type(batch)
         self.last_eval_metrics = None
+        self.agent.validate_snapshot_homogeneity(batch.memory.states)
+        metrics = self.agent.update(batch.memory, batch.env, current_ep=batch.episode)
+        if float(metrics.get("OOM/SkippedUpdate", 0.0)) > 0.0:
+            print(
+                f"[PPO OOM] Episode {batch.episode} 更新已安全回滚并跳过；"
+                "不记录本轮 rollout/loss/eval，下一轮继续使用原 batch_size。"
+            )
+            return None
+
         for rollout_metrics in batch.rollout_metrics:
             # 记录详细指标
             for name, value in rollout_metrics.as_log_dict().items():
@@ -145,14 +154,9 @@ class APALLightningModule(pl.LightningModule):
             self.log("Mk", float(rollout_metrics.average_makespan), on_step=True, on_epoch=False, prog_bar=True)
             self.log("SPS", float(rollout_metrics.steps_per_second), on_step=True, on_epoch=False, prog_bar=True)
 
-        self.agent.validate_snapshot_homogeneity(batch.memory.states)
-        metrics = self.agent.update(batch.memory, batch.env, current_ep=batch.episode)
-        if float(metrics.get("OOM/SkippedUpdate", 0.0)) > 0.0:
-            print(
-                f"[PPO OOM] Episode {batch.episode} 更新已安全回滚并跳过，"
-                f"下轮 batch_size={int(metrics['OOM/EffectiveBatchSize'])}"
-            )
         for name, value in metrics.items():
+            if str(name).startswith("_"):
+                continue
             if isinstance(value, (int, float)):
                 scalar = torch.tensor(float(value))
                 if torch.isfinite(scalar):

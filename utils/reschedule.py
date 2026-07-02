@@ -42,6 +42,25 @@ class RescheduleScore:
     terms: dict[str, float]
 
 
+@dataclass(frozen=True)
+class RescheduleLoadLevelSpec:
+    """重调度任务延迟负载等级。"""
+
+    name: str
+    start_min_ratio: float
+    start_max_ratio: float
+    task_prob: float
+    delay_min: float
+    delay_max: float
+
+
+DEFAULT_RESCHEDULE_LOAD_LEVELS: tuple[RescheduleLoadLevelSpec, ...] = (
+    RescheduleLoadLevelSpec("low", 0.15, 0.35, 0.05, 5.0, 15.0),
+    RescheduleLoadLevelSpec("medium", 0.30, 0.55, 0.10, 10.0, 35.0),
+    RescheduleLoadLevelSpec("high", 0.45, 0.70, 0.18, 20.0, 60.0),
+)
+
+
 HARD_CONSTRAINT_KEYS = (
     "frozen_violation_count",
     "release_violation_count",
@@ -184,6 +203,18 @@ def save_reschedule_scenarios(path: Path, scenarios: list[tuple[str, RescheduleS
     pd.DataFrame(rows).to_csv(path, index=False)
 
 
+def eligible_delay_tasks(baseline: BaselineSchedule, start_time: float) -> list[BaselineTask]:
+    """只允许真实可执行工序进入任务延迟扰动，不延迟 0 工时虚拟汇聚节点。"""
+
+    return [
+        task
+        for task in baseline.tasks.values()
+        if task.start > float(start_time) + 1e-9
+        and float(task.duration) > 1e-8
+        and len(task.team) > 0
+    ]
+
+
 def sample_task_delay_scenario(
     baseline: BaselineSchedule,
     *,
@@ -200,13 +231,52 @@ def sample_task_delay_scenario(
     start_time = float(rng.uniform(lo, hi))
 
     release_times: dict[int, float] = {}
-    for task_id, task in baseline.tasks.items():
-        if task.start <= start_time + 1e-9:
-            continue
+    for task in eligible_delay_tasks(baseline, start_time):
         if rng.rand() < task_prob:
             delay = float(rng.uniform(delay_min, delay_max))
-            release_times[task_id] = max(task.start, start_time + delay)
+            release_times[int(task.task_id)] = max(float(task.start), start_time + delay)
     return RescheduleScenario(start_time=start_time, task_release_times=release_times)
+
+
+def sample_task_delay_load_scenario(
+    baseline: BaselineSchedule,
+    *,
+    rng: np.random.RandomState,
+    levels: tuple[RescheduleLoadLevelSpec, ...] = DEFAULT_RESCHEDULE_LOAD_LEVELS,
+    level_name: str | None = None,
+    ensure_nonempty: bool = True,
+) -> tuple[str, RescheduleScenario]:
+    """按 low/medium/high 负载等级采样任务延迟场景。"""
+
+    if not levels:
+        raise ValueError("至少需要一个重调度负载等级")
+    if level_name:
+        matches = [level for level in levels if level.name == level_name]
+        if not matches:
+            raise ValueError(f"未知重调度负载等级: {level_name}")
+        spec = matches[0]
+    else:
+        spec = levels[int(rng.randint(0, len(levels)))]
+    scenario = sample_task_delay_scenario(
+        baseline,
+        rng=rng,
+        min_start_ratio=float(spec.start_min_ratio),
+        max_start_ratio=float(spec.start_max_ratio),
+        task_prob=float(spec.task_prob),
+        delay_min=float(spec.delay_min),
+        delay_max=float(spec.delay_max),
+    )
+    if scenario.task_release_times or not ensure_nonempty:
+        return spec.name, scenario
+    candidates = eligible_delay_tasks(baseline, scenario.start_time)
+    if not candidates:
+        return spec.name, scenario
+    picked = candidates[int(rng.randint(0, len(candidates)))]
+    release_time = max(float(picked.start), float(scenario.start_time) + float(rng.uniform(spec.delay_min, spec.delay_max)))
+    return spec.name, RescheduleScenario(
+        start_time=float(scenario.start_time),
+        task_release_times={int(picked.task_id): float(release_time)},
+    )
 
 
 def calculate_reschedule_lower_bound(

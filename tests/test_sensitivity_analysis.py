@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 
 # 导入核心组件
 from configs import configs
-from train import train
+from archive.legacy_train import train
 import utils.report_generator
 
 # ==========================================

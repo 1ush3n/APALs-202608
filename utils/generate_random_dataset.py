@@ -12,11 +12,27 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import pandas as pd
 import numpy as np
-import argparse
 import re
 import random
 from environment import AirLineEnv_Graph
 from data_loader import load_data
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_keyvalue_args,
+    should_show_help,
+)
+
+
+RANDOM_DATASET_ARGS = {
+    "output_dir": ExtraArgument(default="data/random_datasets", help="输出目录"),
+    "num_samples": ExtraArgument(default=10, help="批量生成的样本数量"),
+    "min_length": ExtraArgument(default=200, help="生成数据集最小节点数量"),
+    "max_length": ExtraArgument(default=500, help="生成数据集最大节点数量"),
+    "time_var": ExtraArgument(default=0.2, help="工时高斯波动标准差系数"),
+    "seed": ExtraArgument(default=42, help="随机种子"),
+}
 
 
 @dataclass(frozen=True)
@@ -35,15 +51,8 @@ def _sha256(path: Path) -> str:
             digest.update(block)
     return digest.hexdigest()
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="生成基于原工序拓扑结构的随机扰动数据集 (支持拓扑剪枝和安全加点防死锁)")
-    parser.add_argument('--output_dir', type=str, default='data/random_datasets', help="输出目录")
-    parser.add_argument('--num_samples', type=int, default=10, help="批量生成的样本数量")
-    parser.add_argument('--min_length', type=int, default=200, help="生成的最小数据集节点数量")
-    parser.add_argument('--max_length', type=int, default=500, help="生成的最大数据集节点数量")
-    parser.add_argument('--time_var', type=float, default=0.2, help="工时高斯波动的标准差系数 (如 0.2 代表上下浮动约 20%)")
-    parser.add_argument('--seed', type=int, default=42, help="随机种子")
-    return parser.parse_args()
+def parse_args(argv: list[str] | None = None):
+    return initialize_keyvalue_args(argv, extra_arguments=RANDOM_DATASET_ARGS)
 
 def get_active_ancestors(node, drop_set, pred_map, memo, visited):
     """
@@ -357,8 +366,20 @@ def generate_bucket(
     )
     return manifest
 
-def main():
-    args = parse_args()
+def main(argv: list[str] | None = None):
+    if should_show_help(argv):
+        print(hydra_help(RANDOM_DATASET_ARGS))
+        return
+    try:
+        args = parse_args(argv)
+    except HydraCliError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2)
+    args.num_samples = int(args.num_samples)
+    args.min_length = int(args.min_length)
+    args.max_length = int(args.max_length)
+    args.time_var = float(args.time_var)
+    args.seed = int(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
         
@@ -401,4 +422,4 @@ def main():
     print(f"全部完成！成功生成并通过验证的合法数据集: {success_count}/{args.num_samples}")
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

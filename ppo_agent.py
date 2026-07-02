@@ -258,6 +258,70 @@ class PPOAgent:
             repaired += 1
         return repaired
 
+    def compute_static_worker_constraint_mask(
+        self,
+        batch: HeteroData,
+        *,
+        selected_task: torch.Tensor,
+        selected_station: torch.Tensor,
+        max_workers: int,
+    ) -> torch.Tensor:
+        """按 sparse batch 索引计算 worker 技能与工位锁定约束。
+
+        输出形状: [B, Max_W]，True 表示该 worker 在当前动作下不可选。
+        该逻辑只依赖原始图特征和动作目标，不依赖网络编码结果，因此可避开
+        PPO 内层中对 `batch['task'].x` 与 `batch['worker'].x` 的重复 dense 化。
+        """
+        selected_task = selected_task.view(-1).to(self.device, dtype=torch.long)
+        selected_station = selected_station.view(-1).to(self.device, dtype=torch.long)
+        batch_size = int(selected_task.numel())
+        if batch_size <= 0:
+            raise ValueError("selected_task 不能为空")
+        if int(max_workers) <= 0:
+            raise ValueError("max_workers 必须大于 0")
+
+        task_x = batch["task"].x.to(self.device)
+        worker_x = batch["worker"].x.to(self.device)
+        task_batch = batch["task"].batch.to(self.device, dtype=torch.long)
+        worker_batch = batch["worker"].batch.to(self.device, dtype=torch.long)
+
+        if hasattr(batch["task"], "ptr") and batch["task"].ptr is not None:
+            task_ptr = batch["task"].ptr.to(self.device, dtype=torch.long)
+            selected_task_global = task_ptr[:-1] + selected_task
+        else:
+            selected_task_global = torch.empty(batch_size, device=self.device, dtype=torch.long)
+            for batch_id in range(batch_size):
+                task_nodes = torch.nonzero(task_batch == batch_id, as_tuple=False).view(-1)
+                selected_task_global[batch_id] = task_nodes[selected_task[batch_id]]
+
+        selected_task_raw = task_x[selected_task_global]
+        task_type_idx = torch.argmax(selected_task_raw[:, 5:15], dim=1)
+
+        if hasattr(batch["worker"], "ptr") and batch["worker"].ptr is not None:
+            worker_ptr = batch["worker"].ptr.to(self.device, dtype=torch.long)
+            worker_local_idx = torch.arange(worker_x.size(0), device=self.device) - worker_ptr[worker_batch]
+        else:
+            worker_local_idx = torch.empty(worker_x.size(0), device=self.device, dtype=torch.long)
+            for batch_id in range(batch_size):
+                worker_nodes = torch.nonzero(worker_batch == batch_id, as_tuple=False).view(-1)
+                worker_local_idx[worker_nodes] = torch.arange(worker_nodes.numel(), device=self.device)
+
+        if worker_local_idx.numel() > 0 and int(worker_local_idx.max().item()) >= int(max_workers):
+            raise ValueError("max_workers 小于 batch 中实际 worker 数")
+
+        worker_skill_idx = task_type_idx[worker_batch]
+        row_idx = torch.arange(worker_x.size(0), device=self.device, dtype=torch.long)
+        has_skill = worker_x[:, 1:11][row_idx, worker_skill_idx] > 0.5
+        skill_mask_flat = ~has_skill
+
+        worker_locks = torch.argmax(worker_x[:, 13:21], dim=1)
+        station_action = selected_station + 1
+        lock_mask_flat = (worker_locks != 0) & (worker_locks != station_action[worker_batch])
+
+        static_mask = torch.ones(batch_size, int(max_workers), device=self.device, dtype=torch.bool)
+        static_mask[worker_batch, worker_local_idx] = skill_mask_flat | lock_mask_flat
+        return static_mask
+
     @staticmethod
     def compute_gae_returns(
         rewards: List[float],
@@ -612,7 +676,11 @@ class PPOAgent:
 
         with torch.no_grad():
             # 1. 鎵归噺鎵撳寘寮傛瀯鍥捐娴嬫暟鎹苟閫佸叆 GPU锛屼互 O(1) 澶嶆潅搴﹁繍琛?GNN 缂栫爜鍜?Critic 浠峰€肩綉缁?
-            batch_obs = Batch.from_data_list(obs_list).to(self.device)
+            batch_obs = Batch.from_data_list(obs_list)
+            task_ptr = batch_obs['task'].ptr.tolist()
+            station_ptr = batch_obs['station'].ptr.tolist()
+            worker_ptr = batch_obs['worker'].ptr.tolist()
+            batch_obs = batch_obs.to(self.device)
             
             with self.autocast_context():
                 x_dict_batch, global_context_batch = active_policy(batch_obs)
@@ -621,13 +689,13 @@ class PPOAgent:
             # 2. 閫愪釜鎻愬彇鍚勭幆澧冪殑灞€閮ㄥ瓙鍥剧壒寰侊紝鍦ㄤ富杩涚▼鎵ц杞婚噺鐨?Pointer Head 鑷洖褰掑姩浣滈€夋嫨
             for i in range(batch_size):
                 # 渚濋潬 PyG 鐨?.batch 绱㈠紩瀵瑰瓙鍥剧壒寰佽繘琛屽眬閮ㄥ垏鍒?
-                task_mask = (batch_obs['task'].batch == i)
-                station_mask = (batch_obs['station'].batch == i)
-                worker_mask = (batch_obs['worker'].batch == i)
+                task_start, task_end = task_ptr[i], task_ptr[i + 1]
+                station_start, station_end = station_ptr[i], station_ptr[i + 1]
+                worker_start, worker_end = worker_ptr[i], worker_ptr[i + 1]
 
-                task_embs = x_dict_batch['task'][task_mask]
-                station_embs = x_dict_batch['station'][station_mask]
-                worker_embs = x_dict_batch['worker'][worker_mask]
+                task_embs = x_dict_batch['task'][task_start:task_end]
+                station_embs = x_dict_batch['station'][station_start:station_end]
+                worker_embs = x_dict_batch['worker'][worker_start:worker_end]
                 
                 global_context_i = global_context_batch[i].unsqueeze(0)
                 
@@ -855,13 +923,9 @@ class PPOAgent:
         return results
 
     def update(self, memory: Any, env: Any = None, current_ep: int = 1) -> Dict[str, float]:
-        """执行可回滚的 PPO 更新，并在 CUDA OOM 时降低 batch 后重试。"""
+        """执行可回滚的 PPO 更新；CUDA OOM 时回滚并跳过本轮。"""
         transactional = bool(getattr(self.config, "oom_transactional_updates", True))
-        auto_retry = bool(getattr(self.config, "auto_oom_retry", True))
         skip_on_oom = bool(getattr(self.config, "skip_update_on_oom", True))
-        min_batch_size = max(1, int(getattr(self.config, "oom_min_batch_size", 2)))
-        max_retries = max(0, int(getattr(self.config, "oom_max_retries", 1)))
-        original_batch_size = int(self.batch_size)
         try:
             transaction = self._capture_update_transaction() if transactional else None
         except RuntimeError as exc:
@@ -869,31 +933,18 @@ class PPOAgent:
                 raise
             self._cleanup_failed_update()
             if skip_on_oom:
-                memory_snapshot = self.get_memory_snapshot()
                 print(
                     "WARNING: PPO 更新在事务快照阶段发生 OOM；"
-                    f"episode={current_ep}, batch_size={self.batch_size}，本轮更新已跳过。"
+                    f"episode={current_ep}, batch_size={self.batch_size}，本轮更新已回滚并跳过。"
                 )
-                return {
-                    "OOM/RetryCount": 0.0,
-                    "OOM/SkippedUpdate": 1.0,
-                    "OOM/EffectiveBatchSize": float(self.batch_size),
-                    "Memory/Allocated_GB": memory_snapshot["allocated_gb"],
-                    "Memory/Reserved_GB": memory_snapshot["reserved_gb"],
-                    "Loss/Total": 0.0,
-                    "Loss/Policy": 0.0,
-                    "Loss/Value": 0.0,
-                    "Loss/Entropy": 0.0,
-                }
+                return {"OOM/SkippedUpdate": 1.0, "_skip_training_log": 1.0}
             raise RuntimeError(
                 "PPO 更新在事务快照阶段发生 OOM，且 skip_update_on_oom=false。"
             ) from exc
-        retry_count = 0
 
         while True:
             try:
                 metrics = self._update_once(memory, env, current_ep=current_ep)
-                metrics["OOM/RetryCount"] = float(retry_count)
                 metrics["OOM/SkippedUpdate"] = 0.0
                 metrics["OOM/EffectiveBatchSize"] = float(self.batch_size)
                 return metrics
@@ -907,36 +958,13 @@ class PPOAgent:
                     self._restore_update_transaction(transaction)
                     self._cleanup_failed_update()
 
-                next_batch_size = max(min_batch_size, failed_batch_size // 2)
-                can_retry = (
-                    auto_retry
-                    and retry_count < max_retries
-                    and next_batch_size < failed_batch_size
-                )
-                if can_retry:
-                    retry_count += 1
-                    self.batch_size = next_batch_size
-                    print(
-                        "WARNING: PPO 更新发生 CUDA OOM，已完整回滚；"
-                        f"batch_size {failed_batch_size} -> {next_batch_size}，"
-                        f"开始第 {retry_count}/{max_retries} 次重试。"
-                    )
-                    continue
-
                 if skip_on_oom and transaction is not None:
-                    self.batch_size = min(failed_batch_size, original_batch_size)
-                    memory_snapshot = self.get_memory_snapshot()
+                    self.batch_size = failed_batch_size
                     print(
-                        "WARNING: PPO 更新在 OOM 重试耗尽后已完整回滚并跳过；"
-                        f"episode={current_ep}, batch_size={failed_batch_size}。"
+                        "WARNING: PPO 更新发生 CUDA OOM，已完整回滚并跳过；"
+                        f"episode={current_ep}, batch_size 保持为 {failed_batch_size}。"
                     )
-                    return {
-                        "OOM/RetryCount": float(retry_count),
-                        "OOM/SkippedUpdate": 1.0,
-                        "OOM/EffectiveBatchSize": float(self.batch_size),
-                        "Memory/Allocated_GB": memory_snapshot["allocated_gb"],
-                        "Memory/Reserved_GB": memory_snapshot["reserved_gb"],
-                    }
+                    return {"OOM/SkippedUpdate": 1.0, "_skip_training_log": 1.0}
 
                 raise RuntimeError(
                     "PPO 更新发生 CUDA OOM，且无法安全回滚跳过。"
@@ -944,20 +972,11 @@ class PPOAgent:
                 ) from exc
 
     def _update_once(self, memory: Any, env: Any = None, current_ep: int = 1) -> Dict[str, float]:
-        """
-        PPO 鏇存柊閫昏緫銆?
-        
-        Args:
-            memory: 瀛樺偍杞ㄨ抗鐨?Buffer
-            
-        Returns:
-            metrics: dict, 鐢ㄤ簬 TensorBoard 璁板綍
-        """
+        """执行一次 PPO 更新，并返回 TensorBoard 指标。"""
         # 无引用缓存清理只能缓解碎片化；活跃张量由显式生命周期管理。
         self.clear_device_cache()
 
-        # 1. 璁＄畻骞夸箟浼樺娍浼拌 (GAE - Generalized Advantage Estimation)
-        # 灏?rewards 涓?values 寮犻噺鍖栦互杩涜 GAE 璁＄畻
+        # 1. 计算广义优势估计（GAE）。
         self.validate_snapshot_homogeneity(memory.states)
         mem_rewards = memory.rewards
         mem_is_terminals = memory.is_terminals
@@ -1110,20 +1129,21 @@ class PPOAgent:
             print(f"PPO Update: BatchSize={self.batch_size}, Total Batches={num_batches} (GPU In-place Rebuild)")
         
         # 3. PPO Optimization Loop
-        avg_loss = 0
-        avg_policy_loss = 0
-        avg_value_loss = 0
-        avg_entropy_loss = 0
-        avg_task_entropy = 0
-        avg_station_entropy = 0
-        avg_team_entropy = 0
         update_counts = 0
         approx_kls = []
+        kl_exceeded_flags = []
         explained_vars = []
         ratio_means = []
         ratio_stds = []
         clip_fractions = []
         batch_vector_repair_count = 0
+        total_loss_values = []
+        policy_loss_values = []
+        value_loss_values = []
+        entropy_loss_values = []
+        task_entropy_values = []
+        station_entropy_values = []
+        team_entropy_values = []
         
         # 鏀堕泦 batch 绾?Critic 棰勬祴鍋忓樊涓庝紭鍔垮垎甯?
         batch_pred_vals = []
@@ -1233,28 +1253,14 @@ class PPOAgent:
                     else:
                          curr_mask = (~w_p_mask)
                     
-                    # Add Skill Mask based on the selected task
-                    task_raw, _ = to_dense_batch(batch['task'].x, batch['task'].batch)
-                    sel_task_raw = task_raw[batch_indices, batch.y_task]
-                    task_type_idx = torch.argmax(sel_task_raw[:, 5:15], dim=1) # [B]
-                    
-                    worker_raw, _ = to_dense_batch(batch['worker'].x, batch['worker'].batch)
-                    worker_skills = worker_raw[:, :, 1:11] # [B, Max_W, 10]
-                    
-                    B_size, Max_W_size = worker_skills.shape[0], worker_skills.shape[1]
-                    b_indices_expanded = torch.arange(B_size).view(-1, 1).expand(-1, Max_W_size).reshape(-1)
-                    w_indices_expanded = torch.arange(Max_W_size).view(1, -1).expand(B_size, -1).reshape(-1)
-                    t_indices_expanded = task_type_idx.view(-1, 1).expand(-1, Max_W_size).reshape(-1)
-                    
-                    has_skill_flat = worker_skills[b_indices_expanded, w_indices_expanded, t_indices_expanded] > 0.5
-                    skill_mask = (~has_skill_flat).view(B_size, Max_W_size).to(self.device)
-                    
-                    s_act = batch.y_station + 1 # [B]
-                    worker_locks = torch.argmax(worker_raw[:, :, 13:21], dim=2) # [B, Max_W]
-                    s_act_expanded = s_act.view(B_size, 1).expand(B_size, Max_W_size).to(self.device)
-                    lock_mask = (worker_locks != 0) & (worker_locks != s_act_expanded)
-                    
-                    curr_mask = curr_mask | skill_mask | lock_mask.to(self.device)
+                    B_size, Max_W_size = int(worker_x.size(0)), int(worker_x.size(1))
+                    static_worker_mask = self.compute_static_worker_constraint_mask(
+                        batch,
+                        selected_task=batch.y_task,
+                        selected_station=batch.y_station,
+                        max_workers=Max_W_size,
+                    )
+                    curr_mask = curr_mask | static_worker_mask
                     
                     current_team_emb = None # [B, H]
                     team_emb_sum = torch.zeros(B_size, worker_x.size(-1)).to(self.device)
@@ -1303,15 +1309,17 @@ class PPOAgent:
                     # --- PPO Loss Calculation ---
                     with torch.no_grad():
                         approx_kl = ((ratios - 1) - safe_log_ratio).mean()
-                        epoch_kls.append(approx_kl.item())
+                        epoch_kls.append(approx_kl.detach())
     
                     # 鏋佺畝 KL 鐔旀柇鏈哄埗 (Meltdown Protection)
-                    loss_scale = 1.0
                     hard_limit = self.kl_early_stop
-                    
-                    if approx_kl.item() > hard_limit:
-                        kl_exceeded_count += 1
-                        loss_scale = 0.01
+                    kl_exceeded = approx_kl.detach() > hard_limit
+                    loss_scale = torch.where(
+                        kl_exceeded,
+                        torch.tensor(0.01, device=self.device, dtype=approx_kl.dtype),
+                        torch.tensor(1.0, device=self.device, dtype=approx_kl.dtype),
+                    )
+                    kl_exceeded_flags.append(kl_exceeded.float())
     
                     # Use GAE advantages if available, else batch.y_reward - state_values (MC fallback)
                     b_reward = batch.y_reward.view(-1)
@@ -1323,7 +1331,7 @@ class PPOAgent:
                         exp_var = torch.tensor(0.0, device=b_reward.device)
                     else:
                         exp_var = 1.0 - torch.var(b_reward - state_values.detach(), correction=0) / (var_y + 1e-8)
-                    explained_vars.append(exp_var.item())
+                    explained_vars.append(exp_var.detach())
                     
                     # 鍔ㄦ€佽“鍑忔帰绱笂闄?
                     progress = min(1.0, self.current_step / max(1, self.total_timesteps))
@@ -1333,10 +1341,10 @@ class PPOAgent:
                     surr1 = ratios * b_adv
                     surr2 = torch.clamp(ratios, 1-curr_eps_clip, 1+curr_eps_clip) * b_adv
                     with torch.no_grad():
-                        ratio_means.append(ratios.mean().item())
-                        ratio_stds.append(ratios.std(unbiased=False).item())
+                        ratio_means.append(ratios.mean().detach())
+                        ratio_stds.append(ratios.std(unbiased=False).detach())
                         clip_mask = torch.abs(ratios - 1.0) > curr_eps_clip
-                        clip_fractions.append(clip_mask.float().mean().item())
+                        clip_fractions.append(clip_mask.float().mean().detach())
                     
                     policy_loss = -torch.min(surr1, surr2).mean()
                     
@@ -1385,6 +1393,7 @@ class PPOAgent:
                     entropy_loss = -c_ent * avg_normalized_entropy
                     
                     loss = c_pol * policy_loss + value_loss + entropy_loss
+                    raw_total_loss = loss
                     
                     # 搴旂敤杞啍鏂缉鏀?
                     loss = loss * loss_scale
@@ -1413,26 +1422,29 @@ class PPOAgent:
                     update_counts += 1
                 
                 # Log Stats (璁板綍鍘熷鏈缉鏀剧殑 loss 鐢ㄤ簬璇婃柇)
-                avg_loss += (loss.item() / max(1e-8, loss_scale)) * self.accumulation_steps
-                avg_policy_loss += policy_loss.item()
-                avg_value_loss += value_loss_raw.item()
-                avg_entropy_loss += entropy.mean().item()
-                avg_task_entropy += task_entropy.mean().item()
-                avg_station_entropy += station_entropy.mean().item()
-                avg_team_entropy += team_entropy.mean().item()
+                total_loss_values.append(raw_total_loss.detach())
+                policy_loss_values.append(policy_loss.detach())
+                value_loss_values.append(value_loss_raw.detach())
+                entropy_loss_values.append(entropy.mean().detach())
+                task_entropy_values.append(task_entropy.mean().detach())
+                station_entropy_values.append(station_entropy.mean().detach())
+                team_entropy_values.append(team_entropy.mean().detach())
                 total_batches_diagnosed += 1
                 
                 # 璁板綍 batch 绾х殑棰勬祴鍋忓樊涓庝紭鍔垮垎甯冿紝杈呭姪缁嗗寲 TensorBoard 璇婃柇
                 with torch.no_grad():
-                    batch_pred_vals.append(state_values.mean().item())
-                    batch_target_rets.append(b_reward.mean().item())
-                    batch_abs_errors.append(torch.abs(state_values - b_reward).mean().item())
-                    batch_adv_means.append(b_adv.mean().item())
-                    batch_adv_stds.append(b_adv.std(unbiased=False).item())
+                    batch_pred_vals.append(state_values.mean().detach())
+                    batch_target_rets.append(b_reward.mean().detach())
+                    batch_abs_errors.append(torch.abs(state_values - b_reward).mean().detach())
+                    batch_adv_means.append(b_adv.mean().detach())
+                    batch_adv_stds.append(b_adv.std(unbiased=False).detach())
             
             # 灏芥棭瑙﹀彂 early stopping锛岄槻姝㈤€€鍖?
             # 璁＄畻褰撳墠 epoch 鐨勫钩鍧?KL
-            curr_epoch_kl = sum(epoch_kls) / len(epoch_kls) if epoch_kls else 0.0
+            curr_epoch_kl = (
+                float(torch.stack(epoch_kls).mean().detach().float().cpu().item())
+                if epoch_kls else 0.0
+            )
             
             # 鎴戜滑濮嬬粓璁板綍鏈€鍚庝竴杞湭鎺愭柇鐨?KL 浣滀负鑷€傚簲寮曟搸鐨勫弬鑰?
             approx_kls = epoch_kls
@@ -1442,14 +1454,23 @@ class PPOAgent:
                 print(f"      -> Early stopping at epoch {i_epoch+1} due to reaching max KL: {curr_epoch_kl:.4f}")
                 break
                 
+        kl_exceeded_count = (
+            int(torch.stack(kl_exceeded_flags).sum().detach().float().cpu().item())
+            if kl_exceeded_flags else 0
+        )
         if kl_exceeded_count > 0:
             print(f"      [KL Warning] {kl_exceeded_count}/{total_batches_diagnosed} batches exceeded KL threshold {self.kl_early_stop}. (Extreme Braking Applied)")
             
         # (宸茬Щ闄ゅ啑鏉傜殑瀛︿範鐜囦笅闄嶉€昏緫锛屽畬鍏ㄤ氦缁?Schedule-Free 鎴栨亽瀹?LR)
-        mean_kl = sum(approx_kls) / len(approx_kls) if approx_kls else 0.0
-        mean_ratio = sum(ratio_means) / len(ratio_means) if ratio_means else 1.0
-        std_ratio = sum(ratio_stds) / len(ratio_stds) if ratio_stds else 0.0
-        mean_clip_fraction = sum(clip_fractions) / len(clip_fractions) if clip_fractions else 0.0
+        def _mean_scalar(values, default: float) -> float:
+            if not values:
+                return float(default)
+            return float(torch.stack([value.detach().float() for value in values]).mean().cpu().item())
+
+        mean_kl = _mean_scalar(approx_kls, 0.0)
+        mean_ratio = _mean_scalar(ratio_means, 1.0)
+        std_ratio = _mean_scalar(ratio_stds, 0.0)
+        mean_clip_fraction = _mean_scalar(clip_fractions, 0.0)
         
         self.current_step += 1
         
@@ -1460,22 +1481,22 @@ class PPOAgent:
                 for ema_param, param in zip(self.ema_policy.parameters(), self.policy.parameters()):
                     ema_param.data.copy_(alpha * ema_param.data + (1.0 - alpha) * param.data)
                 
-        mean_exp_var = sum(explained_vars) / len(explained_vars) if explained_vars else 0.0
+        mean_exp_var = _mean_scalar(explained_vars, 0.0)
         
-        mean_pred_val = sum(batch_pred_vals) / len(batch_pred_vals) if batch_pred_vals else 0.0
-        mean_target_ret = sum(batch_target_rets) / len(batch_target_rets) if batch_target_rets else 0.0
-        mean_abs_err = sum(batch_abs_errors) / len(batch_abs_errors) if batch_abs_errors else 0.0
-        mean_adv = sum(batch_adv_means) / len(batch_adv_means) if batch_adv_means else 0.0
-        std_adv = sum(batch_adv_stds) / len(batch_adv_stds) if batch_adv_stds else 0.0
+        mean_pred_val = _mean_scalar(batch_pred_vals, 0.0)
+        mean_target_ret = _mean_scalar(batch_target_rets, 0.0)
+        mean_abs_err = _mean_scalar(batch_abs_errors, 0.0)
+        mean_adv = _mean_scalar(batch_adv_means, 0.0)
+        std_adv = _mean_scalar(batch_adv_stds, 0.0)
         memory_snapshot = self.get_memory_snapshot()
         metrics = {
-            'Loss/Total': avg_loss / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
-            'Loss/Policy': avg_policy_loss / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
-            'Loss/Value': avg_value_loss / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
-            'Loss/Entropy': avg_entropy_loss / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
-            'Entropy/Task': avg_task_entropy / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
-            'Entropy/Station': avg_station_entropy / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
-            'Entropy/WorkerTeam': avg_team_entropy / total_batches_diagnosed if total_batches_diagnosed > 0 else 0,
+            'Loss/Total': _mean_scalar(total_loss_values, 0.0),
+            'Loss/Policy': _mean_scalar(policy_loss_values, 0.0),
+            'Loss/Value': _mean_scalar(value_loss_values, 0.0),
+            'Loss/Entropy': _mean_scalar(entropy_loss_values, 0.0),
+            'Entropy/Task': _mean_scalar(task_entropy_values, 0.0),
+            'Entropy/Station': _mean_scalar(station_entropy_values, 0.0),
+            'Entropy/WorkerTeam': _mean_scalar(team_entropy_values, 0.0),
             'Critic/Explained_Variance': mean_exp_var,
             'Critic/Value_Predictions_Mean': mean_pred_val,
             'Critic/Target_Returns_Mean': mean_target_ret,

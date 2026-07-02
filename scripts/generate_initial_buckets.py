@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import shutil
 import sys
 from pathlib import Path
@@ -9,6 +8,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_keyvalue_args,
+    should_show_help,
+)
 from utils.generate_random_dataset import generate_bucket
 
 
@@ -19,19 +25,28 @@ BUCKETS = {
     "3182": ("data/3182.csv", "data/generated/initial_3182", 2800, 3500),
 }
 
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="生成四个独立 APAL 窄规模训练池")
-    parser.add_argument("--bucket", choices=["all", *BUCKETS], default="all")
-    parser.add_argument("--num_samples", type=int, default=32)
-    parser.add_argument("--time_var", type=float, default=0.2)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--overwrite", action="store_true")
-    return parser.parse_args()
+BUCKET_ARGS = {
+    "bucket": ExtraArgument(default="all", help="数据桶名称，可选 all/283/680/2338/3182"),
+    "num_samples": ExtraArgument(default=32, help="每个数据桶生成的样本数量"),
+    "time_var": ExtraArgument(default=0.2, help="工时扰动系数"),
+    "seed": ExtraArgument(default=42, help="随机种子"),
+    "overwrite": ExtraArgument(default=False, help="是否覆盖已有输出目录"),
+}
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    if should_show_help(argv):
+        print(hydra_help(BUCKET_ARGS))
+        return
+    try:
+        args = initialize_keyvalue_args(argv, extra_arguments=BUCKET_ARGS)
+    except HydraCliError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2)
+
+    if args.bucket not in {"all", *BUCKETS}:
+        raise ValueError(f"未知数据桶: {args.bucket}")
+
     selected = BUCKETS if args.bucket == "all" else {args.bucket: BUCKETS[args.bucket]}
     worker_pool = PROJECT_ROOT / "data" / "worker_pool_fixed.csv"
     seed_offsets = {name: index for index, name in enumerate(BUCKETS)}
@@ -39,8 +54,8 @@ def main() -> None:
     for name, (template_rel, output_rel, min_length, max_length) in selected.items():
         output_dir = PROJECT_ROOT / output_rel
         if output_dir.exists() and any(output_dir.iterdir()):
-            if not args.overwrite:
-                raise FileExistsError(f"{output_dir} 已存在数据；重建时请增加 --overwrite")
+            if not bool(args.overwrite):
+                raise FileExistsError(f"{output_dir} 已存在数据；重建时请使用 overwrite=true")
             shutil.rmtree(output_dir)
 
         manifest = generate_bucket(
@@ -48,9 +63,9 @@ def main() -> None:
             output_dir,
             min_length=min_length,
             max_length=max_length,
-            num_samples=args.num_samples,
-            time_var=args.time_var,
-            seed=args.seed + seed_offsets[name],
+            num_samples=int(args.num_samples),
+            time_var=float(args.time_var),
+            seed=int(args.seed) + seed_offsets[name],
             worker_pool_path=worker_pool,
         )
         print(
@@ -60,4 +75,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

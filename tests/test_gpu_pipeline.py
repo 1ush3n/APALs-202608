@@ -20,7 +20,7 @@ import pandas as pd
 
 # 导入核心组件与配置
 from configs import configs
-from train import train
+from archive.legacy_train import train
 
 class MockArgs:
     def __init__(self):

@@ -33,7 +33,7 @@ from runtime.hydra_config import (
     initialize_hydra_runtime,
     should_show_help,
 )
-from train import set_seed
+from runtime.seed import set_seed
 from environment import AirLineEnv_Graph
 
 

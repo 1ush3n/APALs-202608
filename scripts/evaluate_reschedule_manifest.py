@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+
+def _sanitize_thread_env() -> None:
+    """修正非法线程数环境变量，避免 libgomp 在导入计算库时告警。"""
+
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        if not str(value).strip().isdigit() or int(str(value).strip()) <= 0:
+            os.environ[name] = "1"
+
+
+_sanitize_thread_env()
+
+import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from configs import configs
+from evaluate_reschedule_model import evaluate_saved_reschedule_model
+from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_hydra_runtime,
+    should_show_help,
+)
+from runtime.paths import resolve_workspace_path
+from runtime.reschedule_manifest import load_reschedule_manifest
+
+
+MANIFEST_EVAL_ARGS = {
+    "model_path": ExtraArgument(default="checkpoints/reschedule_task_delay/bestmodel/best_model.pth", help="重调度模型 checkpoint"),
+    "manifest_path": ExtraArgument(required=True, help="prepare_reschedule_data.py 生成的 manifest"),
+    "instance_ids": ExtraArgument(default=["real_283", "real_680", "real_2338", "real_3182"], help="要评估的 manifest 实例 ID"),
+    "num_runs": ExtraArgument(default=None, help="每个实例最多评估多少个固定场景；缺省评估全部"),
+    "temperature": ExtraArgument(default=0.0, help="评估动作温度，0 表示确定性"),
+    "output_dir": ExtraArgument(default="results/reschedule_manifest_eval", help="输出目录"),
+}
+
+
+def _as_id_list(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return [part.strip() for part in str(value).split(",") if part.strip()]
+
+
+def _backup_config() -> dict[str, Any]:
+    keys = (
+        "data_file_path",
+        "reschedule_baseline_schedule_path",
+        "reschedule_eval_scenario_path",
+        "reschedule_manifest_path",
+        "reschedule_eval_instance_id",
+        "enable_reschedule_mode",
+        "verbose_reschedule_eval_progress",
+    )
+    return {key: getattr(configs, key, False) for key in keys}
+
+
+def _restore_config(backup: dict[str, Any]) -> None:
+    for key, value in backup.items():
+        setattr(configs, key, value)
+
+
+def evaluate_manifest_instances(
+    *,
+    model_path: Path,
+    manifest_path: Path,
+    instance_ids: list[str],
+    num_runs: int | None,
+    temperature: float,
+    output_dir: Path,
+    explicit_fields: set[str] | None = None,
+) -> dict[str, Any]:
+    checkpoint = load_checkpoint(model_path)
+    apply_checkpoint_model_spec(configs, checkpoint.model_spec, explicit_fields=explicit_fields)
+    manifest = load_reschedule_manifest(manifest_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    summaries: dict[str, Any] = {}
+    backup = _backup_config()
+    try:
+        configs.enable_reschedule_mode = True
+        configs.reschedule_manifest_path = ""
+        configs.reschedule_eval_instance_id = ""
+        configs.verbose_reschedule_eval_progress = True
+        for instance_id in instance_ids:
+            entry = manifest.get(instance_id)
+            if entry.scenario_path is None:
+                raise ValueError(f"{instance_id} 没有固定重调度场景，不能用于 manifest 评估")
+            configs.data_file_path = str(entry.data_path)
+            configs.reschedule_baseline_schedule_path = str(entry.baseline_schedule_path)
+            configs.reschedule_eval_scenario_path = str(entry.scenario_path)
+            subdir = output_dir / instance_id
+            print(
+                f"[ManifestEval] start instance={instance_id} "
+                f"data={entry.data_path} baseline={entry.baseline_schedule_path} "
+                f"scenarios={entry.scenario_path} output={subdir}",
+                flush=True,
+            )
+            summary = evaluate_saved_reschedule_model(
+                model_path=model_path,
+                num_runs=num_runs,
+                temperature=float(temperature),
+                output_dir=subdir,
+            )
+            summary_row = {
+                "instance_id": instance_id,
+                "data_path": str(entry.data_path),
+                "baseline_schedule_path": str(entry.baseline_schedule_path),
+                "scenario_path": str(entry.scenario_path),
+                "num_tasks": entry.num_tasks,
+                "baseline_makespan": entry.baseline_makespan,
+                "scenario_count": summary.get("scenario_count", 0),
+                "avg_makespan": summary.get("avg_makespan", 0.0),
+                "avg_score": summary.get("avg_score", 0.0),
+                "avg_selection_score": summary.get("avg_selection_score", 0.0),
+                "eligible_rate": summary.get("eligible_rate", 0.0),
+                "avg_duration_sec": summary.get("avg_duration_sec", 0.0),
+                "worker_util": summary.get("worker_util", 0.0),
+                "station_util": summary.get("station_util", 0.0),
+            }
+            rows.append(summary_row)
+            summaries[instance_id] = summary
+            print(
+                f"[ManifestEval] {instance_id} "
+                f"score={float(summary_row['avg_score']):.4f} "
+                f"elig={float(summary_row['eligible_rate']):.2f} "
+                f"mk={float(summary_row['avg_makespan']):.2f}",
+                flush=True,
+            )
+    finally:
+        _restore_config(backup)
+
+    csv_path = output_dir / "reschedule_eval_by_instance.csv"
+    json_path = output_dir / "reschedule_eval_summary.json"
+    pd.DataFrame(rows).to_csv(csv_path, index=False)
+    payload = {
+            "model_path": str(model_path.resolve()),
+            "manifest_path": str(manifest_path.resolve()),
+            "model_format": checkpoint.format_name,
+            "instance_ids": instance_ids,
+            "rows": rows,
+            "summaries": summaries,
+    }
+    json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if should_show_help(raw_args):
+        print(hydra_help(MANIFEST_EVAL_ARGS))
+        return 0
+    try:
+        args = initialize_hydra_runtime(
+            raw_args,
+            target=configs,
+            project_root=PROJECT_ROOT,
+            default_experiment="reschedule_task_delay",
+            extra_arguments=MANIFEST_EVAL_ARGS,
+        )
+        summary = evaluate_manifest_instances(
+            model_path=resolve_workspace_path(args.model_path),
+            manifest_path=resolve_workspace_path(args.manifest_path),
+            instance_ids=_as_id_list(args.instance_ids),
+            num_runs=None if args.num_runs is None else int(args.num_runs),
+            temperature=float(args.temperature),
+            output_dir=resolve_workspace_path(args.output_dir),
+            explicit_fields=set(getattr(args, "explicit_config_fields", set())),
+        )
+    except (HydraCliError, KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
+        print(f"[CLI] {exc}", file=sys.stderr)
+        return 2
+
+    print(json.dumps({key: value for key, value in summary.items() if key != "summaries"}, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -27,7 +27,7 @@ from configs import Config
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
-from train import Memory
+from training.memory import Memory
 from utils.vector_env import VectorEnv
 
 TOTAL_TESTS = 0

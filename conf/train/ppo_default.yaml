@@ -11,10 +11,10 @@ train:
   clip_v_grad_norm: 0.05
   batch_size: 32
   accumulation_steps: 16
-  auto_oom_retry: true
+  auto_oom_retry: false
   skip_update_on_oom: true
   oom_min_batch_size: 2
-  oom_max_retries: 1
+  oom_max_retries: 0
   oom_transactional_updates: true
   c_policy: 1.0
   c_value: 0.5

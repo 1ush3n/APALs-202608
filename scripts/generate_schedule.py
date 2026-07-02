@@ -33,6 +33,7 @@ from runtime.hydra_config import (
 
 GENERATE_EXTRA_ARGS = {
     "model_path": ExtraArgument(required=True, help="用于生成排程的 checkpoint 路径"),
+    "data_path": ExtraArgument(default=None, help="可选数据集路径；缺省使用配置 data_file_path"),
     "output_path": ExtraArgument(default=None, help="可选输出 CSV 路径；缺省写入本次 run 的 eval 目录"),
 }
 
@@ -41,15 +42,17 @@ def generate_schedule(
     model_path: str,
     *,
     explicit_fields: set[str] | None = None,
+    data_path: str | Path | None = None,
     output_path: str | Path | None = None,
+    write_context: bool = True,
 ) -> pd.DataFrame:
     checkpoint_path = resolve_path(model_path, PROJECT_ROOT)
     checkpoint = load_checkpoint(checkpoint_path)
     apply_checkpoint_model_spec(
         configs, checkpoint.model_spec, explicit_fields=explicit_fields,
     )
-    data_path = resolve_path(configs.data_file_path, PROJECT_ROOT)
-    context = create_run_context(configs, PROJECT_ROOT, create_dirs=True) if uses_runs_layout(configs) else None
+    resolved_data_path = resolve_path(data_path or configs.data_file_path, PROJECT_ROOT)
+    context = create_run_context(configs, PROJECT_ROOT, create_dirs=True) if write_context and uses_runs_layout(configs) else None
     default_output = (context.eval_dir / "final_schedule.csv") if context is not None else Path(configs.result_dir) / "final_schedule.csv"
     target = resolve_path(output_path or default_output, PROJECT_ROOT)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -57,13 +60,13 @@ def generate_schedule(
         "checkpoint": str(checkpoint_path.resolve()),
         "resource_graph_mode": checkpoint.model_spec.resource_graph_mode,
     }
-    if context is not None:
+    if write_context and context is not None:
         write_run_context_files(context, configs, command="generate_schedule", extra=manifest_extra)
-    else:
+    elif write_context:
         write_run_manifest(target.parent, configs, command="generate_schedule", extra=manifest_extra)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=int(configs.seed))
+    env = AirLineEnv_Graph(data_path_or_dir=resolved_data_path, seed=int(configs.seed))
     model = HBGATPN(configs).to(device)
     load_policy_weights(model, checkpoint)
     agent = PPOAgent(
@@ -121,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         generate_schedule(
             parsed.model_path,
             explicit_fields=set(getattr(parsed, "explicit_config_fields", set())),
+            data_path=parsed.data_path,
             output_path=parsed.output_path,
         )
     except (HydraCliError, KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:

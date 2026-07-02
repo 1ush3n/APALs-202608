@@ -17,16 +17,20 @@ from configs import configs
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
-from train import (
-    ensure_reschedule_baseline_available,
-    ensure_reschedule_eval_scenarios_available,
-    initialize_training_config,
+from runtime.configuration import initialize_training_config
+from runtime.paths import (
     resolve_checkpoint_paths,
     resolve_tensorboard_log_root,
     resolve_workspace_path,
     sanitize_experiment_name,
-    set_seed,
 )
+from runtime.reschedule_eval import (
+    ensure_reschedule_baseline_available,
+    ensure_reschedule_eval_scenarios_available,
+    load_warm_start_weights_with_input_expansion,
+)
+from runtime.reschedule_manifest import resolve_manifest_eval_entry
+from runtime.seed import set_seed
 from training.lightning_module import APALDataModule, APALLightningModule
 from training.rollout_service import APALRolloutService
 from utils.vector_env import EnvCreator, VectorEnv
@@ -35,6 +39,54 @@ from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _apply_reschedule_eval_manifest_override() -> None:
+    """当 manifest 指定自动验证实例时，将验证数据、baseline 和场景路径同步到配置。"""
+
+    if not bool(getattr(configs, "enable_reschedule_mode", False)):
+        return
+    entry = resolve_manifest_eval_entry(configs)
+    if entry is None:
+        return
+    configs.data_file_path = str(entry.data_path)
+    configs.reschedule_baseline_schedule_path = str(entry.baseline_schedule_path)
+    if entry.scenario_path is not None:
+        configs.reschedule_eval_scenario_path = str(entry.scenario_path)
+    print(
+        f"[Reschedule] eval_instance={entry.instance_id} "
+        f"data={entry.data_path} baseline={entry.baseline_schedule_path} "
+        f"scenarios={entry.scenario_path}",
+        flush=True,
+    )
+
+
+def _maybe_load_reschedule_warm_start(model: torch.nn.Module, device: torch.device, *, resume: bool) -> None:
+    """重调度训练默认从初始调度策略 warm start；续训时由 Lightning checkpoint 恢复。"""
+
+    if resume:
+        return
+    if not bool(getattr(configs, "enable_reschedule_mode", False)):
+        return
+    if not bool(getattr(configs, "reschedule_warm_start", True)):
+        print("[Reschedule] warm_start=false，重调度模型将随机初始化。", flush=True)
+        return
+    model_path = resolve_workspace_path(
+        getattr(configs, "reschedule_baseline_model_path", "checkpoints/initial_schedule/bestmodel/best_model.pth")
+    )
+    if not model_path.exists():
+        raise FileNotFoundError(f"重调度 warm start 初始调度模型不存在: {model_path}")
+    stats = load_warm_start_weights_with_input_expansion(model, model_path, device)
+    loaded = int(stats.get("loaded_exact", 0)) + int(stats.get("loaded_expanded", 0))
+    if loaded <= 0:
+        raise RuntimeError(f"重调度 warm start 未加载到任何可用权重: {model_path}")
+    print(
+        "[Reschedule] warm_start="
+        f"{model_path} loaded_exact={int(stats.get('loaded_exact', 0))} "
+        f"loaded_expanded={int(stats.get('loaded_expanded', 0))} "
+        f"skipped={int(stats.get('skipped', 0))}",
+        flush=True,
+    )
 
 
 class RolloutCheckpoint(Callback):
@@ -131,6 +183,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     if not config_initialized:
         initialize_training_config(args)
     set_seed(int(configs.seed))
+    _apply_reschedule_eval_manifest_override()
 
     checkpoint_paths = resolve_checkpoint_paths(configs)
     checkpoint_dir = checkpoint_paths["lightning_dir"]
@@ -180,6 +233,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     eval_env = AirLineEnv_Graph(eval_path, seed=int(configs.seed))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = HBGATPN(configs).to(device)
+    _maybe_load_reschedule_warm_start(model, device, resume=bool(args.resume))
     if getattr(configs, 'use_compile', False):
         try:
             if platform.system() == 'Windows':

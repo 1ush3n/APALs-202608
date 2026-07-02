@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any
 
-from configs import Config, load_training_config
+import torch
+
+from configs import Config, configs, load_training_config
+from runtime.artifacts import run_context as create_run_context
+from runtime.artifacts import uses_runs_layout
+from runtime.paths import PROJECT_ROOT
 
 
 EXPLICIT_OVERRIDES = {
@@ -194,6 +200,42 @@ def resolve_runtime_config(
     validate_runtime_config(target)
     target.config_paths = loaded_paths
     return target, loaded_paths, explicit_fields
+
+
+def initialize_training_config(args, argv=None, system_name: str | None = None):
+    """兼容旧内部调用；新命令行入口优先使用 runtime.hydra_config。"""
+    _, loaded_paths, explicit_fields = resolve_runtime_config(
+        args,
+        target=configs,
+        system_name=system_name,
+    )
+    args.explicit_config_fields = explicit_fields
+
+    precision = str(configs.float32_matmul_precision)
+    if precision not in {"highest", "high", "medium"}:
+        raise ValueError(f"float32_matmul_precision 无效: {precision}")
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision(precision)
+
+    if uses_runs_layout(configs):
+        if getattr(args, "resume", False) and not str(getattr(configs, "run_id", "") or "").strip():
+            print("[Runtime] resume 未指定 run_id，使用旧 checkpoint/results 路径兼容模式。", flush=True)
+        else:
+            context = create_run_context(configs, PROJECT_ROOT, create_dirs=True)
+            print(f"[Runtime] run_id={context.run_id} run_dir={context.run_dir}", flush=True)
+
+    print(
+        "[Runtime] "
+        f"platform={system_name or __import__('platform').system()} "
+        f"configs={[str(Path(path)) for path in loaded_paths]} "
+        f"num_envs={configs.num_envs} "
+        f"worker_threads={configs.vector_env_worker_threads} "
+        f"start_method={configs.vector_env_start_method} "
+        f"amp={configs.lightning_precision} "
+        f"matmul_precision={precision}",
+        flush=True,
+    )
+    return configs
 
 
 def _add_argument_if_missing(

@@ -1,11 +1,26 @@
 from __future__ import annotations
 
-import argparse
 import os
 import shutil
 import subprocess
 import sys
+from argparse import Namespace
 from pathlib import Path
+
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_keyvalue_args,
+    should_show_help,
+)
+
+
+EXTRA_ARGS = {
+    "tex_file": ExtraArgument(required=True, help="主 .tex 文件路径，例如 tex_file=paper/main.tex"),
+    "watch": ExtraArgument(default=False, help="是否启用 latexmk 持续监听模式"),
+    "clean": ExtraArgument(default=False, help="是否清理 LaTeX 中间产物"),
+}
 
 
 def _default_rag_env() -> Path:
@@ -29,7 +44,7 @@ def _resolve_conda_prefix() -> Path:
     return _default_rag_env()
 
 
-def _build_command(args: argparse.Namespace, latexmk_path: str) -> list[str]:
+def _build_command(args: Namespace, latexmk_path: str) -> list[str]:
     command = [
         latexmk_path,
         "-pdf",
@@ -37,35 +52,40 @@ def _build_command(args: argparse.Namespace, latexmk_path: str) -> list[str]:
         "-interaction=nonstopmode",
         "-halt-on-error",
     ]
-    if args.clean:
+    if bool(args.clean):
         command.append("-C")
-    if args.watch:
+    if bool(args.watch):
         command.append("-pvc")
     command.append(str(args.tex_file))
     return command
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="使用 rag_env 中的 latexmk 编译 LaTeX 论文。")
-    parser.add_argument("tex_file", type=Path, help="主 .tex 文件路径，例如 paper/main.tex。")
-    parser.add_argument("--watch", action="store_true", help="启用 latexmk 持续监听模式。")
-    parser.add_argument("--clean", action="store_true", help="清理 LaTeX 中间产物。")
-    return parser.parse_args()
+def parse_args(argv: list[str] | None = None) -> Namespace:
+    return initialize_keyvalue_args(argv, extra_arguments=EXTRA_ARGS)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    if should_show_help(argv):
+        print(hydra_help(EXTRA_ARGS))
+        return 0
+    try:
+        args = parse_args(argv)
+    except HydraCliError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    args.tex_file = Path(args.tex_file)
     assert args.tex_file.suffix == ".tex", "输入文件必须是 .tex 文件。"
-    assert args.tex_file.exists(), f"找不到 LaTeX 主文件：{args.tex_file}"
+    assert args.tex_file.exists(), f"找不到 LaTeX 主文件: {args.tex_file}"
     args.tex_file = args.tex_file.resolve()
 
     conda_prefix = _resolve_conda_prefix()
-    assert conda_prefix.exists(), f"找不到 Conda 环境目录：{conda_prefix}"
+    assert conda_prefix.exists(), f"找不到 Conda 环境目录: {conda_prefix}"
 
     env = os.environ.copy()
     env["PATH"] = _env_path(conda_prefix) + os.pathsep + env.get("PATH", "")
     latexmk_path = shutil.which("latexmk", path=env["PATH"])
-    assert latexmk_path is not None, "当前环境找不到 latexmk，请确认已安装 miktex 和 latexmk。"
+    assert latexmk_path is not None, "当前环境找不到 latexmk，请确认 rag_env 已安装 MiKTeX/latexmk。"
 
     command = _build_command(args, latexmk_path)
     result = subprocess.run(command, cwd=args.tex_file.parent, env=env, check=False)
@@ -73,4 +93,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

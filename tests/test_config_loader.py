@@ -32,7 +32,7 @@ from runtime.artifacts import (
     resolve_run_output_dir,
     run_context,
 )
-from train import PROJECT_ROOT, resolve_checkpoint_paths, resolve_tensorboard_log_root, write_best_model_meta
+from runtime.paths import PROJECT_ROOT, resolve_checkpoint_paths, resolve_tensorboard_log_root, write_best_model_meta
 
 
 def test_layered_yaml_config_loads_into_flat_config() -> None:

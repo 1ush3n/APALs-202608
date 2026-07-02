@@ -2,6 +2,7 @@ import copy
 import multiprocessing as mp
 import os
 import time
+from multiprocessing.connection import wait
 from typing import Callable, List, Tuple, Any, Optional
 import numpy as np
 import torch
@@ -601,14 +602,51 @@ class VectorEnv:
             )
         return value
 
+    def _recv_workers_unordered(self, indices: List[int], operation: str) -> dict[int, Any]:
+        """按 worker 就绪顺序收集结果，避免固定顺序 recv 放大慢 worker 的等待时间。"""
+        pending = {int(index): self.parent_conns[int(index)] for index in indices}
+        conn_to_index = {conn: index for index, conn in pending.items()}
+        results: dict[int, Any] = {}
+        deadline = time.monotonic() + self.command_timeout_sec
+
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                details = []
+                for index in sorted(pending):
+                    process = self.processes[index]
+                    state = "alive" if process.is_alive() else f"exitcode={process.exitcode}"
+                    details.append(f"{index}:{state}")
+                raise TimeoutError(
+                    f"VectorEnv workers 执行 {operation} 超时 "
+                    f"({self.command_timeout_sec:.1f}s, pending={','.join(details)})"
+                )
+
+            ready = wait(list(pending.values()), timeout=remaining)
+            if not ready:
+                continue
+
+            for conn in ready:
+                index = conn_to_index[conn]
+                status, value = conn.recv()
+                pending.pop(index, None)
+                if status != "OK":
+                    raise VectorEnvWorkerError(
+                        f"VectorEnv worker {index} 执行 {operation} 失败:\n{value}"
+                    )
+                results[index] = value
+
+        return results
+
     def reset_all(self, randomize_duration: bool = False, randomize_workers: bool = False) -> List[Any]:
         """异步广播复位指令并同步收集子图状态"""
         for i in range(self.num_envs):
             self.parent_conns[i].send(('reset', {'randomize_duration': randomize_duration, 'randomize_workers': randomize_workers}))
         
+        worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "reset")
         results = []
         for i in range(self.num_envs):
-            obs, dynamic_info = self._recv_worker(i, "reset")
+            obs, dynamic_info = worker_results[i]
             self.envs[i].update_dynamic_properties(dynamic_info)
             self.envs[i].update_static_properties(dynamic_info)
             results.append(obs)
@@ -619,9 +657,10 @@ class VectorEnv:
         for i in range(self.num_envs):
             self.parent_conns[i].send(('step', actions[i]))
                 
+        worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "step")
         results = []
         for i in range(self.num_envs):
-            obs, reward, done, info = self._recv_worker(i, "step")
+            obs, reward, done, info = worker_results[i]
             if 'dynamic_info' in info:
                 self.envs[i].update_dynamic_properties(info.pop('dynamic_info'))
             results.append((obs, reward, done, info))
@@ -637,9 +676,10 @@ class VectorEnv:
         for i in range(self.num_envs):
             self.parent_conns[i].send(('step_snapshot', actions[i]))
                 
+        worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "step_snapshot")
         results = []
         for i in range(self.num_envs):
-            snap, reward, done, info = self._recv_worker(i, "step_snapshot")
+            snap, reward, done, info = worker_results[i]
             if 'dynamic_info' in info:
                 self.envs[i].update_dynamic_properties(info.pop('dynamic_info'))
             results.append((snap, reward, done, info))
@@ -655,9 +695,10 @@ class VectorEnv:
         for i in range(self.num_envs):
             self.parent_conns[i].send(('get_masks', None))
         
+        worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "get_masks")
         results = []
         for i in range(self.num_envs):
-            masks = self._recv_worker(i, "get_masks")
+            masks = worker_results[i]
             results.append(tuple(torch.from_numpy(mask) for mask in masks))
         return results
 
@@ -666,18 +707,51 @@ class VectorEnv:
         for i in range(self.num_envs):
             self.parent_conns[i].send(('get_rollout_state', None))
         
+        worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "get_rollout_state")
         masks_list = []
         snapshots = []
         for i in range(self.num_envs):
-            masks, snap, dynamic_info = self._recv_worker(i, "get_rollout_state")
+            masks, snap, dynamic_info = worker_results[i]
             self.envs[i].update_dynamic_properties(dynamic_info)
             masks_list.append(tuple(torch.from_numpy(mask) for mask in masks))
             snapshots.append(snap)
         return masks_list, snapshots
 
+    def get_rollout_state_indices(self, indices: List[int]) -> dict[int, tuple[Tuple[torch.Tensor, torch.Tensor, torch.Tensor], dict]]:
+        """批量获取指定环境的 masks 与 snapshot。"""
+        target_indices = [int(index) for index in indices]
+        if not target_indices:
+            return {}
+        for index in target_indices:
+            self.parent_conns[index].send(('get_rollout_state', None))
+
+        worker_results = self._recv_workers_unordered(target_indices, "get_rollout_state")
+        results = {}
+        for index in target_indices:
+            masks, snap, dynamic_info = worker_results[index]
+            self.envs[index].update_dynamic_properties(dynamic_info)
+            results[index] = (tuple(torch.from_numpy(mask) for mask in masks), snap)
+        return results
+
     def try_wait_for_resources_all(self) -> List[bool]:
         """异步收集并推送时间推移操作"""
-        results = [env.try_wait_for_resources() for env in self.envs]
+        indexed = self.try_wait_for_resources_indices(list(range(self.num_envs)))
+        return [indexed[i] for i in range(self.num_envs)]
+
+    def try_wait_for_resources_indices(self, indices: List[int]) -> dict[int, bool]:
+        """批量推进指定环境的资源等待。"""
+        target_indices = [int(index) for index in indices]
+        if not target_indices:
+            return {}
+        for index in target_indices:
+            self.parent_conns[index].send(('try_wait_for_resources', None))
+
+        worker_results = self._recv_workers_unordered(target_indices, "try_wait_for_resources")
+        results = {}
+        for index in target_indices:
+            res, dynamic_info = worker_results[index]
+            self.envs[index].update_dynamic_properties(dynamic_info)
+            results[index] = bool(res)
         return results
 
     def get_state_snapshot_all(self) -> List[dict]:
@@ -689,8 +763,9 @@ class VectorEnv:
         for i in range(self.num_envs):
             self.parent_conns[i].send(('switch_dataset', idx))
             
+        worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "switch_dataset")
         for i in range(self.num_envs):
-            val = self._recv_worker(i, "switch_dataset")
+            val = worker_results[i]
             self.envs[i].update_static_properties(val)
             self.envs[i].update_dynamic_properties(val)
 

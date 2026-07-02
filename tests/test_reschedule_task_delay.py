@@ -19,7 +19,7 @@ from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
 from tests.runtime_safety import temporary_config
-from train import evaluate_reschedule_model
+from runtime.reschedule_eval import evaluate_reschedule_model
 from utils.gpu_graph_manager import GPUBatchGraphManager
 from utils.vector_env import EnvCreator, VectorEnv
 from utils.reschedule import load_baseline_schedule
@@ -159,6 +159,33 @@ def test_reschedule_reset_freezes_started_tasks_and_adds_features(tmp_path: Path
         assert obs["task"].x[list(frozen_ids), 21].min().item() == 1.0
         assert env.task_material_ready[delayed_task] == release_time
         assert obs["task"].x[delayed_task, 22].item() == 1.0
+
+
+def test_delayed_zero_duration_task_is_not_auto_completed_before_release(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline.csv"
+    df = _write_greedy_baseline(baseline_path)
+    zero_rows = df[(df["Duration"].abs() <= 1e-8) & (df["Start"] > 1.0)]
+    assert not zero_rows.empty
+    delayed_row = zero_rows.iloc[0]
+    delayed_task = int(delayed_row["TaskID"])
+    start_time = max(0.0, float(delayed_row["Start"]) - 0.5)
+    release_time = float(delayed_row["Start"] + 20.0)
+    scenario_path = tmp_path / "zero_duration_delay.csv"
+    pd.DataFrame(
+        [{"reschedule_start_time": start_time, "TaskID": delayed_task, "release_time": release_time}]
+    ).to_csv(scenario_path, index=False)
+
+    with temporary_config(configs, _reschedule_overrides(baseline_path, scenario_path)):
+        env = AirLineEnv_Graph(data_path_or_dir=str(PROJECT_ROOT / "data" / "283.csv"), seed=12)
+        env.reset(randomize_duration=False, randomize_workers=False, seed=12)
+
+        assert env.task_material_ready[delayed_task] == release_time
+        assigned = [item for item in env.assigned_tasks if int(item[0]) == delayed_task]
+        if assigned:
+            assert float(assigned[0][3]) + 1e-8 >= release_time
+            assert float(assigned[0][4]) + 1e-8 >= release_time
+        else:
+            assert int(env.task_status[delayed_task]) != 2
 
 
 def test_release_time_is_environment_hard_constraint(tmp_path: Path) -> None:
@@ -320,7 +347,7 @@ def test_evaluate_reschedule_model_reports_constraint_metrics(tmp_path: Path) ->
 
 
 def test_reschedule_constraint_metrics_detect_precedence_violation(tmp_path: Path) -> None:
-    from train import _compute_reschedule_constraint_metrics
+    from runtime.reschedule_eval import _compute_reschedule_constraint_metrics
 
     baseline_path = tmp_path / "baseline.csv"
     df = _write_greedy_baseline(baseline_path)

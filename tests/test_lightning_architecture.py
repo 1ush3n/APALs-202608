@@ -30,9 +30,16 @@ class _Agent:
         return {"Loss/Total": 0.0}
 
 
+class _OOMAgent(_Agent):
+    def update(self, memory, env, current_ep):
+        self.updated = True
+        return {"OOM/SkippedUpdate": 1.0, "_skip_training_log": 1.0}
+
+
 class _RolloutService:
     def __init__(self):
         self.closed = False
+        self.eval_calls = 0
 
     def collect(self, episode):
         from training.lightning_module import RolloutUpdate
@@ -61,6 +68,7 @@ class _RolloutService:
         )
 
     def evaluate(self, episode):
+        self.eval_calls += 1
         return {"makespan": 1.0}
 
     def close(self):
@@ -79,6 +87,21 @@ def test_lightning_module_uses_manual_optimization_contract() -> None:
     assert agent.updated is True
     assert module.last_completed_episode == 1
     assert module.last_eval_metrics == {"makespan": 1.0}
+
+
+def test_lightning_module_skips_logging_and_eval_on_oom_update() -> None:
+    agent = _OOMAgent()
+    service = _RolloutService()
+    module = APALLightningModule(agent, service, eval_freq=1)
+    data = APALDataModule(service, max_episodes=1)
+
+    batch = next(iter(data.train_dataloader()))
+    module.training_step(batch, 0)
+
+    assert agent.updated is True
+    assert module.last_completed_episode == 0
+    assert module.last_eval_metrics is None
+    assert service.eval_calls == 0
 
 
 def test_lightning_checkpoint_contains_apal_metadata() -> None:
@@ -192,6 +215,34 @@ def test_rollout_checkpoint_uses_reschedule_selection_score(tmp_path) -> None:
         str(tmp_path / "last.ckpt"),
     ]
     assert callback.best_score == 0.7
+
+
+def test_reschedule_warm_start_loads_configured_initial_model(tmp_path) -> None:
+    import torch
+    from configs import configs
+    from tests.runtime_safety import temporary_config
+    from train_lightning import _maybe_load_reschedule_warm_start
+
+    source = torch.nn.Linear(2, 2)
+    target = torch.nn.Linear(2, 2)
+    with torch.no_grad():
+        source.weight.fill_(3.0)
+        source.bias.fill_(1.5)
+        target.weight.zero_()
+        target.bias.zero_()
+    checkpoint_path = tmp_path / "initial_model.pth"
+    torch.save(source.state_dict(), checkpoint_path)
+
+    overrides = {
+        "enable_reschedule_mode": True,
+        "reschedule_warm_start": True,
+        "reschedule_baseline_model_path": str(checkpoint_path),
+    }
+    with temporary_config(configs, overrides):
+        _maybe_load_reschedule_warm_start(target, torch.device("cpu"), resume=False)
+
+    assert torch.equal(target.weight, source.weight)
+    assert torch.equal(target.bias, source.bias)
 
 
 def test_rollout_metrics_expose_expected_log_keys() -> None:

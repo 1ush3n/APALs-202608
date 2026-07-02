@@ -30,8 +30,10 @@ from utils.reschedule import (
     calculate_stability_metrics,
     load_baseline_schedule,
     load_reschedule_scenario,
+    sample_task_delay_load_scenario,
     sample_task_delay_scenario,
 )
+from runtime.reschedule_manifest import resolve_manifest_entry_for_data
 
 Action = Tuple[int, int, List[int]]
 
@@ -185,6 +187,8 @@ class AirLineEnv_Graph(gym.Env):
         self.base_durations = ctx['base_durations']
         self.max_allowed_stations = ctx['max_allowed_stations']
         self.is_critical = ctx['is_critical']
+        self.baseline_schedule = None
+        self.reschedule_scenario = None
         
         # 状态变量初始化
         self.current_time = 0.0
@@ -322,7 +326,14 @@ class AirLineEnv_Graph(gym.Env):
     def _ensure_baseline_schedule(self) -> BaselineSchedule:
         if self.baseline_schedule is not None:
             return self.baseline_schedule
-        baseline_path = self._resolve_project_path(getattr(configs, "reschedule_baseline_schedule_path", "results/final_schedule.csv"))
+        manifest_entry = resolve_manifest_entry_for_data(
+            configs,
+            self.dataset_pool[self.active_dataset_idx]["file_path"],
+        )
+        if manifest_entry is not None:
+            baseline_path = manifest_entry.baseline_schedule_path
+        else:
+            baseline_path = self._resolve_project_path(getattr(configs, "reschedule_baseline_schedule_path", "results/final_schedule.csv"))
         baseline = load_baseline_schedule(baseline_path)
         missing = set(range(self.num_tasks)) - set(baseline.tasks)
         if missing:
@@ -338,6 +349,12 @@ class AirLineEnv_Graph(gym.Env):
         scenario_path = str(getattr(configs, "reschedule_scenario_path", "") or "").strip()
         if scenario_path:
             return load_reschedule_scenario(self._resolve_project_path(scenario_path))
+        if str(getattr(configs, "reschedule_train_scenario_mode", "config")) == "uniform_load":
+            _level, scenario = sample_task_delay_load_scenario(
+                baseline,
+                rng=self.np_random,
+            )
+            return scenario
         return sample_task_delay_scenario(
             baseline,
             rng=self.np_random,
@@ -1288,6 +1305,8 @@ class AirLineEnv_Graph(gym.Env):
             for t in ready_indices:
                 dur = self.task_static_feat[t, 0].item()
                 if dur < 1e-5: # Zero duration
+                    if hasattr(self, 'task_material_ready') and self.task_material_ready[t] > self.current_time + 1e-5:
+                        continue
                     # 立即完成
                     self.task_status[t] = 2 # Scheduled/Done
                     finish_time = self.current_time

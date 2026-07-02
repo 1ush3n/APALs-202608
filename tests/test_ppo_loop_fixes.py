@@ -24,9 +24,10 @@ from core.event_engine import Event, EventType
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
-from train import PROJECT_ROOT as TRAIN_PROJECT_ROOT
-from train import Memory
-from train import refresh_env_observation, resolve_workspace_path
+from runtime.paths import PROJECT_ROOT as TRAIN_PROJECT_ROOT
+from runtime.paths import resolve_workspace_path
+from training.memory import Memory
+from training.observation import refresh_env_observation
 from tests.runtime_safety import seed_everything, temporary_config
 
 

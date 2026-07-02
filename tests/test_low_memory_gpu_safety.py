@@ -22,7 +22,7 @@ from configs import configs
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
-from train import Memory
+from training.memory import Memory
 from tests.runtime_safety import (
     get_cuda_info,
     guarded_cuda_test,

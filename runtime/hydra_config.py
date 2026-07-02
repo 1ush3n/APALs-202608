@@ -283,6 +283,41 @@ def initialize_hydra_runtime(
     return runtime_args
 
 
+def initialize_keyvalue_args(
+    argv: list[str] | None,
+    *,
+    extra_arguments: Mapping[str, ExtraArgument],
+) -> Namespace:
+    """解析脚本级 key=value 参数；不加载 YAML，也不修改全局训练配置。"""
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    _check_old_cli(raw_args)
+
+    values: dict[str, Any] = {key: spec.default for key, spec in extra_arguments.items()}
+    explicit: set[str] = set()
+    for token in raw_args:
+        if token in {"-h", "--help"}:
+            continue
+        key, separator, raw_value = token.partition("=")
+        if not separator:
+            raise HydraCliError(f"脚本参数必须使用 key=value 格式: {token!r}")
+        normalized_key = _normalize_key(key)
+        leaf = _field_name_from_override(normalized_key)
+        if leaf not in extra_arguments:
+            allowed = ", ".join(sorted(extra_arguments))
+            raise HydraCliError(f"未知脚本参数 {key!r}；可用参数: {allowed}")
+        values[leaf] = _parse_value(raw_value)
+        explicit.add(leaf)
+
+    missing = [
+        key for key, spec in extra_arguments.items()
+        if spec.required and values.get(key) in (None, "")
+    ]
+    if missing:
+        raise HydraCliError(f"缺少必需参数: {', '.join(missing)}")
+
+    return Namespace(explicit_fields=explicit, **values)
+
+
 def hydra_help(extra_arguments: Mapping[str, ExtraArgument] | None = None) -> str:
     extra_lines = []
     for key, spec in (extra_arguments or {}).items():

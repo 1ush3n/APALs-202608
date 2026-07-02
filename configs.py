@@ -102,11 +102,14 @@ class Config:
     # 预测-反应式重调度 (Baseline-guided Rescheduling)
     # ------------------
     enable_reschedule_mode: bool = False
+    reschedule_manifest_path: str = ""
+    reschedule_eval_instance_id: str = ""
     reschedule_baseline_schedule_path: str = "results/final_schedule.csv"
     reschedule_baseline_model_path: str = "checkpoints/initial_schedule/bestmodel/best_model.pth"
     reschedule_scenario_path: str = ""
     reschedule_eval_scenario_path: str = "results/reschedule_eval_scenarios.csv"
     reschedule_eval_scenario_seed: int = 42
+    reschedule_train_scenario_mode: str = "config"
     reschedule_start_time_min_ratio: float = 0.15
     reschedule_start_time_max_ratio: float = 0.65
     reschedule_delay_task_prob: float = 0.08
@@ -141,10 +144,10 @@ class Config:
     clip_v_grad_norm: float = 0.05          # 保护 Value Network 梯度的防破甲护盾
     batch_size: int = 32                    # 严防爆显存
     ppo_batch_size_cap: int = 0             # 0 表示不限制；平台配置可设置显存安全上限
-    auto_oom_retry: bool = True             # CUDA OOM 后自动降低 PPO batch 重试
+    auto_oom_retry: bool = False            # 已废弃：CUDA OOM 后不再降低 PPO batch 重试
     skip_update_on_oom: bool = True         # 重试耗尽后回滚并跳过当前 PPO 更新
-    oom_min_batch_size: int = 2             # OOM 自动降级的最小 PPO batch
-    oom_max_retries: int = 1                # 首次 OOM 后仅将 batch 减半重试一次
+    oom_min_batch_size: int = 2             # 已废弃：保留旧配置兼容
+    oom_max_retries: int = 0                # 已废弃：OOM 直接回滚并跳过本轮
     oom_transactional_updates: bool = True  # 更新前保存 CPU 快照，保证回滚语义完整
     r_coef_std: float = 0.5                # 解决坍缩效应
     

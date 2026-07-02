@@ -1,7 +1,6 @@
 import sys
 import pandas as pd
 import numpy as np
-import argparse
 import ast
 from pathlib import Path
 
@@ -11,6 +10,19 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from environment import AirLineEnv_Graph
 from configs import configs
+from runtime.hydra_config import (
+    ExtraArgument,
+    HydraCliError,
+    hydra_help,
+    initialize_keyvalue_args,
+    should_show_help,
+)
+
+
+VERIFY_ARGS = {
+    "data_path": ExtraArgument(required=True, help="环境基础数据路径，例如 data_path=data/283.csv"),
+    "schedule_path": ExtraArgument(required=True, help="需要检查的排程结果 CSV 路径"),
+}
 
 # 为终端输出添彩色
 if sys.stdout.encoding != 'utf-8':
@@ -300,9 +312,13 @@ def verify_schedule(data_path, schedule_path):
          print(f"{bcolors.FAIL}{bcolors.BOLD}[最终判定] 发现黑幕调度！请查看上报的各类 Error 判定。{bcolors.ENDC}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="独立的排程合法性检察官")
-    parser.add_argument('--data_path', type=str, required=True, help="环境的基础知识参数数据 (例如 data/283.csv)")
-    parser.add_argument('--schedule_path', type=str, required=True, help="需要被调查的排程结果 (.csv)")
-    args = parser.parse_args()
+    if should_show_help(sys.argv[1:]):
+        print(hydra_help(VERIFY_ARGS))
+        raise SystemExit(0)
+    try:
+        args = initialize_keyvalue_args(sys.argv[1:], extra_arguments=VERIFY_ARGS)
+    except HydraCliError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2)
     
     verify_schedule(args.data_path, args.schedule_path)

@@ -1,0 +1,86 @@
+experiment_name: paper_experiment_suite
+output_root: results/paper_experiments
+runs_root: runs
+run_id: ""
+
+datasets:
+  "283": data/283.csv
+  "680": data/680.csv
+  "2338": data/2338.csv
+  "3182": data/3182.csv
+
+train_datasets:
+  scale_400_800: data/scale_400_800_datasets
+  multiscale: data/multiscale_datasets
+
+result_roots:
+  - results
+  - runs
+
+reference_makespans:
+  "283": 158.23
+  "680": 871.95
+  "2338": 2648.53
+  "3182": 3622.06
+
+methods:
+  - full
+  - no_gat
+  - no_pointer
+  - no_mask
+  - no_skill_hub
+  - no_attention
+  - BasicPPO
+  - DQN
+  - SPT
+  - LPT
+  - EDD
+  - CPM
+  - MSL
+  - Random
+  - Beam
+  - IG
+  - SA
+  - GA
+
+reference_method: full
+seeds: [0, 1, 2, 3, 4]
+bootstrap_samples: 2000
+permutation_samples: 5000
+station_count: 5
+worker_count: 80
+
+ablations:
+  full:
+    experiment: scale_400_800_schedule
+    overrides: []
+  no_gat:
+    experiment: scale_400_800_schedule
+    overrides:
+      - ablation_no_gat=true
+  no_pointer:
+    experiment: scale_400_800_schedule
+    overrides:
+      - ablation_no_pointer=true
+  no_mask:
+    experiment: scale_400_800_schedule
+    overrides:
+      - ablation_no_mask=true
+  no_skill_hub:
+    experiment: scale_400_800_schedule
+    overrides:
+      - use_skill_hub=false
+      - skill_hub_bidirectional=false
+  no_attention:
+    experiment: scale_400_800_schedule
+    overrides:
+      - use_attention_critic=false
+
+checkpoints:
+  full:
+    "680": checkpoints/initial_schedule/best_680.ckpt
+  no_gat: {}
+  no_pointer: {}
+  no_mask: {}
+  no_skill_hub: {}
+  no_attention: {}

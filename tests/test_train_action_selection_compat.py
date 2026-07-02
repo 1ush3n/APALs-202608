@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from ppo_agent import PPOAgent
-from train import select_actions_batch_compat
+from training.action_selection import select_actions_batch_compat
 
 
 class _LegacyAgent:

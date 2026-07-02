@@ -131,7 +131,6 @@ def _artifact_rows(run_dir: Path, base: dict[str, str]) -> list[dict[str, str]]:
     summary_paths = [
         (run_dir / "eval" / "summary.json", "evaluation"),
         (run_dir / "eval" / "reschedule" / "reschedule_ppo_eval_summary.json", "reschedule_ppo"),
-        (run_dir / "eval" / "reschedule_ga" / "reschedule_ga_eval_summary.json", "reschedule_ga"),
     ]
     for path, kind in summary_paths:
         payload = _read_json(path)

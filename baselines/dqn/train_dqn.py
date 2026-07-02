@@ -22,7 +22,8 @@ from configs import configs
 from env_wrapper import init_env, standardize_env_reset, standardize_env_step, extract_flat_state_for_baselines
 from runtime.artifacts import resolve_run_output_dir, write_run_context_files, write_run_manifest
 from runtime.hydra_config import ExtraArgument, HydraCliError, hydra_help, initialize_hydra_runtime, should_show_help
-from train import PROJECT_ROOT, set_seed
+from runtime.paths import PROJECT_ROOT
+from runtime.seed import set_seed
 from utils.logger import init_logger, record_experiment_time
 from utils.device_utils import get_available_device, clear_torch_cache
 from utils.visualization import plot_gantt
