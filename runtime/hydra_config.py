@@ -224,6 +224,21 @@ def apply_hydra_config(
     return set(flat)
 
 
+def _apply_cli_leaf_overrides(target: Config, overrides: Iterable[str]) -> None:
+    """再次应用命令行覆盖，保证 CLI 优先级高于实验 YAML 内部嵌套字段。"""
+    updates: dict[str, Any] = {}
+    for token in overrides:
+        key, separator, raw_value = token.partition("=")
+        if not separator:
+            continue
+        leaf = _field_name_from_override(_normalize_key(key))
+        if hasattr(target, leaf):
+            updates[leaf] = _parse_value(raw_value)
+    if updates:
+        target.update_from_dict(updates)
+        validate_runtime_config(target)
+
+
 def initialize_hydra_runtime(
     argv: list[str] | None,
     *,
@@ -247,6 +262,7 @@ def initialize_hydra_runtime(
         str((config_dir / "hardware" / f"{parsed.hardware}.yaml").resolve()),
     )
     apply_hydra_config(hydra_cfg, target=target, config_paths=config_paths)
+    _apply_cli_leaf_overrides(target, parsed.config_overrides)
 
     precision = str(target.float32_matmul_precision)
     if torch.cuda.is_available():

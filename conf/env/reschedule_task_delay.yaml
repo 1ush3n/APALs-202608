@@ -31,3 +31,8 @@ reschedule_task_delay:
   reschedule_infeasible_stability_relax: 0.35
   reschedule_warm_start: true
   reschedule_eval_num_scenarios: 4
+  adaptive_ppo_batch_by_tasks: true
+  adaptive_ppo_batch_small_task_max: 530
+  adaptive_ppo_batch_large_task_min: 550
+  adaptive_ppo_batch_small: 128
+  adaptive_ppo_batch_large: 64

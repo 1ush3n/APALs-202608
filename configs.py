@@ -12,6 +12,10 @@ class Config:
     data_dir: str = "data"
     data_file_path: str = str(Path("data") / "283.csv") # 默认验证集基准图
     worker_pool_path: str = str(Path("data") / "worker_pool_fixed.csv")
+    # 脚本专属参数的兼容承载字段：正常情况下由 ExtraArgument 截获；
+    # 若旧脚本或远端环境误把它们传入 Hydra 覆盖，也不应阻断评估入口。
+    manifest_path: str = ""
+    instance_ids: list[str] = field(default_factory=list)
     
     # ------------------
     # 环境与图相关 (Environment & Graph)
@@ -144,6 +148,11 @@ class Config:
     clip_v_grad_norm: float = 0.05          # 保护 Value Network 梯度的防破甲护盾
     batch_size: int = 32                    # 严防爆显存
     ppo_batch_size_cap: int = 0             # 0 表示不限制；平台配置可设置显存安全上限
+    adaptive_ppo_batch_by_tasks: bool = False
+    adaptive_ppo_batch_small_task_max: int = 530
+    adaptive_ppo_batch_large_task_min: int = 550
+    adaptive_ppo_batch_small: int = 128
+    adaptive_ppo_batch_large: int = 64
     auto_oom_retry: bool = False            # 已废弃：CUDA OOM 后不再降低 PPO batch 重试
     skip_update_on_oom: bool = True         # 重试耗尽后回滚并跳过当前 PPO 更新
     oom_min_batch_size: int = 2             # 已废弃：保留旧配置兼容

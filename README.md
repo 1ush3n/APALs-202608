@@ -485,7 +485,7 @@ python train.py experiment=initial_schedule_680 run_id=initial_schedule_680_2606
 | 运行清单 | `runs/<实验名>/<run_id>/configs/run_manifest.json` | run_id、命令、Git commit 和 checkpoint 元数据 |
 | 评估结果 | `runs/<实验名>/<run_id>/eval/` | `summary.json`、`schedule.csv`、`gantt.png` 等 |
 | 附加产物 | `runs/<实验名>/<run_id>/artifacts/` | reports、traces 和后续论文实验中间文件 |
-| Baseline 评估 | `runs/<实验名>/<run_id>/artifacts/baselines/` | Heuristic、GA、BasicPPO、DQN 的 metrics、schedule 和 run.log |
+| Baseline 评估 | `runs/<实验名>/<run_id>/artifacts/baselines/` | Heuristic、Beam/IG/SA、文献适配 PPO/DQN baseline 的 metrics、schedule 和 run.log |
 | Benchmark 结果 | `runs/<实验名>/<run_id>/artifacts/benchmark/` | runtime summary、raw 子进程输出和论文表格 CSV |
 
 实验工具默认也写入 `runs`。若需要旧路径，显式传入 `output_dir=results/eval_logs`、`output_dir=results/runtime_benchmark/...`，或使用 `artifact_layout=legacy`。
@@ -703,64 +703,85 @@ python baselines/heuristic/run_all_baselines.py \
   --seed 42
 ```
 
-### 学习型低维 baseline：Basic PPO 与 DQN
+### 文献适配学习型 baseline：L2D-PPO-APAL 与 Graph-DDQN-APAL
 
-`BasicPPO` 和 `DQN` 是不使用 HB-GAT-PN 图网络的 flat-state 学习型 baseline。它们会读取同一套实验 YAML、平台硬件配置和 Hydra `key=value` 覆盖，但模型输入是由 APAL 环境状态展平得到的一维向量，因此不属于 GAT、Pointer 或 mask 消融。
+当前论文主线不再训练旧版 `BasicPPO` 和 `DQN`。这两个脚本保留为历史简化 baseline，但不建议进入正文主表。新的学习型对比算法使用与主方法一致的 APAL `HeteroData` 图观测、动作 mask、`env.step()` reward、训练数据目录和验证数据，只替换文献启发的学习框架。
 
-训练 Basic PPO：
+`L2D-PPO-APAL` 是 learned dispatching rule / GNN-RL 思路的 APAL 适配版，仍用 PPO 优化，但 checkpoint 会标记为 `feature_mode=apal_hetero_graph`。训练命令：
 
 ```bash
-python baselines/basic_ppo/train_basic.py \
-  experiment=initial_schedule_283 \
-  train.max_episodes=300 \
-  train.batch_size=16 \
+python baselines/literature_ppo/train_l2d_ppo_apal.py \
+  experiment=scale_400_800_schedule \
+  train_data_path_or_dir=data/scale_400_800_datasets \
+  data_file_path=data/680.csv \
+  max_episodes=300 \
+  train.batch_size=64 \
   seed=42 \
-  output_dir=results
+  output_dir=results/l2d_ppo_apal_680
 ```
 
-训练 DQN：
+`Graph-DDQN-APAL` 是图状态 Double DQN 的 APAL 适配版，使用在线网络选 next action、target 网络估计 target Q，并复用同一套 APAL mask 与 reward。训练命令：
 
 ```bash
-python baselines/dqn/train_dqn.py \
-  experiment=initial_schedule_283 \
-  train.max_episodes=300 \
-  train.batch_size=16 \
+python baselines/literature_dqn/train_graph_ddqn_apal.py \
+  experiment=scale_400_800_schedule \
+  train_data_path_or_dir=data/scale_400_800_datasets \
+  data_file_path=data/680.csv \
+  max_episodes=300 \
+  train.batch_size=64 \
   seed=42 \
-  output_dir=results
+  output_dir=results/graph_ddqn_apal_680
 ```
 
-离线评估 Basic PPO，并导出到统一 baseline 结果目录：
+统一离线评估入口会根据 checkpoint 自动识别算法类型：
 
 ```bash
-python baselines/evaluate_flat_rl_baseline.py \
-  experiment=initial_schedule_283 \
-  algorithm=basic_ppo \
-  model_path=results/basic_ppo_baseline_283_<timestamp>/basic_ppo_model_final.pth \
-  datasets=[283.csv] \
-  seed=42
-```
-
-离线评估 DQN：
-
-```bash
-python baselines/evaluate_flat_rl_baseline.py \
-  experiment=initial_schedule_283 \
-  algorithm=dqn \
-  model_path=results/dqn_baseline_283_<timestamp>/dqn_model.pth \
-  datasets=[283.csv] \
-  seed=42
+python baselines/literature/evaluate_literature_baseline.py \
+  experiment=initial_schedule_680 \
+  model_path=results/l2d_ppo_apal_680/l2d_ppo_apal_best.pth \
+  datasets=[283.csv,680.csv,2338.csv,3182.csv] \
+  num_runs=1 \
+  temperature=0.0 \
+  output_dir=results/eval_l2d_ppo_apal_all
 ```
 
 评估结果会写入：
 
 ```text
-runs/<实验名>/<run_id>/artifacts/baselines/flat_state/BasicPPO/<dataset_name>/metrics.json
-runs/<实验名>/<run_id>/artifacts/baselines/flat_state/BasicPPO/<dataset_name>/schedule.csv
-runs/<实验名>/<run_id>/artifacts/baselines/flat_state/DQN/<dataset_name>/metrics.json
-runs/<实验名>/<run_id>/artifacts/baselines/flat_state/DQN/<dataset_name>/schedule.csv
+results/eval_l2d_ppo_apal_all/<Method>/<dataset_name>/metrics.json
+results/eval_l2d_ppo_apal_all/<Method>/<dataset_name>/schedule.csv
+results/eval_l2d_ppo_apal_all/<Method>/<dataset_name>/runs_detail.csv
+results/eval_l2d_ppo_apal_all/<Method>_summary.csv
 ```
 
-若要恢复旧目录，显式追加 `output_dir=results/eval_logs`。
+若不传 `output_dir`，结果默认进入 `runs/<实验名>/<run_id>/artifacts/baselines/literature_eval/`。
+
+两个文献适配训练脚本都会保存：
+
+```text
+<output_dir>/l2d_ppo_apal_latest.pth
+<output_dir>/l2d_ppo_apal_best.pth
+<output_dir>/l2d_ppo_apal_final.pth
+<output_dir>/graph_ddqn_apal_latest.pth
+<output_dir>/graph_ddqn_apal_best.pth
+<output_dir>/graph_ddqn_apal_final.pth
+```
+
+继续训练时使用相同 `output_dir` 并追加 `resume=true`：
+
+```bash
+python baselines/literature_ppo/train_l2d_ppo_apal.py \
+  experiment=scale_400_800_schedule \
+  train_data_path_or_dir=data/scale_400_800_datasets \
+  data_file_path=data/680.csv \
+  max_episodes=300 \
+  train.batch_size=64 \
+  seed=42 \
+  output_dir=results/l2d_ppo_apal_680 \
+  resume=true
+```
+
+DDQN 恢复时会加载模型、target network、optimizer、AMP scaler、epsilon、best makespan 和 episode；replay buffer 不写入 checkpoint，恢复后会重新预热，避免 checkpoint 过大。
 
 ### HB-GAT-PN 消融实验
 

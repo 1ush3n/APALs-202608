@@ -22,7 +22,8 @@ from tests.runtime_safety import temporary_config
 from runtime.reschedule_eval import evaluate_reschedule_model
 from utils.gpu_graph_manager import GPUBatchGraphManager
 from utils.vector_env import EnvCreator, VectorEnv
-from utils.reschedule import load_baseline_schedule
+from utils.reschedule import load_baseline_schedule, load_reschedule_scenarios
+from baselines.heuristic.reschedule_rules import BeamSearchRepairRule
 
 
 def _base_overrides() -> dict[str, object]:
@@ -159,6 +160,63 @@ def test_reschedule_reset_freezes_started_tasks_and_adds_features(tmp_path: Path
         assert obs["task"].x[list(frozen_ids), 21].min().item() == 1.0
         assert env.task_material_ready[delayed_task] == release_time
         assert obs["task"].x[delayed_task, 22].item() == 1.0
+
+
+def test_reschedule_rule_static_cache_matches_environment_queries(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline.csv"
+    df = _write_greedy_baseline(baseline_path)
+    start_time = float(df["Start"].quantile(0.35))
+    delayed_row = df[df["Start"] > start_time].iloc[0]
+    scenario_path = tmp_path / "scenario.csv"
+    pd.DataFrame(
+        [
+            {
+                "scenario_id": "low_000",
+                "reschedule_start_time": start_time,
+                "TaskID": int(delayed_row["TaskID"]),
+                "release_time": float(delayed_row["Start"] + 10.0),
+            }
+        ]
+    ).to_csv(scenario_path, index=False)
+    scenario_id, scenario = load_reschedule_scenarios(scenario_path)[0]
+
+    with temporary_config(configs, _reschedule_overrides(baseline_path, scenario_path)):
+        solver = BeamSearchRepairRule(
+            data_path_or_dir=PROJECT_ROOT / "data" / "283.csv",
+            scenario=scenario,
+            scenario_id=scenario_id,
+            scenario_level="low",
+            seed=21,
+            verify_static_cache=True,
+            beam_width=1,
+            beam_branch_factor=1,
+            beam_levels=1,
+        )
+        ctx = solver.static_context
+        assert ctx is not None
+        for task_id in range(min(20, solver.env.num_tasks)):
+            assert solver._task_duration(task_id) == float(solver.env.task_static_feat[task_id, 0].item())
+            assert solver._task_skill(task_id) == int(solver.env.task_static_feat[task_id, 1].item())
+            assert solver._task_demand(task_id) == max(1, int(solver.env.task_static_feat[task_id, 2].item()))
+
+        task_id = int(np.where(solver.env.task_status <= 1)[0][0])
+        skill_id = solver._task_skill(task_id)
+        worker_mask = np.zeros(solver.env.num_workers, dtype=bool)
+        station_id = 0
+        expected = [
+            int(worker_id)
+            for worker_id in range(solver.env.num_workers)
+            if solver.env.worker_skill_matrix[int(worker_id), skill_id] > 0.5
+            and int(solver.env.worker_locks[int(worker_id)]) in {0, station_id + 1}
+        ]
+        assert solver._valid_workers(task_id, station_id, worker_mask) == expected
+
+        if expected:
+            worker_mask[expected[0]] = True
+            assert expected[0] not in solver._valid_workers(task_id, station_id, worker_mask)
+            worker_mask[expected[0]] = False
+            solver.env.worker_locks[expected[0]] = station_id + 2
+            assert expected[0] not in solver._valid_workers(task_id, station_id, worker_mask)
 
 
 def test_delayed_zero_duration_task_is_not_auto_completed_before_release(tmp_path: Path) -> None:

@@ -52,6 +52,24 @@ class ReschedulePrioritySolution:
         )
 
 
+@dataclass
+class StaticConstraintContext:
+    """规则搜索中不随环境 step 改变的静态约束上下文。"""
+
+    durations: np.ndarray
+    skills: np.ndarray
+    demands: np.ndarray
+    worker_skill_matrix: np.ndarray
+    baseline_starts: np.ndarray
+    baseline_ends: np.ndarray
+    baseline_stations: np.ndarray
+    baseline_teams: tuple[frozenset[int], ...]
+    movable_mask: np.ndarray
+    release_times: np.ndarray
+    critical_tail: np.ndarray
+    capable_workers_by_skill: tuple[np.ndarray, ...]
+
+
 def _to_numpy_bool(mask: torch.Tensor | np.ndarray) -> np.ndarray:
     if torch.is_tensor(mask):
         return mask.detach().cpu().numpy().astype(bool)
@@ -121,6 +139,8 @@ class RescheduleRuleScheduler:
         scenario_level: str = "",
         seed: int = 42,
         verbose: bool = False,
+        use_static_cache: bool = True,
+        verify_static_cache: bool = False,
     ) -> None:
         self.data_path_or_dir = Path(data_path_or_dir)
         self.scenario = scenario
@@ -128,34 +148,157 @@ class RescheduleRuleScheduler:
         self.scenario_level = str(scenario_level)
         self.seed = int(seed)
         self.verbose = bool(verbose)
+        self.use_static_cache = bool(use_static_cache)
+        self.verify_static_cache = bool(verify_static_cache)
+        self.static_context: StaticConstraintContext | None = None
         self.rng = np.random.RandomState(self.seed)
         self.env = AirLineEnv_Graph(data_path_or_dir=str(self.data_path_or_dir), seed=self.seed)
         self.env.skip_obs_building = True
         setattr(self.env, "_forced_reschedule_scenario", scenario)
         self.env.reset(randomize_duration=False, randomize_workers=False, seed=self.seed)
-        self.critical_tail = _critical_tail_lengths(self.env)
+        self._refresh_static_context()
         self.random_priority = self.rng.rand(self.env.num_tasks)
 
     def _reset_env(self) -> None:
         self.env.skip_obs_building = True
         setattr(self.env, "_forced_reschedule_scenario", self.scenario)
         self.env.reset(randomize_duration=False, randomize_workers=False, seed=self.seed)
-        self.critical_tail = _critical_tail_lengths(self.env)
+        self._refresh_static_context()
         self.random_priority = self.rng.rand(self.env.num_tasks)
 
-    def task_priority(self, task_id: int) -> float:
+    def _refresh_static_context(self) -> None:
+        durations = self.env.task_static_feat[:, 0].detach().cpu().numpy().astype(float)
+        skills = self.env.task_static_feat[:, 1].detach().cpu().numpy().astype(int)
+        demands = np.maximum(1, self.env.task_static_feat[:, 2].detach().cpu().numpy().astype(int))
+        worker_skill_matrix = _worker_skill_matrix_np(self.env).astype(float, copy=False)
+
+        baseline_starts = np.full(self.env.num_tasks, np.nan, dtype=float)
+        baseline_ends = np.full(self.env.num_tasks, np.nan, dtype=float)
+        baseline_stations = np.full(self.env.num_tasks, -1, dtype=int)
+        baseline_team_lists: list[frozenset[int]] = [frozenset() for _ in range(self.env.num_tasks)]
+        movable_mask = np.ones(self.env.num_tasks, dtype=bool)
+        if self.env.baseline_schedule is not None:
+            for task_id, base in self.env.baseline_schedule.tasks.items():
+                task_idx = int(task_id)
+                if task_idx < 0 or task_idx >= self.env.num_tasks:
+                    continue
+                baseline_starts[task_idx] = float(base.start)
+                baseline_ends[task_idx] = float(base.end)
+                baseline_stations[task_idx] = int(base.station_id)
+                baseline_team_lists[task_idx] = frozenset(int(w) for w in base.team)
+                movable_mask[task_idx] = float(base.start) > float(self.scenario.start_time) + 1e-9
+
+        release_times = np.asarray(getattr(self.env, "task_material_ready", np.zeros(self.env.num_tasks)), dtype=float).copy()
+        critical_tail = _critical_tail_lengths(self.env)
+        max_skill = int(np.max(skills)) if skills.size else 0
+        num_skills = max(int(getattr(configs, "num_skill_types", 10)), max_skill + 1)
+        capable_workers = []
+        for skill_id in range(num_skills):
+            if skill_id < worker_skill_matrix.shape[1]:
+                capable_workers.append(np.where(worker_skill_matrix[:, skill_id] > 0.5)[0].astype(int))
+            else:
+                capable_workers.append(np.asarray([], dtype=int))
+
+        self.critical_tail = critical_tail
+        self.static_context = StaticConstraintContext(
+            durations=durations,
+            skills=skills,
+            demands=demands,
+            worker_skill_matrix=worker_skill_matrix,
+            baseline_starts=baseline_starts,
+            baseline_ends=baseline_ends,
+            baseline_stations=baseline_stations,
+            baseline_teams=tuple(baseline_team_lists),
+            movable_mask=movable_mask,
+            release_times=release_times,
+            critical_tail=critical_tail,
+            capable_workers_by_skill=tuple(capable_workers),
+        )
+        if self.verify_static_cache:
+            self._verify_static_context()
+
+    def _verify_static_context(self) -> None:
+        ctx = self.static_context
+        if ctx is None:
+            raise AssertionError("静态约束缓存未初始化")
+        task_count = min(16, self.env.num_tasks)
+        for task_id in range(task_count):
+            assert abs(ctx.durations[task_id] - _duration(self.env, task_id)) < 1e-9
+            assert int(ctx.skills[task_id]) == _skill_id(self.env, task_id)
+            assert int(ctx.demands[task_id]) == _demand(self.env, task_id)
+        for skill_id, cached_workers in enumerate(ctx.capable_workers_by_skill[: min(8, len(ctx.capable_workers_by_skill))]):
+            if skill_id >= ctx.worker_skill_matrix.shape[1]:
+                assert cached_workers.size == 0
+                continue
+            expected = np.where(ctx.worker_skill_matrix[:, skill_id] > 0.5)[0].astype(int)
+            assert np.array_equal(cached_workers, expected)
+
+    def _task_duration(self, task_id: int) -> float:
+        if self.use_static_cache and self.static_context is not None:
+            return float(self.static_context.durations[int(task_id)])
+        return _duration(self.env, task_id)
+
+    def _task_demand(self, task_id: int) -> int:
+        if self.use_static_cache and self.static_context is not None:
+            return max(1, int(self.static_context.demands[int(task_id)]))
+        return _demand(self.env, task_id)
+
+    def _task_skill(self, task_id: int) -> int:
+        if self.use_static_cache and self.static_context is not None:
+            return int(self.static_context.skills[int(task_id)])
+        return _skill_id(self.env, task_id)
+
+    def _baseline_team(self, task_id: int) -> set[int]:
+        if self.use_static_cache and self.static_context is not None:
+            return set(self.static_context.baseline_teams[int(task_id)])
         base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
-        return float(base.start if base is not None else task_id)
+        return set(int(w) for w in base.team) if base is not None else set()
+
+    def _has_baseline_task(self, task_id: int) -> bool:
+        if self.use_static_cache and self.static_context is not None:
+            return not np.isnan(float(self.static_context.baseline_starts[int(task_id)]))
+        return bool(self.env.baseline_schedule and int(task_id) in self.env.baseline_schedule.tasks)
+
+    def _baseline_start(self, task_id: int, default: float | None = None) -> float:
+        if self.use_static_cache and self.static_context is not None:
+            value = float(self.static_context.baseline_starts[int(task_id)])
+            if not np.isnan(value):
+                return value
+        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
+        if base is not None:
+            return float(base.start)
+        return float(task_id if default is None else default)
+
+    def _baseline_end(self, task_id: int, default: float | None = None) -> float:
+        if self.use_static_cache and self.static_context is not None:
+            value = float(self.static_context.baseline_ends[int(task_id)])
+            if not np.isnan(value):
+                return value
+        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
+        if base is not None:
+            return float(base.end)
+        return float(task_id if default is None else default)
+
+    def _baseline_station(self, task_id: int) -> int:
+        if self.use_static_cache and self.static_context is not None:
+            return int(self.static_context.baseline_stations[int(task_id)])
+        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
+        return int(base.station_id) if base is not None else -1
+
+    def task_priority(self, task_id: int) -> float:
+        return self._baseline_start(task_id)
 
     def _valid_workers(self, task_id: int, station_id: int, worker_mask: np.ndarray) -> list[int]:
-        skill_id = _skill_id(self.env, task_id)
-        skill_matrix = _worker_skill_matrix_np(self.env)
+        skill_id = self._task_skill(task_id)
         locks = np.asarray(self.env.worker_locks, dtype=int)
+        if self.use_static_cache and self.static_context is not None and skill_id < len(self.static_context.capable_workers_by_skill):
+            worker_iter = self.static_context.capable_workers_by_skill[skill_id].tolist()
+        else:
+            skill_matrix = _worker_skill_matrix_np(self.env)
+            worker_iter = np.where(skill_matrix[:, skill_id] > 0.5)[0].astype(int).tolist()
         candidates = []
-        for worker_id in range(self.env.num_workers):
+        for worker_id in worker_iter:
             if bool(worker_mask[int(worker_id)]):
-                continue
-            if skill_matrix[int(worker_id), skill_id] <= 0.5:
                 continue
             if locks[int(worker_id)] not in {0, int(station_id) + 1}:
                 continue
@@ -163,8 +306,7 @@ class RescheduleRuleScheduler:
         return candidates
 
     def _worker_score(self, task_id: int, station_id: int, worker_id: int) -> tuple[float, float, int]:
-        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
-        in_base_team = base is not None and int(worker_id) in set(int(w) for w in base.team)
+        in_base_team = int(worker_id) in self._baseline_team(task_id)
         same_station_lock = int(self.env.worker_locks[int(worker_id)]) == int(station_id) + 1
         return (
             0.0 if in_base_team else self.baseline_team_preference,
@@ -174,7 +316,7 @@ class RescheduleRuleScheduler:
 
     def _select_team(self, task_id: int, station_id: int, worker_mask: np.ndarray) -> list[int] | None:
         candidates = self._valid_workers(task_id, station_id, worker_mask)
-        demand = _demand(self.env, task_id)
+        demand = self._task_demand(task_id)
         if len(candidates) < demand:
             return None
         candidates.sort(key=lambda worker_id: self._worker_score(task_id, station_id, worker_id))
@@ -194,19 +336,19 @@ class RescheduleRuleScheduler:
     def _action_score(self, task_id: int, station_id: int, team: list[int]) -> float:
         start_time, finish_time = self._estimate_action(task_id, station_id, team)
         baseline = self.env.baseline_schedule
-        base = baseline.tasks.get(int(task_id)) if baseline else None
+        has_base = self._has_baseline_task(task_id)
         takt = max(1e-6, float(baseline.makespan if baseline else max(1.0, self.env.ideal_makespan)))
         ideal_load = max(1.0, float(self.env.ideal_station_load))
         score = float(self.task_priority(task_id))
         score += self.makespan_weight * (finish_time / takt)
         if station_id >= 0:
-            projected_load = float(self.env.station_loads[int(station_id)]) + _duration(self.env, task_id) * len(team)
+            projected_load = float(self.env.station_loads[int(station_id)]) + self._task_duration(task_id) * len(team)
             score += self.balance_weight * (projected_load / ideal_load)
         score += self.takt_weight * max(0.0, finish_time - takt) / takt
-        if base is not None:
-            score += self.start_stability_weight * abs(start_time - float(base.start)) / takt
-            score += self.station_stability_weight * float(int(station_id) != int(base.station_id))
-            base_team = set(int(w) for w in base.team)
+        if has_base:
+            score += self.start_stability_weight * abs(start_time - self._baseline_start(task_id)) / takt
+            score += self.station_stability_weight * float(int(station_id) != self._baseline_station(task_id))
+            base_team = self._baseline_team(task_id)
             overlap = len(base_team.intersection(set(int(w) for w in team)))
             denom = max(1, max(len(base_team), len(team)))
             score += self.team_stability_weight * (1.0 - overlap / denom)
@@ -319,31 +461,29 @@ class SPTRepairRule(RescheduleRuleScheduler):
     method_name = "SPTRepair"
 
     def task_priority(self, task_id: int) -> float:
-        return _duration(self.env, task_id)
+        return self._task_duration(task_id)
 
 
 class LPTRepairRule(RescheduleRuleScheduler):
     method_name = "LPTRepair"
 
     def task_priority(self, task_id: int) -> float:
-        return -_duration(self.env, task_id)
+        return -self._task_duration(task_id)
 
 
 class EDDRepairRule(RescheduleRuleScheduler):
     method_name = "EDDRepair"
 
     def task_priority(self, task_id: int) -> float:
-        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
-        return float(base.end if base is not None else task_id)
+        return self._baseline_end(task_id)
 
 
 class MSLRepairRule(RescheduleRuleScheduler):
     method_name = "MSLRepair"
 
     def task_priority(self, task_id: int) -> float:
-        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
-        due = float(base.end if base is not None else self.env.current_time)
-        return due - float(self.env.current_time) - _duration(self.env, task_id)
+        due = self._baseline_end(task_id, default=float(self.env.current_time))
+        return due - float(self.env.current_time) - self._task_duration(task_id)
 
 
 class CPMRepairRule(RescheduleRuleScheduler):
@@ -364,9 +504,11 @@ class ReleaseAwareRepairRule(RescheduleRuleScheduler):
     method_name = "ReleaseAwareRepair"
 
     def task_priority(self, task_id: int) -> float:
-        release_time = float(self.env.task_material_ready[int(task_id)]) if hasattr(self.env, "task_material_ready") else 0.0
-        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
-        baseline_start = float(base.start if base is not None else task_id)
+        if self.use_static_cache and self.static_context is not None:
+            release_time = float(self.static_context.release_times[int(task_id)])
+        else:
+            release_time = float(self.env.task_material_ready[int(task_id)]) if hasattr(self.env, "task_material_ready") else 0.0
+        baseline_start = self._baseline_start(task_id)
         return release_time + 0.01 * baseline_start
 
 
@@ -374,9 +516,12 @@ class BottleneckSkillRepairRule(RescheduleRuleScheduler):
     method_name = "BottleneckSkillRepair"
 
     def task_priority(self, task_id: int) -> float:
-        skill = _skill_id(self.env, task_id)
-        supply = max(1.0, float(np.sum(_worker_skill_matrix_np(self.env)[:, skill] > 0.5)))
-        scarcity = float(_demand(self.env, task_id)) / supply
+        skill = self._task_skill(task_id)
+        if self.use_static_cache and self.static_context is not None and skill < len(self.static_context.capable_workers_by_skill):
+            supply = max(1.0, float(len(self.static_context.capable_workers_by_skill[skill])))
+        else:
+            supply = max(1.0, float(np.sum(_worker_skill_matrix_np(self.env)[:, skill] > 0.5)))
+        scarcity = float(self._task_demand(task_id)) / supply
         return -scarcity
 
 
@@ -387,7 +532,7 @@ class TaktAwareRepairRule(RescheduleRuleScheduler):
     balance_weight = 0.10
 
     def task_priority(self, task_id: int) -> float:
-        return -float(self.critical_tail[int(task_id)]) * 0.5 + _duration(self.env, task_id) * 0.5
+        return -float(self.critical_tail[int(task_id)]) * 0.5 + self._task_duration(task_id) * 0.5
 
 
 class StabilityAwareRepairRule(RescheduleRuleScheduler):
@@ -398,8 +543,7 @@ class StabilityAwareRepairRule(RescheduleRuleScheduler):
     baseline_team_preference = 0.0
 
     def task_priority(self, task_id: int) -> float:
-        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
-        return float(base.start if base is not None else task_id)
+        return self._baseline_start(task_id)
 
 
 class HybridCPMStabilityRepairRule(StabilityAwareRepairRule):
@@ -411,8 +555,7 @@ class HybridCPMStabilityRepairRule(StabilityAwareRepairRule):
     takt_weight = 0.50
 
     def task_priority(self, task_id: int) -> float:
-        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
-        baseline_start = float(base.start if base is not None else task_id)
+        baseline_start = self._baseline_start(task_id)
         return -float(self.critical_tail[int(task_id)]) + 0.01 * baseline_start
 
 
@@ -471,23 +614,34 @@ class PrioritySearchRepairRule(RescheduleRuleScheduler):
 
     def _seed_solution(self, kind: str, rng: np.random.RandomState) -> ReschedulePrioritySolution:
         solution = self._make_random_solution(rng)
-        durations = np.asarray([_duration(self.env, task_id) for task_id in range(self.env.num_tasks)], dtype=float)
-        releases = np.asarray(
-            [
-                float(self.env.task_material_ready[task_id]) if hasattr(self.env, "task_material_ready") else 0.0
-                for task_id in range(self.env.num_tasks)
-            ],
-            dtype=float,
-        )
-        baseline_starts = np.asarray(
-            [
-                float(self.env.baseline_schedule.tasks[task_id].start)
-                if self.env.baseline_schedule and task_id in self.env.baseline_schedule.tasks
-                else float(task_id)
-                for task_id in range(self.env.num_tasks)
-            ],
-            dtype=float,
-        )
+        if self.use_static_cache and self.static_context is not None:
+            durations = self.static_context.durations
+            releases = self.static_context.release_times
+            baseline_starts = np.asarray(
+                [
+                    self._baseline_start(task_id)
+                    for task_id in range(self.env.num_tasks)
+                ],
+                dtype=float,
+            )
+        else:
+            durations = np.asarray([_duration(self.env, task_id) for task_id in range(self.env.num_tasks)], dtype=float)
+            releases = np.asarray(
+                [
+                    float(self.env.task_material_ready[task_id]) if hasattr(self.env, "task_material_ready") else 0.0
+                    for task_id in range(self.env.num_tasks)
+                ],
+                dtype=float,
+            )
+            baseline_starts = np.asarray(
+                [
+                    float(self.env.baseline_schedule.tasks[task_id].start)
+                    if self.env.baseline_schedule and task_id in self.env.baseline_schedule.tasks
+                    else float(task_id)
+                    for task_id in range(self.env.num_tasks)
+                ],
+                dtype=float,
+            )
         critical = _normalize(self.critical_tail)
         short_first = 1.0 - _normalize(durations)
         long_first = _normalize(durations)
@@ -508,11 +662,11 @@ class PrioritySearchRepairRule(RescheduleRuleScheduler):
             solution.task_priority += rng.normal(0.0, 0.20, size=self.env.num_tasks)
 
         if self.env.baseline_schedule:
-            for task_id, base in self.env.baseline_schedule.tasks.items():
-                task_idx = int(task_id)
-                if 0 <= int(base.station_id) < self.env.num_stations:
-                    solution.station_priority[task_idx, int(base.station_id)] += 1.0
-                for worker_id in base.team:
+            for task_idx in range(self.env.num_tasks):
+                base_station = self._baseline_station(task_idx)
+                if 0 <= base_station < self.env.num_stations:
+                    solution.station_priority[task_idx, base_station] += 1.0
+                for worker_id in self._baseline_team(task_idx):
                     worker_idx = int(worker_id)
                     if 0 <= worker_idx < self.env.num_workers:
                         solution.worker_priority[task_idx, worker_idx] += 1.0
@@ -554,18 +708,21 @@ class PrioritySearchRepairRule(RescheduleRuleScheduler):
         rng: np.random.RandomState,
     ) -> ReschedulePrioritySolution:
         repaired = solution.clone()
-        movable = np.asarray(
-            [
-                task_id
-                for task_id in range(self.env.num_tasks)
-                if (
-                    not self.env.baseline_schedule
-                    or task_id not in self.env.baseline_schedule.tasks
-                    or self.env.baseline_schedule.tasks[task_id].start > self.scenario.start_time + 1e-9
-                )
-            ],
-            dtype=int,
-        )
+        if self.use_static_cache and self.static_context is not None:
+            movable = np.where(self.static_context.movable_mask)[0].astype(int)
+        else:
+            movable = np.asarray(
+                [
+                    task_id
+                    for task_id in range(self.env.num_tasks)
+                    if (
+                        not self.env.baseline_schedule
+                        or task_id not in self.env.baseline_schedule.tasks
+                        or self.env.baseline_schedule.tasks[task_id].start > self.scenario.start_time + 1e-9
+                    )
+                ],
+                dtype=int,
+            )
         if movable.size == 0:
             movable = np.arange(self.env.num_tasks, dtype=int)
         destroy_count = max(1, int(math.ceil(movable.size * self.ig_destroy_ratio)))
@@ -589,11 +746,10 @@ class PrioritySearchRepairRule(RescheduleRuleScheduler):
         solution: ReschedulePrioritySolution,
     ) -> list[int] | None:
         candidates = self._valid_workers(task_id, station_id, worker_mask)
-        demand = _demand(self.env, task_id)
+        demand = self._task_demand(task_id)
         if len(candidates) < demand:
             return None
-        base = self.env.baseline_schedule.tasks.get(int(task_id)) if self.env.baseline_schedule else None
-        base_team = set(int(w) for w in base.team) if base is not None else set()
+        base_team = self._baseline_team(task_id)
         candidates.sort(
             key=lambda worker_id: (
                 0.0 if int(worker_id) in base_team else self.baseline_team_preference,
@@ -614,7 +770,7 @@ class PrioritySearchRepairRule(RescheduleRuleScheduler):
     ) -> float:
         start_time, finish_time = self._estimate_action(task_id, station_id, team)
         baseline = self.env.baseline_schedule
-        base = baseline.tasks.get(int(task_id)) if baseline else None
+        has_base = self._has_baseline_task(task_id)
         takt = max(1e-6, float(baseline.makespan if baseline else max(1.0, self.env.ideal_makespan)))
         ideal_load = max(1.0, float(self.env.ideal_station_load))
         priority = float(solution.task_priority[int(task_id)])
@@ -625,13 +781,13 @@ class PrioritySearchRepairRule(RescheduleRuleScheduler):
         score -= 0.05 * worker_bias
         score += self.makespan_weight * (finish_time / takt)
         if station_id >= 0:
-            projected_load = float(self.env.station_loads[int(station_id)]) + _duration(self.env, task_id) * len(team)
+            projected_load = float(self.env.station_loads[int(station_id)]) + self._task_duration(task_id) * len(team)
             score += self.balance_weight * (projected_load / ideal_load)
         score += self.takt_weight * max(0.0, finish_time - takt) / takt
-        if base is not None:
-            score += self.start_stability_weight * abs(start_time - float(base.start)) / takt
-            score += self.station_stability_weight * float(int(station_id) != int(base.station_id))
-            base_team = set(int(w) for w in base.team)
+        if has_base:
+            score += self.start_stability_weight * abs(start_time - self._baseline_start(task_id)) / takt
+            score += self.station_stability_weight * float(int(station_id) != self._baseline_station(task_id))
+            base_team = self._baseline_team(task_id)
             overlap = len(base_team.intersection(set(int(w) for w in team)))
             denom = max(1, max(len(base_team), len(team)))
             score += self.team_stability_weight * (1.0 - overlap / denom)

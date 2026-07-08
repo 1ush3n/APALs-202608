@@ -7,8 +7,10 @@ from pathlib import Path
 import json
 
 import pandas as pd
+import pytest
 
 from configs import configs
+import scripts.evaluate_reschedule_rules as rule_eval_script
 from scripts.evaluate_reschedule_rules import evaluate_reschedule_rules, evaluate_reschedule_rules_manifest
 from tests.runtime_safety import temporary_config
 from tests.test_reschedule_task_delay import PROJECT_ROOT, _reschedule_overrides, _write_greedy_baseline
@@ -172,3 +174,101 @@ def test_reschedule_rule_manifest_eval_uses_manifest_paths(tmp_path: Path) -> No
     assert (output_dir / "real_283" / "reschedule_rule_eval.csv").exists()
     assert (output_dir / "reschedule_rule_eval_by_instance.csv").exists()
     assert (output_dir / "reschedule_rule_summary_by_instance_method.csv").exists()
+
+
+def test_reschedule_rule_eval_resumes_partial_jobs_after_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    baseline_path = tmp_path / "baseline.csv"
+    baseline_df = _write_greedy_baseline(baseline_path)
+    scenario_path = tmp_path / "scenario.csv"
+    _write_single_delay_scenario(baseline_df, scenario_path)
+    output_dir = tmp_path / "resume_eval"
+
+    real_evaluate_job = rule_eval_script._evaluate_rule_job
+    calls = {"count": 0}
+
+    def interrupt_after_first_job(job: dict) -> dict:
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise KeyboardInterrupt()
+        return real_evaluate_job(job)
+
+    overrides = _reschedule_overrides(baseline_path, scenario_path)
+    overrides.update({"enable_shadow_mask_verification": False})
+    with temporary_config(configs, overrides):
+        monkeypatch.setattr(rule_eval_script, "_evaluate_rule_job", interrupt_after_first_job)
+        with pytest.raises(KeyboardInterrupt):
+            evaluate_reschedule_rules(
+                data_path_or_dir=PROJECT_ROOT / "data" / "283.csv",
+                scenario_path=scenario_path,
+                baseline_path=baseline_path,
+                methods=["NoReschedule", "SPTRepair"],
+                num_runs=1,
+                seed=123,
+                output_dir=output_dir,
+                verbose=False,
+                parallel_workers=1,
+            )
+
+    partial_path = output_dir / "reschedule_rule_eval_partial.csv"
+    state_path = output_dir / "reschedule_rule_resume_state.json"
+    assert partial_path.exists()
+    assert state_path.exists()
+    assert json.loads(state_path.read_text(encoding="utf-8"))["status"] == "interrupted"
+    assert len(pd.read_csv(partial_path)) == 1
+
+    monkeypatch.setattr(rule_eval_script, "_evaluate_rule_job", real_evaluate_job)
+    with temporary_config(configs, overrides):
+        summary = evaluate_reschedule_rules(
+            data_path_or_dir=PROJECT_ROOT / "data" / "283.csv",
+            scenario_path=scenario_path,
+            baseline_path=baseline_path,
+            methods=["NoReschedule", "SPTRepair"],
+            num_runs=1,
+            seed=123,
+            output_dir=output_dir,
+            verbose=False,
+            parallel_workers=1,
+        )
+
+    rows = summary["rows"]
+    assert [row["method"] for row in rows] == ["NoReschedule", "SPTRepair"]
+    assert len(pd.read_csv(partial_path)) == 2
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["status"] == "complete"
+    assert state["completed_jobs"] == 2
+    assert state["pending_jobs"] == 0
+
+
+def test_reschedule_rule_eval_rejects_resume_with_different_signature(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline.csv"
+    baseline_df = _write_greedy_baseline(baseline_path)
+    scenario_path = tmp_path / "scenario.csv"
+    _write_single_delay_scenario(baseline_df, scenario_path)
+    output_dir = tmp_path / "signature_eval"
+
+    overrides = _reschedule_overrides(baseline_path, scenario_path)
+    overrides.update({"enable_shadow_mask_verification": False})
+    with temporary_config(configs, overrides):
+        evaluate_reschedule_rules(
+            data_path_or_dir=PROJECT_ROOT / "data" / "283.csv",
+            scenario_path=scenario_path,
+            baseline_path=baseline_path,
+            methods=["NoReschedule"],
+            num_runs=1,
+            seed=123,
+            output_dir=output_dir,
+            verbose=False,
+            parallel_workers=1,
+        )
+        with pytest.raises(RuntimeError, match="签名不一致"):
+            evaluate_reschedule_rules(
+                data_path_or_dir=PROJECT_ROOT / "data" / "283.csv",
+                scenario_path=scenario_path,
+                baseline_path=baseline_path,
+                methods=["SPTRepair"],
+                num_runs=1,
+                seed=123,
+                output_dir=output_dir,
+                verbose=False,
+                parallel_workers=1,
+            )

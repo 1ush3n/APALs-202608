@@ -21,9 +21,11 @@ from configs import (
 )
 from runtime.configuration import parse_set_overrides, resolve_runtime_config
 from runtime.hydra_config import (
+    ExtraArgument,
     HydraCliError,
     apply_hydra_config,
     compose_hydra_config,
+    initialize_hydra_runtime,
     parse_hydra_args,
 )
 from runtime.artifacts import (
@@ -269,6 +271,71 @@ def test_hydra_style_overrides_are_compatible_with_flat_config() -> None:
     assert cfg.runs_root == "tmp_runs"
     assert cfg.experiment_name == "hydra_compat"
     assert {"batch_size", "num_envs", "runs_root", "experiment_name"} <= explicit
+
+
+def test_initialize_runtime_cli_leaf_override_wins_nested_experiment_defaults() -> None:
+    cfg = Config()
+    args = initialize_hydra_runtime(
+        [
+            "experiment=scale_400_800_schedule",
+            "train.batch_size=64",
+            "train_data_path_or_dir=data/scale_400_800_datasets",
+        ],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        default_experiment="initial_schedule_283",
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.batch_size == 64
+    assert args.batch_size == 64
+    assert cfg.train_data_path_or_dir == "data/scale_400_800_datasets"
+
+
+def test_script_extra_arguments_do_not_enter_hydra_config() -> None:
+    parsed = parse_hydra_args(
+        [
+            "experiment=reschedule_task_delay",
+            "manifest_path=data/reschedule_manifests/reschedule_400_600_seed20260701.json",
+            "instance_ids=[real_283,real_680]",
+        ],
+        extra_arguments={
+            "manifest_path": ExtraArgument(default=None),
+            "instance_ids": ExtraArgument(default=None),
+        },
+        system_name="Linux",
+    )
+
+    assert "manifest_path" not in " ".join(parsed.config_overrides)
+    assert "instance_ids" not in " ".join(parsed.config_overrides)
+    assert parsed.extra_values["manifest_path"] == "data/reschedule_manifests/reschedule_400_600_seed20260701.json"
+    assert parsed.extra_values["instance_ids"] == ["real_283", "real_680"]
+
+
+def test_manifest_script_arguments_are_safe_if_misrouted_to_hydra() -> None:
+    parsed = parse_hydra_args(
+        [
+            "experiment=reschedule_task_delay",
+            "manifest_path=data/reschedule_manifests/reschedule_400_600_seed20260701.json",
+            "instance_ids=[real_283,real_680]",
+        ],
+        system_name="Linux",
+    )
+    cfg = Config()
+    hydra_cfg = compose_hydra_config(parsed, config_dir=PROJECT_ROOT / "conf")
+    explicit = apply_hydra_config(
+        hydra_cfg,
+        target=cfg,
+        config_paths=(
+            str(PROJECT_ROOT / "conf" / "experiment" / "reschedule_task_delay.yaml"),
+            str(PROJECT_ROOT / "conf" / "hardware" / "linux_server.yaml"),
+        ),
+    )
+
+    assert cfg.manifest_path == "data/reschedule_manifests/reschedule_400_600_seed20260701.json"
+    assert cfg.instance_ids == ["real_283", "real_680"]
+    assert {"manifest_path", "instance_ids"} <= explicit
 
 
 def test_hydra_style_override_rejects_unknown_fields() -> None:

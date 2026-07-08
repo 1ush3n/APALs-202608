@@ -4,6 +4,7 @@ import numpy as np
 import re
 import networkx as nx
 from pathlib import Path
+import os
 
 def load_data(file_path):
     """
@@ -233,7 +234,8 @@ def load_data(file_path):
     except nx.NetworkXNoCycle:
         pass # 图是 DAG，正常
     
-    print(f"[DataLoader] 已成功加载数据集：{len(df)} 个工序，{len(root_groups)} 个根节点，{len(tasks_in_sub)} 个子组，{len(edges)} 条边")
+    if os.environ.get("APAL_QUIET_DATALOADER", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        print(f"[DataLoader] 已成功加载数据集：{len(df)} 个工序，{len(root_groups)} 个根节点，{len(tasks_in_sub)} 个子组，{len(edges)} 条边")
     
     return {
         'task_df': df,

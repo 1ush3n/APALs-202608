@@ -1550,6 +1550,42 @@ class AirLineEnv_Graph(gym.Env):
         # 溯源：找到生成该快照时的底层骨架上下文，免疫维度错位崩溃
         ctx_idx = snapshot.get('dataset_idx', 0)
         ctx = self.dataset_pool[ctx_idx]
+        if "base_data" not in ctx:
+            active_idx = int(getattr(self, "active_dataset_idx", 0))
+            restore_fields = {
+                name: getattr(self, name)
+                for name in (
+                    "raw_data",
+                    "num_tasks",
+                    "base_data",
+                    "base_task_x",
+                    "base_worker_x",
+                    "base_station_x",
+                    "task_static_feat",
+                    "worker_skill_matrix",
+                    "predecessors",
+                    "successors",
+                    "num_preds",
+                    "fixed_stations",
+                    "mean_task_time",
+                    "ideal_station_load",
+                    "ideal_makespan",
+                    "total_base_workload",
+                    "base_durations",
+                    "max_allowed_stations",
+                    "is_critical",
+                    "full_worker_efficiency",
+                    "full_worker_skill_matrix",
+                    "worker_efficiency",
+                    "worker_static_feat",
+                    "_active_worker_topology_key",
+                )
+                if hasattr(self, name)
+            }
+            ctx = self._ensure_dataset_context(ctx_idx)
+            if ctx_idx != active_idx:
+                for name, value in restore_fields.items():
+                    setattr(self, name, value)
         
         data = ctx['base_data'].clone()
         

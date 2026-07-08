@@ -38,7 +38,58 @@ class APALRolloutService:
         self.num_envs = int(vector_env.num_envs)
         self.episodes_per_update = max(1, int(config.update_every_episodes))
         self._last_dataset_idx: int | None = None
+        self._last_effective_batch_size: int | None = None
         self._rng = np.random.RandomState(int(config.seed))
+
+    def _adaptive_batch_for_task_count(self, num_tasks: int) -> tuple[int | None, str]:
+        if not bool(getattr(self.config, "adaptive_ppo_batch_by_tasks", False)):
+            return None, "disabled"
+        n_tasks = int(num_tasks)
+        small_max = int(getattr(self.config, "adaptive_ppo_batch_small_task_max", 530))
+        large_min = int(getattr(self.config, "adaptive_ppo_batch_large_task_min", 550))
+        if n_tasks <= small_max:
+            return int(getattr(self.config, "adaptive_ppo_batch_small", 128)), f"tasks<={small_max}"
+        if n_tasks >= large_min:
+            return int(getattr(self.config, "adaptive_ppo_batch_large", 64)), f"tasks>={large_min}"
+        return int(getattr(self.config, "batch_size", 32)), f"{small_max}<tasks<{large_min}"
+
+    def _apply_adaptive_ppo_batch(self, dataset_idx: int) -> None:
+        target, reason = self._adaptive_batch_for_task_count(int(self.vector_env.envs[0].num_tasks))
+        if target is None:
+            return
+        cap = max(0, int(getattr(self.config, "ppo_batch_size_cap", 0)))
+        effective = min(int(target), cap) if cap > 0 else int(target)
+        old = int(getattr(self.agent, "batch_size", effective))
+        self.agent.batch_size = max(1, effective)
+        if self._last_effective_batch_size != self.agent.batch_size:
+            print(
+                f"[PPO Batch] dataset={dataset_idx} tasks={int(self.vector_env.envs[0].num_tasks)} "
+                f"batch_size {old}->{self.agent.batch_size} rule={reason}",
+                flush=True,
+            )
+            self._last_effective_batch_size = int(self.agent.batch_size)
+
+    def _try_wait_for_resources_indices(self, indices: list[int]) -> dict[int, bool]:
+        """兼容旧 VectorEnv：优先用索引批量接口，缺失时退回全量接口。"""
+        target_indices = [int(index) for index in indices]
+        if not target_indices:
+            return {}
+        indexed_wait = getattr(self.vector_env, "try_wait_for_resources_indices", None)
+        if callable(indexed_wait):
+            return indexed_wait(target_indices)
+        all_wait = self.vector_env.try_wait_for_resources_all()
+        return {index: bool(all_wait[index]) for index in target_indices}
+
+    def _get_rollout_state_indices(self, indices: list[int]):
+        """兼容旧 VectorEnv：优先只刷新等待环境，缺失时全量刷新后筛选。"""
+        target_indices = [int(index) for index in indices]
+        if not target_indices:
+            return {}
+        indexed_state = getattr(self.vector_env, "get_rollout_state_indices", None)
+        if callable(indexed_state):
+            return indexed_state(target_indices)
+        masks_list, snapshots = self.vector_env.get_masks_and_snapshots_all()
+        return {index: (masks_list[index], snapshots[index]) for index in target_indices}
 
     def _append_action(
         self,
@@ -115,9 +166,9 @@ class APALRolloutService:
 
                 waiting_indices = [idx for idx in active if masks_list[idx][0].all()]
                 stage_started = time.perf_counter()
-                wait_results = self.vector_env.try_wait_for_resources_indices(waiting_indices)
+                wait_results = self._try_wait_for_resources_indices(waiting_indices)
                 refreshed_indices = [idx for idx in waiting_indices if wait_results[idx]]
-                refreshed_states = self.vector_env.get_rollout_state_indices(refreshed_indices)
+                refreshed_states = self._get_rollout_state_indices(refreshed_indices)
                 ipc_seconds += time.perf_counter() - stage_started
 
                 for idx in waiting_indices:
@@ -260,6 +311,7 @@ class APALRolloutService:
         if dataset_idx != self._last_dataset_idx:
             self.vector_env.switch_dataset_all(dataset_idx)
             self._last_dataset_idx = dataset_idx
+        self._apply_adaptive_ppo_batch(dataset_idx)
 
         merged = Memory()
         metrics_list: list[RolloutMetrics] = []
