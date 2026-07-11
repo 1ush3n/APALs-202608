@@ -6,7 +6,11 @@ import torch
 from torch_geometric.data import HeteroData
 
 from baselines.evaluate_flat_rl_baseline import _load_checkpoint
-from baselines.graph_baseline import GraphBaselineActorCritic, select_graph_action
+from baselines.graph_baseline import (
+    GraphBaselineActorCritic,
+    select_graph_action,
+    select_graph_actions_batch,
+)
 from configs import Config
 
 
@@ -87,6 +91,45 @@ def test_select_graph_action_uses_masks_and_variable_workers() -> None:
     assert task_idx != 0
     assert 0 <= station_idx < 2
     assert len(team) == 1
+
+
+def test_batched_graph_action_matches_serial_for_variable_graphs() -> None:
+    torch.manual_seed(42)
+    model = GraphBaselineActorCritic(_make_config())
+    model.eval()
+    graphs = [_graph(3, num_workers=4), _graph(5, num_workers=6)]
+    masks = [
+        (
+            torch.tensor([True, False, False]),
+            torch.zeros(3, 2, dtype=torch.bool),
+            torch.zeros(4, dtype=torch.bool),
+        ),
+        (
+            torch.tensor([False, True, False, False, False]),
+            torch.zeros(5, 2, dtype=torch.bool),
+            torch.zeros(6, dtype=torch.bool),
+        ),
+    ]
+
+    serial = [
+        select_graph_action(
+            model,
+            graph,
+            masks=graph_masks,
+            device=torch.device("cpu"),
+            deterministic=True,
+        )
+        for graph, graph_masks in zip(graphs, masks)
+    ]
+    batched = select_graph_actions_batch(
+        model,
+        graphs,
+        masks_list=masks,
+        device=torch.device("cpu"),
+        deterministic=True,
+    )
+
+    assert [result.action for result in batched] == [result.action for result in serial]
 
 
 def test_old_flat_checkpoint_is_rejected(tmp_path: Path) -> None:

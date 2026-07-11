@@ -733,6 +733,26 @@ python baselines/literature_dqn/train_graph_ddqn_apal.py \
   output_dir=results/graph_ddqn_apal_680
 ```
 
+DDQN 默认启用批量 replay：当前状态只执行一次批量图编码，next state 由 online network 批量选动作，再复用同一批图给 target network 估值。更新频率统一由 `ddqn_updates_per_transition` 控制，默认 `0.125`，即平均每 8 条新 transition 执行一次更新。`training_metrics.csv` 会记录 `effective_utd`、replay 各阶段耗时和 OOM 跳过次数；正式实验不建议设置 `max_replay_updates_per_episode`，否则会截断实际 UTD。
+
+向量化 rollout 默认关闭，避免未经目标服务器基准验证就改变训练吞吐。Linux 服务器可显式启用 8 个环境；`max_episodes` 仍表示完成的轨迹总数，而不是并行轮数：
+
+```bash
+python baselines/literature_dqn/train_graph_ddqn_apal.py \
+  experiment=scale_400_800_schedule \
+  train_data_path_or_dir=data/scale_400_800_datasets \
+  data_file_path=data/680.csv \
+  max_episodes=300 \
+  train.batch_size=64 \
+  ddqn_updates_per_transition=0.125 \
+  ddqn_enable_vector_env=true \
+  ddqn_num_envs=8 \
+  seed=42 \
+  output_dir=results/graph_ddqn_apal_680
+```
+
+GPU 双模板 batch 重建是独立实验开关，默认关闭。只有完成同设备、同数据、同 transition 的等价性和显存基准后，才建议追加 `ddqn_enable_gpu_batch_rebuild=true`。该优化异常时会自动退回 CPU 构图，不会更改 batch size。
+
 统一离线评估入口会根据 checkpoint 自动识别算法类型：
 
 ```bash
@@ -781,7 +801,30 @@ python baselines/literature_ppo/train_l2d_ppo_apal.py \
   resume=true
 ```
 
-DDQN 恢复时会加载模型、target network、optimizer、AMP scaler、epsilon、best makespan 和 episode；replay buffer 不写入 checkpoint，恢复后会重新预热，避免 checkpoint 过大。
+DDQN 默认启用精确恢复。除轻量的 best/latest/final checkpoint 外，还会生成：
+
+```text
+<output_dir>/graph_ddqn_apal_exact_resume.pth
+<output_dir>/graph_ddqn_apal_exact_resume.replay.pt.gz
+<output_dir>/graph_ddqn_apal_exact_resume.json
+```
+
+使用相同 `output_dir` 并传入 `resume=true` 时，会校验 SHA256 后恢复模型、target network、optimizer、AMP scaler、epsilon、replay buffer、UTD credit 和全部随机数状态。若精确恢复文件不存在，则兼容回退到 `graph_ddqn_apal_latest.pth`，此时 replay buffer 会重新预热。
+
+DDQN replay 性能基准使用固定 transition，并对串行旧路径和批量新路径做交替配对测试：
+
+```bash
+python scripts/benchmark_graph_ddqn_replay.py \
+  experiment=scale_400_800_schedule \
+  train.batch_size=64 \
+  benchmark_data_path=data/680.csv \
+  benchmark_transitions=320 \
+  benchmark_updates=50 \
+  benchmark_repeats=5 \
+  output_dir=results/05_efficiency_and_logs/ddqn_performance_optimization/linux_680_batch64
+```
+
+基准会保存逐次运行 CSV 和 JSON 汇总。正式采用优化前，应同时检查 loss 等价性、更新吞吐、峰值显存和端到端 episode 耗时；不能只比较 GPU 利用率。
 
 ### HB-GAT-PN 消融实验
 

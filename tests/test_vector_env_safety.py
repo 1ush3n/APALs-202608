@@ -220,3 +220,46 @@ def test_vector_env_step_snapshot_rebuild_shapes_low_memory() -> None:
         finally:
             if vec_env is not None:
                 vec_env.close()
+
+
+def test_vector_env_indexed_reset_step_and_switch() -> None:
+    seed_everything(45)
+    overrides = {
+        "n_w": 40,
+        "n_m": 5,
+        "randomize_durations": False,
+        "enable_dynamic_events": False,
+        "enable_station_breakdown": False,
+        "enable_material_delay": False,
+    }
+    vec_env = None
+    with temporary_config(configs, overrides):
+        make_env = EnvCreator(str(PROJECT_ROOT / "data" / "283.csv"), seed_offset=500)
+        vec_env = VectorEnv(make_env, num_envs=2)
+        try:
+            vec_env.switch_dataset_indices({0: 0, 1: 0})
+            observations = vec_env.reset_indices(
+                {
+                    0: {"randomize_duration": False, "randomize_workers": False, "seed": 1001},
+                    1: {"randomize_duration": False, "randomize_workers": False, "seed": 1002},
+                }
+            )
+            rollout_states = vec_env.get_rollout_state_indices([0, 1])
+            actions = _pick_simple_actions(
+                [observations[0], observations[1]],
+                [rollout_states[0][0], rollout_states[1][0]],
+            )
+            action_map = {index: action for index, action in enumerate(actions) if action is not None}
+            results = vec_env.step_snapshot_indices(action_map)
+
+            assert set(results) == set(action_map)
+            for index, (snapshot, reward, done, info) in results.items():
+                assert snapshot["dataset_idx"] == 0
+                assert isinstance(reward, float)
+                assert isinstance(done, bool)
+                assert isinstance(info, dict)
+                rebuilt = vec_env.envs[index].rebuild_state_from_snapshot(snapshot)
+                assert rebuilt["task"].x.shape[0] == vec_env.envs[index].num_tasks
+        finally:
+            if vec_env is not None:
+                vec_env.close()

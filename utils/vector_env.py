@@ -652,6 +652,25 @@ class VectorEnv:
             results.append(obs)
         return results
 
+    def reset_indices(
+        self,
+        requests: dict[int, dict[str, Any]],
+    ) -> dict[int, Any]:
+        """按索引复位环境；每个环境可使用独立 seed。"""
+        target_indices = sorted(int(index) for index in requests)
+        if not target_indices:
+            return {}
+        for index in target_indices:
+            self.parent_conns[index].send(("reset", dict(requests[index])))
+        worker_results = self._recv_workers_unordered(target_indices, "reset")
+        results: dict[int, Any] = {}
+        for index in target_indices:
+            obs, dynamic_info = worker_results[index]
+            self.envs[index].update_dynamic_properties(dynamic_info)
+            self.envs[index].update_static_properties(dynamic_info)
+            results[index] = obs
+        return results
+
     def step_all(self, actions: List[Any]) -> Tuple[List[Any], List[float], List[bool], List[dict]]:
         """异步发送物理步进指令并收集步进后的全部观测及奖励数据"""
         for i in range(self.num_envs):
@@ -689,6 +708,25 @@ class VectorEnv:
         dones = [r[2] for r in results]
         infos = [r[3] for r in results]
         return snapshots, rewards, dones, infos
+
+    def step_snapshot_indices(
+        self,
+        actions: dict[int, Any],
+    ) -> dict[int, tuple[dict, float, bool, dict]]:
+        """只步进指定环境，返回值按环境索引组织。"""
+        target_indices = sorted(int(index) for index in actions)
+        if not target_indices:
+            return {}
+        for index in target_indices:
+            self.parent_conns[index].send(("step_snapshot", actions[index]))
+        worker_results = self._recv_workers_unordered(target_indices, "step_snapshot")
+        results: dict[int, tuple[dict, float, bool, dict]] = {}
+        for index in target_indices:
+            snapshot, reward, done, info = worker_results[index]
+            if "dynamic_info" in info:
+                self.envs[index].update_dynamic_properties(info.pop("dynamic_info"))
+            results[index] = (snapshot, float(reward), bool(done), info)
+        return results
 
     def get_masks_all(self) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """异步收集各进程环境的动作空间掩码"""
@@ -768,6 +806,24 @@ class VectorEnv:
             val = worker_results[i]
             self.envs[i].update_static_properties(val)
             self.envs[i].update_dynamic_properties(val)
+
+    def switch_dataset_indices(self, dataset_indices: dict[int, int]) -> None:
+        """按环境索引切换不同数据集，支持多规模并行 rollout。"""
+        target_indices = sorted(int(index) for index in dataset_indices)
+        if not target_indices:
+            return
+        for index in target_indices:
+            self.parent_conns[index].send(
+                ("switch_dataset", int(dataset_indices[index]))
+            )
+        worker_results = self._recv_workers_unordered(
+            target_indices,
+            "switch_dataset",
+        )
+        for index in target_indices:
+            value = worker_results[index]
+            self.envs[index].update_static_properties(value)
+            self.envs[index].update_dynamic_properties(value)
 
     def close(self):
         if self.closed:
