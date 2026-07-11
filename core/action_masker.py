@@ -91,9 +91,9 @@ class ActionMasker:
         min_stations_np = np.zeros(len(ready_indices), dtype=int)
         ready_indices_cpu = ready_indices.cpu().numpy()
         for idx, t in enumerate(ready_indices_cpu):
-            preds = env.predecessors[t]
-            if len(preds) > 0:
-                min_stations_np[idx] = max([env.task_station_map.get(p, -1) for p in preds], default=0)
+            min_stations_np[idx] = env.constraint_engine.minimum_station(
+                int(t), env.task_station_map
+            )
         min_stations = torch.from_numpy(min_stations_np).to(device=t_device, dtype=torch.long)
         
         fixed = torch.from_numpy(env.fixed_stations[ready_indices_cpu]).to(device=t_device, dtype=torch.long)
@@ -102,7 +102,11 @@ class ActionMasker:
         # 2. 产生站位合法区间掩码: [len(ready_indices), num_stations]
         stations = torch.arange(env.num_stations, device=t_device)[None, :]
         in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed[:, None])
-        in_range_fixed = (stations == fixed[:, None])
+        in_range_fixed = (
+            (stations == fixed[:, None])
+            & (stations >= min_stations[:, None])
+            & (stations <= max_allowed[:, None])
+        )
         station_in_range = torch.where(fixed[:, None] != -1, in_range_fixed, in_range_normal)
         
         # 3. 判定工位槽位容量可用性: [num_stations]
@@ -178,9 +182,9 @@ class ActionMasker:
         # 1. 向量化计算前驱任务所能赋予的最小站位 min_stations
         min_stations = np.zeros(len(ready_indices), dtype=int)
         for idx, t in enumerate(ready_indices):
-            preds = env.predecessors[t]
-            if len(preds) > 0:
-                min_stations[idx] = max([env.task_station_map.get(p, -1) for p in preds], default=0)
+            min_stations[idx] = env.constraint_engine.minimum_station(
+                int(t), env.task_station_map
+            )
                 
         fixed = env.fixed_stations[ready_indices]
         max_allowed = env.max_allowed_stations[ready_indices]
@@ -188,7 +192,11 @@ class ActionMasker:
         # 2. 产生站位合法区间掩码: [len(ready_indices), num_stations]
         stations = np.arange(env.num_stations)[None, :]
         in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed[:, None])
-        in_range_fixed = (stations == fixed[:, None])
+        in_range_fixed = (
+            (stations == fixed[:, None])
+            & (stations >= min_stations[:, None])
+            & (stations <= max_allowed[:, None])
+        )
         station_in_range = np.where(fixed[:, None] != -1, in_range_fixed, in_range_normal)
         
         # 3. 判定工位槽位容量可用性: [num_stations]
@@ -247,11 +255,9 @@ class ActionMasker:
             if hasattr(env, 'task_material_ready') and env.task_material_ready[t] > env.current_time + 1e-5:
                 continue
 
-            min_station = 0
-            for p in env.predecessors[t]:
-                p_s = env.task_station_map.get(p, -1)
-                if p_s != -1:
-                    min_station = max(min_station, p_s)
+            min_station = env.constraint_engine.minimum_station(
+                int(t), env.task_station_map
+            )
             
             fixed = env.fixed_stations[t]
             req_skill = int(env.task_static_feat[t, 1].item())
@@ -259,7 +265,13 @@ class ActionMasker:
             
             valid_stations = False
             max_station = env.max_allowed_stations[t]
-            station_range = [fixed] if fixed != -1 else list(range(min_station, min(env.num_stations, max_station + 1)))
+            station_range = (
+                [fixed]
+                if fixed != -1 and min_station <= fixed <= max_station
+                else []
+                if fixed != -1
+                else list(range(min_station, min(env.num_stations, max_station + 1)))
+            )
             has_skill = free_skills[:, req_skill] > 0.5
             
             for s in station_range:

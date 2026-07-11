@@ -121,6 +121,8 @@ def validate_schedule(
         "precedence_violation_count": 0,
         "station_range_violation_count": 0,
         "fixed_station_violation_count": 0,
+        "physical_station_violation_count": 0,
+        "worker_station_binding_violation_count": 0,
         "demand_violation_count": 0,
         "worker_range_violation_count": 0,
         "skill_violation_count": 0,
@@ -135,6 +137,8 @@ def validate_schedule(
         "skill": [],
         "worker_overlap": [],
         "station_slot": [],
+        "physical_station": [],
+        "worker_station_binding": [],
     }
 
     operation_ids = set(int(value) for value in task_df["internal_id"].tolist())
@@ -154,6 +158,7 @@ def validate_schedule(
     ratios: list[float] = []
     real_task_count = 0
     scheduled_real_task_count = 0
+    assignments: list[tuple[int, int, list[int], float, float]] = []
 
     for row_idx, row in schedule.iterrows():
         mapped_value = mapped_ids.iloc[row_idx]
@@ -202,6 +207,8 @@ def validate_schedule(
             violations["station_range_violation_count"] += 1
 
         team = _parse_team(row["Team"])
+        station_internal = station_csv - 1 if station_csv > 0 else -1
+        assignments.append((task_id, station_internal, team, start, end))
         demand = int(task["demand_workers"])
         if is_real:
             expected_env_duration = float(env.calculate_duration(task_id, team, start_time_est=start))
@@ -302,6 +309,11 @@ def validate_schedule(
                         }
                     )
                 break
+
+    central_report = env.validate_assignments(assignments)
+    for key, value in central_report.violations.items():
+        if key in violations:
+            violations[key] = int(value)
 
     hard_without_duration = {
         key: value for key, value in violations.items() if key != "task_duration_mismatch_count"

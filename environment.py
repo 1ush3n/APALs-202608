@@ -8,13 +8,14 @@ import os
 import pandas as pd
 import heapq
 from collections import OrderedDict
-from typing import Tuple, List, Dict, Optional, Any
+from typing import Tuple, List, Dict, Optional, Any, Iterable
 from pathlib import Path
 
 from data_loader import load_data
 from configs import configs
 from core.event_engine import Event, EventType, EventQueue
 from core.action_masker import ActionMasker
+from core.constraints import Assignment, ConstraintEngine, ScheduleValidationReport
 from utils.resource_graph import (
     SkillHubTopology,
     apply_resource_graph,
@@ -186,6 +187,7 @@ class AirLineEnv_Graph(gym.Env):
         self.total_base_workload = ctx['total_base_workload']
         self.base_durations = ctx['base_durations']
         self.max_allowed_stations = ctx['max_allowed_stations']
+        self.constraint_engine = ctx['constraint_engine']
         self.is_critical = ctx['is_critical']
         self.baseline_schedule = None
         self.reschedule_scenario = None
@@ -280,9 +282,22 @@ class AirLineEnv_Graph(gym.Env):
                     pass
                 if 0 <= s_idx < self.num_stations:
                     self.fixed_stations[idx] = s_idx
+
+        edge_array = self.raw_data['precedence_edges'].detach().cpu().numpy()
+        self.constraint_engine = ConstraintEngine.build(
+            num_tasks=self.num_tasks,
+            num_stations=self.num_stations,
+            edges=edge_array,
+            durations=self.raw_data['task_df']['duration'].to_numpy(dtype=float),
+            fixed_stations=self.fixed_stations,
+        )
+        self.fixed_stations = self.constraint_engine.fixed_stations.copy()
                     
         # 复用原有的庞大初始化逻辑
         self.init_hetero_data()
+        self.constraint_engine = self.constraint_engine.with_max_allowed_stations(
+            self.max_allowed_stations
+        )
         
         # 将生成的张量打包进 ctx
         ctx['base_data'] = self.base_data
@@ -301,6 +316,7 @@ class AirLineEnv_Graph(gym.Env):
         ctx['total_base_workload'] = self.total_base_workload
         ctx['base_durations'] = self.base_durations
         ctx['max_allowed_stations'] = self.max_allowed_stations
+        ctx['constraint_engine'] = self.constraint_engine
         ctx['is_critical'] = self.is_critical
         ctx['task_skill_edge_index'] = build_task_skill_edges(
             self.base_task_x,
@@ -367,6 +383,23 @@ class AirLineEnv_Graph(gym.Env):
 
     def _apply_reschedule_scenario(self) -> None:
         baseline = self._ensure_baseline_schedule()
+        baseline_report = self.validate_assignments(
+            (
+                task.task_id,
+                task.station_id,
+                task.team,
+                task.start,
+                task.end,
+            )
+            for task in baseline.tasks.values()
+        )
+        if not baseline_report.is_legal:
+            nonzero = {
+                key: value
+                for key, value in baseline_report.violations.items()
+                if int(value) > 0
+            }
+            raise ValueError(f"重调度基线排程违反硬约束: {nonzero}")
         scenario = self._build_reschedule_scenario(baseline)
         self.reschedule_scenario = scenario
         self.reschedule_start_time = float(scenario.start_time)
@@ -1017,14 +1050,29 @@ class AirLineEnv_Graph(gym.Env):
 
         duration_raw = float(self.task_static_feat[task_id, 0].item())
         if duration_raw <= 1e-5:
+            if station_id != -1 or team:
+                return {
+                    'reason': 'virtual_task_requires_no_resources',
+                    'task_id': task_id,
+                    'station_id': station_id,
+                    'team': team,
+                }
             return None
-        if station_id < 0:
-            return {'reason': 'positive_duration_task_requires_station', 'task_id': task_id, 'station_id': station_id}
+
+        station_invalid = self.constraint_engine.station_violation(
+            task_id,
+            station_id,
+            self.task_station_map,
+        )
+        if station_invalid is not None:
+            return station_invalid
 
         team = [int(w) for w in team]
         demand = max(1, int(self.task_static_feat[task_id, 2].item()))
         if len(team) < demand:
             return {'reason': 'insufficient_workers', 'task_id': task_id, 'required': demand, 'actual': len(team)}
+        if len(team) > demand:
+            return {'reason': 'excess_workers', 'task_id': task_id, 'required': demand, 'actual': len(team)}
         if len(team) != len(set(team)):
             return {'reason': 'duplicate_workers', 'task_id': task_id, 'team': team}
 
@@ -1044,6 +1092,19 @@ class AirLineEnv_Graph(gym.Env):
                 }
         return None
 
+    def validate_assignments(
+        self,
+        assignments: Iterable[Assignment],
+    ) -> ScheduleValidationReport:
+        """使用统一约束引擎校验完整的环境内部排程。"""
+        return self.constraint_engine.validate_schedule(
+            assignments,
+            demands=self.task_static_feat[:, 2].detach().cpu().numpy(),
+            required_skills=self.task_static_feat[:, 1].detach().cpu().numpy(),
+            worker_skill_matrix=self.worker_skill_matrix.detach().cpu().numpy(),
+            max_slots_per_station=int(getattr(configs, 'max_slots_per_station', 3)),
+        )
+
     def step(self, action: Action) -> Tuple[HeteroData, float, bool, Dict[str, Any]]:
         """
         执行一步动作。
@@ -1054,9 +1115,32 @@ class AirLineEnv_Graph(gym.Env):
         station_id = int(station_id)
         team = [int(w) for w in team]
 
+        # 虚拟层级节点不占用站位和工人；兼容旧调用方传入的占位动作。
+        if 0 <= task_id < self.num_tasks and not self.constraint_engine.physical_mask[task_id]:
+            station_id = -1
+            team = []
+
         invalid = self._validate_worker_team(task_id, station_id, team)
         if invalid is not None:
             return self._reject_invalid_action(invalid['reason'], invalid)
+
+        if not self.constraint_engine.physical_mask[task_id]:
+            finish_time = float(self.current_time)
+            self.task_status[task_id] = 2
+            self.task_end_times[task_id] = finish_time
+            self.task_station_map[task_id] = -1
+            self.assigned_tasks.append((task_id, -1, [], finish_time, finish_time))
+            self.event_queue.push(
+                Event(
+                    finish_time,
+                    EventType.TASK_FINISH,
+                    {'task_id': task_id, 'worker_ids': [], 'station_id': -1},
+                )
+            )
+            self._advance_time()
+            done = len(self.assigned_tasks) == self.num_tasks
+            observation = None if getattr(self, 'skip_obs_building', False) else self._get_observation()
+            return observation, 0.0, done, {'virtual_task': True}
         
         # 记录执行前的 makespan 与平衡差 (Telescoping Sum Calculation Base)
         # 变更为具备下界预测能力的 Cmax_est
@@ -1567,6 +1651,7 @@ class AirLineEnv_Graph(gym.Env):
                     "successors",
                     "num_preds",
                     "fixed_stations",
+                    "constraint_engine",
                     "mean_task_time",
                     "ideal_station_load",
                     "ideal_makespan",

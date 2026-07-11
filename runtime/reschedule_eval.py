@@ -160,6 +160,10 @@ def _compute_reschedule_constraint_metrics(env) -> dict[str, float]:
         "station_slot_violation_count": 0.0,
         "skill_violation_count": 0.0,
         "demand_violation_count": 0.0,
+        "fixed_station_violation_count": 0.0,
+        "station_range_violation_count": 0.0,
+        "physical_station_violation_count": 0.0,
+        "worker_station_binding_violation_count": 0.0,
         "duplicate_task_count": 0.0,
         "missing_task_count": 0.0,
         "takt_h": 0.0,
@@ -251,6 +255,24 @@ def _compute_reschedule_constraint_metrics(env) -> dict[str, float]:
             if active > max_slots:
                 metrics["station_slot_violation_count"] += 1.0
                 break
+
+    # 统一约束引擎是排程合法性的权威来源；上面的专项统计保留用于兼容旧日志。
+    central_report = env.validate_assignments(env.assigned_tasks)
+    central = central_report.violations
+    for key in (
+        "precedence_violation_count",
+        "worker_overlap_violation_count",
+        "station_slot_violation_count",
+        "skill_violation_count",
+        "demand_violation_count",
+        "fixed_station_violation_count",
+        "station_range_violation_count",
+        "physical_station_violation_count",
+        "worker_station_binding_violation_count",
+        "duplicate_task_count",
+        "missing_task_count",
+    ):
+        metrics[key] = float(central[key])
 
     return metrics
 
@@ -398,6 +420,10 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
         "station_slot_violation_count",
         "skill_violation_count",
         "demand_violation_count",
+        "fixed_station_violation_count",
+        "station_range_violation_count",
+        "physical_station_violation_count",
+        "worker_station_binding_violation_count",
         "duplicate_task_count",
         "missing_task_count",
         "invalid_step_count",

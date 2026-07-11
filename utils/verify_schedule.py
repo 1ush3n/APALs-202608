@@ -305,11 +305,36 @@ def verify_schedule(data_path, schedule_path):
          all_passed = False
 
 
+    assignments = [
+        (
+            int(info['task_id']),
+            int(info['sid']),
+            list(info['team']),
+            float(info['start']),
+            float(info['end']),
+        )
+        for info in scheduled_tasks.values()
+    ]
+    central_report = env.validate_assignments(assignments)
+    central_violations = {
+        key: value
+        for key, value in central_report.violations.items()
+        if int(value) > 0
+    }
+    if central_violations:
+        print(f"{bcolors.FAIL}[统一硬约束校验失败] {central_violations}{bcolors.ENDC}")
+        all_passed = False
+    else:
+        print(f"{bcolors.OKGREEN}[PASS] [统一 APAL 硬约束校验]{bcolors.ENDC}")
+
     print(f"\n==============================================")
     if all_passed:
          print(f"{bcolors.OKGREEN}{bcolors.BOLD}[最终判定] 本调度表 100% 合法，完美无瑕！{bcolors.ENDC}")
     else:
          print(f"{bcolors.FAIL}{bcolors.BOLD}[最终判定] 发现黑幕调度！请查看上报的各类 Error 判定。{bcolors.ENDC}")
+
+    return all_passed
+
 
 if __name__ == "__main__":
     if should_show_help(sys.argv[1:]):
