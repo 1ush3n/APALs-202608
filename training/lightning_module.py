@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import lightning.pytorch as pl
@@ -21,9 +21,10 @@ class RolloutMetrics:
     forward_ms: float
     rebuild_ms: float
     environment_step_ms: float
+    extra_metrics: dict[str, float] = field(default_factory=dict)
 
     def as_log_dict(self) -> dict[str, float]:
-        return {
+        metrics = {
             "Rollout/AverageReward": self.average_reward,
             "Rollout/AverageMakespan": self.average_makespan,
             "Rollout/CompletionRate": self.completion_rate,
@@ -35,6 +36,8 @@ class RolloutMetrics:
             "Rollout/RebuildMs": self.rebuild_ms,
             "Rollout/EnvironmentStepMs": self.environment_step_ms,
         }
+        metrics.update(self.extra_metrics)
+        return metrics
 
 
 @dataclass(frozen=True)

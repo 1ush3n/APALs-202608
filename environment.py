@@ -16,6 +16,7 @@ from configs import configs
 from core.event_engine import Event, EventType, EventQueue
 from core.action_masker import ActionMasker
 from core.constraints import Assignment, ConstraintEngine, ScheduleValidationReport
+from core.time_comparison import release_time_tolerance, time_reached_scalar
 from utils.resource_graph import (
     SkillHubTopology,
     apply_resource_graph,
@@ -27,6 +28,7 @@ from utils.resource_graph import (
 from utils.reschedule import (
     BaselineSchedule,
     RescheduleScenario,
+    calculate_reschedule_objective_terms,
     calculate_reschedule_lower_bound,
     calculate_stability_metrics,
     load_baseline_schedule,
@@ -1038,7 +1040,14 @@ class AirLineEnv_Graph(gym.Env):
             return {'reason': 'invalid_task_id', 'task_id': task_id}
         if self.task_status[task_id] != 1:
             return {'reason': 'task_not_ready_or_already_fixed', 'task_id': task_id, 'status': int(self.task_status[task_id])}
-        if hasattr(self, 'task_material_ready') and self.task_material_ready[task_id] > self.current_time + 1e-9:
+        if (
+            hasattr(self, 'task_material_ready')
+            and not time_reached_scalar(
+                self.task_material_ready[task_id],
+                self.current_time,
+                release_time_tolerance(configs),
+            )
+        ):
             return {
                 'reason': 'task_release_time_not_reached',
                 'task_id': task_id,
@@ -1105,6 +1114,32 @@ class AirLineEnv_Graph(gym.Env):
             max_slots_per_station=int(getattr(configs, 'max_slots_per_station', 3)),
         )
 
+    def _reschedule_objective_terms(
+        self,
+        *,
+        makespan: float,
+        balance_std: float,
+    ) -> dict[str, float]:
+        """计算当前部分排程的统一归一化目标，不使用任何未来动作信息。"""
+        if self.baseline_schedule is None:
+            raise RuntimeError("重调度目标需要 baseline schedule")
+        stability = calculate_stability_metrics(
+            self.baseline_schedule,
+            self.assigned_tasks,
+            current_time=float(self.reschedule_start_time),
+        )
+        return calculate_reschedule_objective_terms(
+            makespan=float(makespan),
+            balance_std=float(balance_std),
+            takt_h=float(self.baseline_schedule.makespan),
+            takt_violation_h=None,
+            start_deviation_mean_h=float(stability["start_deviation_mean_h"]),
+            station_change_rate=float(stability["station_change_rate"]),
+            team_change_rate=float(stability["team_change_rate"]),
+            config_obj=configs,
+            ideal_station_load=float(self.ideal_station_load),
+        )
+
     def step(self, action: Action) -> Tuple[HeteroData, float, bool, Dict[str, Any]]:
         """
         执行一步动作。
@@ -1146,6 +1181,19 @@ class AirLineEnv_Graph(gym.Env):
         # 变更为具备下界预测能力的 Cmax_est
         prev_makespan = self._get_estimated_cmax()
         prev_std = np.std(self.station_loads)
+        dense_objective_enabled = bool(
+            getattr(configs, "enable_reschedule_mode", False)
+            and self.baseline_schedule is not None
+            and getattr(configs, "reschedule_use_objective_delta_reward", False)
+        )
+        prev_objective_terms = (
+            self._reschedule_objective_terms(
+                makespan=float(prev_makespan),
+                balance_std=float(prev_std),
+            )
+            if dense_objective_enabled
+            else None
+        )
         
         # [Dynamic Events] 尝试注入工时扰动
         self._try_inject_online_duration_perturb()
@@ -1253,7 +1301,28 @@ class AirLineEnv_Graph(gym.Env):
         use_cpm = getattr(configs, 'enable_cpm_reward', True)
         is_task_critical = (self.is_critical[task_id] if (hasattr(self, 'is_critical') and self.is_critical is not None) else False) and use_cpm
         
-        if getattr(configs, 'use_dense_progress_reward', False):
+        dense_term_deltas: dict[str, float] = {}
+        curr_objective_terms: dict[str, float] | None = None
+        dense_unclipped_reward = 0.0
+        dense_reward_clipped = False
+        if dense_objective_enabled:
+            assert prev_objective_terms is not None
+            curr_objective_terms = self._reschedule_objective_terms(
+                makespan=float(curr_makespan),
+                balance_std=float(curr_std),
+            )
+            dense_term_deltas = {
+                key: float(curr_objective_terms[key] - prev_objective_terms[key])
+                for key in curr_objective_terms
+            }
+            multiplier = float(getattr(configs, "reschedule_objective_delta_multiplier", 100.0))
+            reward = -multiplier * float(sum(dense_term_deltas.values()))
+            dense_unclipped_reward = float(reward)
+            clip_limit = float(getattr(configs, "reschedule_objective_delta_clip", 50.0))
+            if clip_limit > 0.0:
+                reward = float(np.clip(reward, -clip_limit, clip_limit))
+                dense_reward_clipped = not np.isclose(reward, dense_unclipped_reward)
+        elif getattr(configs, 'use_dense_progress_reward', False):
             delta_progress = 1.0 / self.num_tasks
             progress_multiplier = 2.0 if is_task_critical else 1.0
             norm_delta_progress = delta_progress * 100.0 * progress_multiplier
@@ -1262,9 +1331,10 @@ class AirLineEnv_Graph(gym.Env):
         else:
             critical_bonus = 0.5 if is_task_critical else 0.0
             reward = base_penalty + critical_bonus
-        
-        # 单步奖励硬截断，防止梯度极值爆炸
-        reward = np.clip(reward, -50.0, 50.0)
+
+        # 旧奖励沿用固定截断；统一目标差分使用自己的可配置截断。
+        if not dense_objective_enabled:
+            reward = np.clip(reward, -50.0, 50.0)
         
         # 全局奖励缩放乘数：把原始的巨大的 makespan 分差在底层压缩至 [-5, 5] 的健康小区间
         reward = reward * configs.reward_scale
@@ -1287,7 +1357,8 @@ class AirLineEnv_Graph(gym.Env):
             takt_violation = max(0.0, final_makespan - takt)
             takt_pen = float(getattr(configs, "reschedule_takt_violation_weight", 1.0)) * (takt_violation / takt)
             stability_penalty = feasible_scale * (start_pen + station_pen + team_pen)
-            reward -= float((takt_pen + stability_penalty) * configs.reward_scale * 100.0)
+            if not dense_objective_enabled:
+                reward -= float((takt_pen + stability_penalty) * configs.reward_scale * 100.0)
             reschedule_info = {
                 'reschedule_takt_h': float(takt),
                 'reschedule_takt_violation_h': float(takt_violation),
@@ -1300,9 +1371,20 @@ class AirLineEnv_Graph(gym.Env):
             }
         
         # 收集物理诊断指标传回主进程，用于 TensorBoard 进行 Reward 分项拆解
+        if dense_objective_enabled:
+            multiplier = float(getattr(configs, "reschedule_objective_delta_multiplier", 100.0))
+            makespan_penalty = float(
+                dense_term_deltas.get("score_makespan", 0.0) * multiplier * configs.reward_scale
+            )
+            std_penalty = float(
+                dense_term_deltas.get("score_balance", 0.0) * multiplier * configs.reward_scale
+            )
+        else:
+            makespan_penalty = float(coef_makespan * norm_delta_makespan * configs.reward_scale)
+            std_penalty = float(coef_std * norm_delta_std * configs.reward_scale)
         info = {
-            'makespan_penalty': float(coef_makespan * norm_delta_makespan * configs.reward_scale),
-            'std_penalty': float(coef_std * norm_delta_std * configs.reward_scale),
+            'makespan_penalty': makespan_penalty,
+            'std_penalty': std_penalty,
             'resource_wait_penalty_candidate': float(wait_penalty_raw * configs.reward_scale),
             'resource_idle_penalty_candidate': float(idle_penalty_raw * configs.reward_scale),
             'team_wait_h': float(team_wait_h),
@@ -1310,8 +1392,19 @@ class AirLineEnv_Graph(gym.Env):
             'worker_idle_ratio_before': float(worker_idle_ratio_before),
             'station_slot_vacancy_ratio_before': float(station_slot_vacancy_ratio_before),
         }
+        if dense_objective_enabled:
+            info['reschedule_objective_score'] = float(sum((curr_objective_terms or {}).values()))
+            info['reschedule_objective_delta'] = float(sum(dense_term_deltas.values()))
+            info['reschedule_objective_reward_unscaled'] = dense_unclipped_reward
+            info['reschedule_objective_reward_clipped'] = float(dense_reward_clipped)
+            for key, value in dense_term_deltas.items():
+                info[f'reschedule_delta_{key}'] = float(value)
         info.update(reschedule_info)
-        if not getattr(configs, 'use_dense_progress_reward', False) and is_task_critical:
+        if (
+            not dense_objective_enabled
+            and not getattr(configs, 'use_dense_progress_reward', False)
+            and is_task_critical
+        ):
             info['critical_bonus'] = float(critical_bonus * configs.reward_scale)
             
         if getattr(self, 'skip_obs_building', False):
@@ -1339,7 +1432,14 @@ class AirLineEnv_Graph(gym.Env):
                 return
                 
             # 1. 处理所有已到期的事件
-            while not self.event_queue.is_empty() and self.event_queue.peek().time <= self.current_time + 1e-5:
+            while (
+                not self.event_queue.is_empty()
+                and time_reached_scalar(
+                    self.event_queue.peek().time,
+                    self.current_time,
+                    release_time_tolerance(configs),
+                )
+            ):
                 ev = self.event_queue.pop()
                 if ev.type == EventType.TASK_FINISH:
                     tid = ev.data['task_id']
@@ -1389,7 +1489,14 @@ class AirLineEnv_Graph(gym.Env):
             for t in ready_indices:
                 dur = self.task_static_feat[t, 0].item()
                 if dur < 1e-5: # Zero duration
-                    if hasattr(self, 'task_material_ready') and self.task_material_ready[t] > self.current_time + 1e-5:
+                    if (
+                        hasattr(self, 'task_material_ready')
+                        and not time_reached_scalar(
+                            self.task_material_ready[t],
+                            self.current_time,
+                            release_time_tolerance(configs),
+                        )
+                    ):
                         continue
                     # 立即完成
                     self.task_status[t] = 2 # Scheduled/Done

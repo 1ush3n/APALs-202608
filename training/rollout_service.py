@@ -131,6 +131,22 @@ class APALRolloutService:
         environment_step_seconds = 0.0
         loop_steps = 0
         environment_steps = 0
+        objective_delta_sums = np.zeros(self.num_envs, dtype=float)
+        objective_final_scores = np.zeros(self.num_envs, dtype=float)
+        objective_dense_steps = np.zeros(self.num_envs, dtype=int)
+        objective_clip_counts = np.zeros(self.num_envs, dtype=int)
+        objective_term_keys = (
+            "score_makespan",
+            "score_balance",
+            "score_takt_violation",
+            "score_start_stability",
+            "score_station_change",
+            "score_team_change",
+        )
+        objective_term_sums = {
+            key: np.zeros(self.num_envs, dtype=float)
+            for key in objective_term_keys
+        }
 
         apply_noise = bool(
             self.config.randomize_durations
@@ -240,13 +256,35 @@ class APALRolloutService:
                     self.num_envs - len(active),
                 )
                 stage_started = time.perf_counter()
-                next_snapshots, rewards, step_dones, _ = (
+                next_snapshots, rewards, step_dones, step_infos = (
                     self.vector_env.step_snapshot_all(actions)
                 )
                 environment_step_seconds += time.perf_counter() - stage_started
                 environment_steps += len(active)
 
                 for env_idx in active:
+                    step_info = step_infos[env_idx] or {}
+                    if step_info.get("invalid_action", False):
+                        action = actions[env_idx]
+                        raise RuntimeError(
+                            "训练环境拒绝掩码允许的动作，禁止恢复以避免污染 on-policy 轨迹: "
+                            f"env={env_idx} action={action} info={step_info}"
+                        )
+                    if "reschedule_objective_delta" in step_info:
+                        objective_dense_steps[env_idx] += 1
+                        objective_delta_sums[env_idx] += float(
+                            step_info["reschedule_objective_delta"]
+                        )
+                        objective_final_scores[env_idx] = float(
+                            step_info.get("reschedule_objective_score", 0.0)
+                        )
+                        objective_clip_counts[env_idx] += int(
+                            float(step_info.get("reschedule_objective_reward_clipped", 0.0)) > 0.0
+                        )
+                        for key in objective_term_keys:
+                            objective_term_sums[key][env_idx] += float(
+                                step_info.get(f"reschedule_delta_{key}", 0.0)
+                            )
                     memories[env_idx].rewards.append(float(rewards[env_idx]))
                     memories[env_idx].is_terminals.append(bool(step_dones[env_idx]))
                     memories[env_idx].is_truncated.append(False)
@@ -274,6 +312,21 @@ class APALRolloutService:
             for env in self.vector_env.envs
         ]
         divisor = max(1, loop_steps)
+        extra_metrics: dict[str, float] = {}
+        total_dense_steps = int(np.sum(objective_dense_steps))
+        if total_dense_steps > 0:
+            extra_metrics = {
+                "Reward/ObjectiveDelta": float(np.mean(objective_delta_sums)),
+                "Reward/ObjectiveFinalScore": float(np.mean(objective_final_scores)),
+                "Reward/ObjectiveClipFraction": float(
+                    np.sum(objective_clip_counts) / total_dense_steps
+                ),
+            }
+            for key in objective_term_keys:
+                label = key.removeprefix("score_")
+                extra_metrics[f"Reward/Delta/{label}"] = float(
+                    np.mean(objective_term_sums[key])
+                )
         metrics = RolloutMetrics(
             episode=int(episode),
             average_reward=float(np.mean([sum(memory.rewards) for memory in memories])),
@@ -286,6 +339,7 @@ class APALRolloutService:
             forward_ms=forward_seconds * 1000.0 / divisor,
             rebuild_ms=rebuild_seconds * 1000.0 / divisor,
             environment_step_ms=environment_step_seconds * 1000.0 / divisor,
+            extra_metrics=extra_metrics,
         )
         return memories, metrics
 

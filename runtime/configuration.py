@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,14 @@ def validate_runtime_config(config: Config) -> None:
         raise ValueError(f"artifact_layout 无效: {config.artifact_layout}")
     if int(config.num_envs) < 1 or int(config.batch_size) < 1 or int(config.eval_freq) < 1:
         raise ValueError("num_envs、batch_size 和 eval_freq 必须大于 0")
+    release_tolerance = float(getattr(config, "release_time_tolerance_hours", 1.0e-5))
+    if not math.isfinite(release_tolerance) or release_tolerance < 0.0:
+        raise ValueError("release_time_tolerance_hours 必须是非负有限数")
+    mismatch_policy = str(getattr(config, "eval_mask_mismatch_policy", "fail")).lower()
+    if mismatch_policy not in {"fail", "recover"}:
+        raise ValueError("eval_mask_mismatch_policy 必须是 fail 或 recover")
+    if int(getattr(config, "eval_mask_mismatch_max_retries_per_time", 16)) < 1:
+        raise ValueError("eval_mask_mismatch_max_retries_per_time 必须大于 0")
     if bool(getattr(config, "enable_multi_benchmark_eval", False)):
         refs = getattr(config, "multi_benchmark_reference_makespans", {})
         if isinstance(refs, str):

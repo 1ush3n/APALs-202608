@@ -2,6 +2,13 @@ import torch
 import numpy as np
 from typing import Tuple, Any
 
+from core.time_comparison import (
+    release_time_tolerance,
+    time_reached_numpy,
+    time_reached_scalar,
+    time_reached_tensor,
+)
+
 class ActionMasker:
     """
     负责计算航空装配线强化学习环境的动作掩码 (Action Mask)。
@@ -80,9 +87,14 @@ class ActionMasker:
             
         # [Dynamic Events] 排除物料延迟到达的工序
         if hasattr(env, 'task_material_ready'):
-            mat_ready = torch.from_numpy(env.task_material_ready).to(device=t_device, dtype=torch.float32)
+            tolerance = release_time_tolerance(configs)
             # 在已 Ready 的工序中，只有物料就绪时间 <= 当前时间 的才算合法
-            valid_mat_mask = mat_ready[ready_indices] <= env.current_time + 1e-5
+            valid_mat_mask = time_reached_tensor(
+                env.task_material_ready[ready_indices.detach().cpu().numpy()],
+                env.current_time,
+                tolerance,
+                device=t_device,
+            )
             ready_indices = ready_indices[valid_mat_mask]
             if len(ready_indices) == 0:
                 return task_mask, station_mask, worker_mask
@@ -171,7 +183,13 @@ class ActionMasker:
         
         # [Dynamic Events] 排除物料延迟到达的工序
         if hasattr(env, 'task_material_ready'):
-            ready_indices = np.array([t for t in ready_indices if env.task_material_ready[t] <= env.current_time + 1e-5])
+            tolerance = release_time_tolerance(configs)
+            valid_release = time_reached_numpy(
+                env.task_material_ready[ready_indices],
+                env.current_time,
+                tolerance,
+            )
+            ready_indices = ready_indices[valid_release]
             if len(ready_indices) == 0:
                 return (
                     torch.from_numpy(task_mask_np).to(torch.bool),
@@ -252,7 +270,14 @@ class ActionMasker:
         free_locks = env.worker_locks
         
         for t in ready_indices:
-            if hasattr(env, 'task_material_ready') and env.task_material_ready[t] > env.current_time + 1e-5:
+            if (
+                hasattr(env, 'task_material_ready')
+                and not time_reached_scalar(
+                    env.task_material_ready[t],
+                    env.current_time,
+                    release_time_tolerance(configs),
+                )
+            ):
                 continue
 
             min_station = env.constraint_engine.minimum_station(

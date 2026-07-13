@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -19,7 +20,7 @@ from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
 from tests.runtime_safety import temporary_config
-from runtime.reschedule_eval import evaluate_reschedule_model
+from runtime.reschedule_eval import MaskEnvironmentMismatchError, evaluate_reschedule_model
 from utils.gpu_graph_manager import GPUBatchGraphManager
 from utils.vector_env import EnvCreator, VectorEnv
 from utils.reschedule import load_baseline_schedule, load_reschedule_scenarios
@@ -61,6 +62,49 @@ def _first_valid_action(env: AirLineEnv_Graph) -> tuple[int, int, list[int]]:
         if len(candidates) >= demand:
             return task_id, station_id, candidates[:demand]
     raise AssertionError("没有找到可执行动作")
+
+
+class _FirstValidEvalAgent:
+    def __init__(self, env: AirLineEnv_Graph) -> None:
+        self.env = env
+        self.device = torch.device("cpu")
+        self.policy = torch.nn.Identity()
+
+    def select_action(
+        self,
+        _state,
+        *,
+        mask_task,
+        mask_station_matrix,
+        mask_worker,
+        **_kwargs,
+    ):
+        task_mask = mask_task.detach().cpu()
+        station_mask = mask_station_matrix.detach().cpu()
+        worker_mask = mask_worker.detach().cpu()
+        for task_tensor in torch.where(~task_mask)[0]:
+            task_id = int(task_tensor.item())
+            for station_tensor in torch.where(~station_mask[task_id])[0]:
+                station_id = int(station_tensor.item())
+                skill_id = int(self.env.task_static_feat[task_id, 1].item())
+                demand = max(1, int(self.env.task_static_feat[task_id, 2].item()))
+                workers = [
+                    int(worker_id)
+                    for worker_id in np.where(
+                        self.env.worker_skill_matrix[:, skill_id].cpu().numpy() > 0.5
+                    )[0]
+                    if not bool(worker_mask[worker_id])
+                    and int(self.env.worker_locks[worker_id]) in {0, station_id + 1}
+                ]
+                if len(workers) >= demand:
+                    return (
+                        (task_id, station_id, workers[:demand]),
+                        torch.tensor(0.0),
+                        torch.tensor(0.0),
+                        None,
+                        False,
+                    )
+        return None, None, None, None, True
 
 
 def _write_greedy_baseline(path: Path) -> pd.DataFrame:
@@ -123,6 +167,7 @@ def test_reschedule_config_loads_and_isolates_experiment() -> None:
     assert cfg.enable_dynamic_events is False
     assert cfg.enable_material_delay is False
     assert cfg.reschedule_warm_start is True
+    assert cfg.reschedule_use_objective_delta_reward is True
 
 
 def test_baseline_loader_computes_takt_from_schedule(tmp_path: Path) -> None:
@@ -132,6 +177,67 @@ def test_baseline_loader_computes_takt_from_schedule(tmp_path: Path) -> None:
     baseline = load_baseline_schedule(baseline_path)
     assert baseline.makespan == float(df["End"].max())
     assert len(baseline.tasks) == len(df)
+
+
+def test_dense_objective_reward_telescopes_to_final_objective(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline.csv"
+    df = _write_greedy_baseline(baseline_path)
+    start_time = float(df["Start"].quantile(0.35))
+    delayed_row = df[df["Start"] > start_time].iloc[0]
+    scenario_path = tmp_path / "scenario.csv"
+    pd.DataFrame(
+        [
+            {
+                "reschedule_start_time": start_time,
+                "TaskID": int(delayed_row["TaskID"]),
+                "release_time": float(delayed_row["Start"] + 10.0),
+            }
+        ]
+    ).to_csv(scenario_path, index=False)
+
+    overrides = _reschedule_overrides(baseline_path, scenario_path)
+    overrides.update(
+        {
+            "reschedule_use_objective_delta_reward": True,
+            "reschedule_objective_delta_multiplier": 100.0,
+            "reschedule_objective_delta_clip": 0.0,
+            "enable_cpm_reward": False,
+            "use_dense_progress_reward": False,
+        }
+    )
+    with temporary_config(configs, overrides):
+        env = AirLineEnv_Graph(data_path_or_dir=str(PROJECT_ROOT / "data" / "283.csv"), seed=17)
+        env.reset(randomize_duration=False, randomize_workers=False, seed=17)
+        initial_terms = env._reschedule_objective_terms(
+            makespan=float(env._get_estimated_cmax()),
+            balance_std=float(np.std(env.station_loads)),
+        )
+        total_reward = 0.0
+        final_info: dict[str, object] = {}
+        for _ in range(env.num_tasks * 3):
+            if len(env.assigned_tasks) == env.num_tasks:
+                break
+            masks = env.get_masks()
+            if masks[0].all():
+                assert env.try_wait_for_resources()
+                continue
+            _obs, reward, _done, final_info = env.step(_first_valid_action(env))
+            total_reward += float(reward)
+
+        assert len(env.assigned_tasks) == env.num_tasks
+        final_terms = env._reschedule_objective_terms(
+            makespan=float(env._get_estimated_cmax()),
+            balance_std=float(np.std(env.station_loads)),
+        )
+        expected = -(
+            sum(final_terms.values()) - sum(initial_terms.values())
+        ) * float(configs.reschedule_objective_delta_multiplier) * float(configs.reward_scale)
+        assert np.isclose(total_reward, expected, atol=1e-8)
+        assert np.isclose(
+            float(final_info["reschedule_objective_score"]),
+            sum(final_terms.values()),
+            atol=1e-8,
+        )
 
 
 def test_reschedule_reset_freezes_started_tasks_and_adds_features(tmp_path: Path) -> None:
@@ -270,6 +376,82 @@ def test_release_time_is_environment_hard_constraint(tmp_path: Path) -> None:
 
         assert info["invalid_action"] is True
         assert info["error"] == "task_release_time_not_reached"
+
+
+def test_eval_mask_mismatch_fail_and_recover_modes(tmp_path: Path) -> None:
+    baseline_path = tmp_path / "baseline.csv"
+    df = _write_greedy_baseline(baseline_path)
+    start_time = float(df["Start"].quantile(0.35))
+    delayed_row = df[df["Start"] > start_time].iloc[0]
+    scenario_path = tmp_path / "scenario.csv"
+    pd.DataFrame(
+        [
+            {
+                "scenario_id": "medium_014",
+                "reschedule_start_time": start_time,
+                "TaskID": int(delayed_row["TaskID"]),
+                "release_time": float(delayed_row["Start"] + 10.0),
+            }
+        ]
+    ).to_csv(scenario_path, index=False)
+
+    def inject_one_release_mismatch(env: AirLineEnv_Graph) -> None:
+        original_step = env.step
+        fired = False
+
+        def injected_step(action):
+            nonlocal fired
+            if not fired:
+                fired = True
+                return (
+                    env._get_observation(),
+                    -0.25,
+                    False,
+                    {
+                        "invalid_action": True,
+                        "error": "task_release_time_not_reached",
+                        "task_id": int(action[0]),
+                        "current_time": float(env.current_time),
+                        "release_time": float(env.current_time + 1.0),
+                    },
+                )
+            return original_step(action)
+
+        env.step = injected_step  # type: ignore[method-assign]
+
+    base_overrides = _reschedule_overrides(baseline_path, scenario_path)
+    base_overrides["eval_mask_mismatch_max_retries_per_time"] = 16
+
+    fail_overrides = dict(base_overrides)
+    fail_overrides["eval_mask_mismatch_policy"] = "fail"
+    with temporary_config(configs, fail_overrides):
+        fail_env = AirLineEnv_Graph(data_path_or_dir=str(PROJECT_ROOT / "data" / "283.csv"), seed=31)
+        inject_one_release_mismatch(fail_env)
+        with pytest.raises(MaskEnvironmentMismatchError, match="medium_014"):
+            evaluate_reschedule_model(
+                fail_env,
+                _FirstValidEvalAgent(fail_env),
+                num_runs=1,
+                temperature=0.0,
+            )
+
+    recover_overrides = dict(base_overrides)
+    recover_overrides["eval_mask_mismatch_policy"] = "recover"
+    with temporary_config(configs, recover_overrides):
+        recover_env = AirLineEnv_Graph(data_path_or_dir=str(PROJECT_ROOT / "data" / "283.csv"), seed=31)
+        inject_one_release_mismatch(recover_env)
+        evaluate_reschedule_model(
+            recover_env,
+            _FirstValidEvalAgent(recover_env),
+            num_runs=1,
+            temperature=0.0,
+        )
+        metrics = evaluate_reschedule_model.last_scenario_metrics[0]
+        assert metrics["complete"] == 1.0
+        assert metrics["eligible"] == 1.0
+        assert metrics["invalid_step_count"] == 0.0
+        assert metrics["mask_mismatch_recovery_count"] == 1.0
+        assert metrics["mask_mismatch_recovered"] == 1.0
 
 
 def test_vector_env_child_process_receives_reschedule_config(tmp_path: Path) -> None:

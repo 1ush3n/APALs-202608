@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from configs import configs
+from environment import AirLineEnv_Graph
 from runtime.hydra_config import (
     ExtraArgument,
     HydraCliError,
@@ -100,6 +101,38 @@ def _restore_config(backup: dict[str, Any]) -> None:
         setattr(configs, key, value)
 
 
+def _validate_baseline_hard_constraints(*, data_path: Path, baseline_path: Path) -> None:
+    """使用训练环境的约束引擎审计 baseline，防止无效排程写入 manifest。"""
+    baseline = load_baseline_schedule(baseline_path)
+    backup = _disable_reschedule_for_initial_generation()
+    try:
+        env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=int(getattr(configs, "seed", 42)))
+        env.reset(
+            randomize_duration=False,
+            randomize_workers=False,
+            seed=int(getattr(configs, "seed", 42)),
+        )
+        report = env.validate_assignments(
+            (
+                task.task_id,
+                task.station_id,
+                task.team,
+                task.start,
+                task.end,
+            )
+            for task in baseline.tasks.values()
+        )
+    finally:
+        _restore_config(backup)
+    if not report.is_legal:
+        nonzero = {
+            key: int(value)
+            for key, value in report.violations.items()
+            if int(value) > 0
+        }
+        raise ValueError(f"生成的 baseline 违反硬约束: {nonzero}")
+
+
 def _generate_baseline(
     *,
     model_path: Path,
@@ -111,6 +144,10 @@ def _generate_baseline(
     try:
         if output_path.exists() and not overwrite:
             baseline = load_baseline_schedule(output_path)
+            _validate_baseline_hard_constraints(
+                data_path=data_path,
+                baseline_path=output_path,
+            )
             return {
                 "baseline_schedule_path": to_manifest_path(output_path),
                 "baseline_makespan": float(baseline.makespan),
@@ -131,6 +168,10 @@ def _generate_baseline(
         finally:
             _restore_config(backup)
         baseline = load_baseline_schedule(output_path)
+        _validate_baseline_hard_constraints(
+            data_path=data_path,
+            baseline_path=output_path,
+        )
         return {
             "baseline_schedule_path": to_manifest_path(output_path),
             "baseline_makespan": float(baseline.makespan),
@@ -178,7 +219,8 @@ def prepare_reschedule_data(
     baseline_output_dir.mkdir(parents=True, exist_ok=True)
     scenario_output_dir.mkdir(parents=True, exist_ok=True)
 
-    if overwrite or not (train_output_dir / "manifest.json").exists():
+    regenerate_train_bucket = bool(overwrite) or not (train_output_dir / "manifest.json").exists()
+    if regenerate_train_bucket:
         generate_bucket(
             PROJECT_ROOT / "data" / "680.csv",
             train_output_dir,
@@ -213,7 +255,7 @@ def prepare_reschedule_data(
             error["instance_id"] = instance_id
             error["split"] = "train"
             skipped.append(error)
-            if data_path.exists():
+            if regenerate_train_bucket and data_path.exists():
                 data_path.unlink()
             print(f"[SKIP] {instance_id}: {error['reason']}", flush=True)
             continue
@@ -231,10 +273,11 @@ def prepare_reschedule_data(
         ready_train_files.add(data_path.resolve())
         print(f"[READY] {instance_id} data={data_path.name} baseline={baseline_path.name}", flush=True)
 
-    # 环境按目录抽样时不能抽到没有 baseline 映射的旧 CSV。
-    for candidate in train_output_dir.glob("*.csv"):
-        if candidate.resolve() not in ready_train_files:
-            candidate.unlink()
+    # 新生成目录中不能残留没有 baseline 映射的 CSV；复用既有训练桶时禁止删除源数据。
+    if regenerate_train_bucket:
+        for candidate in train_output_dir.glob("*.csv"):
+            if candidate.resolve() not in ready_train_files:
+                candidate.unlink()
 
     for real_path in real_data_paths:
         instance_id = _real_instance_id(real_path)

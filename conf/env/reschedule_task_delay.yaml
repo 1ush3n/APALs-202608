@@ -24,11 +24,18 @@ reschedule_task_delay:
   reschedule_delay_min: 5.0
   reschedule_delay_max: 50.0
   reschedule_takt_tolerance: 1e-5
+  release_time_tolerance_hours: 1.0e-5
+  eval_mask_mismatch_policy: fail
+  eval_mask_mismatch_max_retries_per_time: 16
   reschedule_stability_start_weight: 0.20
   reschedule_stability_station_weight: 0.10
   reschedule_stability_team_weight: 0.05
   reschedule_takt_violation_weight: 1.0
   reschedule_infeasible_stability_relax: 0.35
+  # 每步奖励使用统一验证目标的差分；初始调度不受影响。
+  reschedule_use_objective_delta_reward: true
+  reschedule_objective_delta_multiplier: 100.0
+  reschedule_objective_delta_clip: 50.0
   reschedule_warm_start: true
   reschedule_eval_num_scenarios: 4
   adaptive_ppo_batch_by_tasks: true

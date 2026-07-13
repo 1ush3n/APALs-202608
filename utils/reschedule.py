@@ -329,6 +329,55 @@ def calculate_stability_metrics(
     }
 
 
+def calculate_reschedule_objective_terms(
+    *,
+    makespan: float,
+    balance_std: float,
+    takt_h: float,
+    takt_violation_h: float | None,
+    start_deviation_mean_h: float,
+    station_change_rate: float,
+    team_change_rate: float,
+    config_obj: Any,
+    ideal_station_load: float,
+) -> dict[str, float]:
+    """返回训练密集奖励与验证评分共享的归一化目标分项。"""
+    takt = max(1e-6, float(takt_h))
+    ideal_load = max(1.0, float(ideal_station_load))
+    makespan_value = float(makespan)
+    takt_violation = (
+        max(0.0, makespan_value - takt)
+        if takt_violation_h is None
+        else max(0.0, float(takt_violation_h))
+    )
+    return {
+        "score_makespan": makespan_value / takt,
+        "score_balance": (
+            float(getattr(config_obj, "r_coef_std", 0.0))
+            * float(balance_std)
+            / ideal_load
+        ),
+        "score_takt_violation": (
+            float(getattr(config_obj, "reschedule_takt_violation_weight", 1.0))
+            * takt_violation
+            / takt
+        ),
+        "score_start_stability": (
+            float(getattr(config_obj, "reschedule_stability_start_weight", 0.20))
+            * float(start_deviation_mean_h)
+            / takt
+        ),
+        "score_station_change": (
+            float(getattr(config_obj, "reschedule_stability_station_weight", 0.10))
+            * float(station_change_rate)
+        ),
+        "score_team_change": (
+            float(getattr(config_obj, "reschedule_stability_team_weight", 0.05))
+            * float(team_change_rate)
+        ),
+    }
+
+
 def calculate_reschedule_composite_score(
     *,
     makespan: float,
@@ -344,26 +393,21 @@ def calculate_reschedule_composite_score(
     用于 PPO best model 和 GA 个体选优时直接淘汰不可行方案。
     """
 
-    takt_h = max(1e-6, float(constraint_metrics.get("takt_h", 0.0)))
-    ideal_load = max(1.0, float(ideal_station_load))
     complete = float(constraint_metrics.get("complete", 0.0)) >= 1.0 - 1e-9
     has_violation = any(float(constraint_metrics.get(key, 0.0)) > 0.0 for key in HARD_CONSTRAINT_KEYS)
     eligible = bool(complete and not has_violation)
 
-    terms = {
-        "score_makespan": float(makespan) / takt_h,
-        "score_balance": float(getattr(config_obj, "r_coef_std", 0.0)) * float(balance_std) / ideal_load,
-        "score_takt_violation": float(getattr(config_obj, "reschedule_takt_violation_weight", 1.0))
-        * float(constraint_metrics.get("takt_violation_h", 0.0))
-        / takt_h,
-        "score_start_stability": float(getattr(config_obj, "reschedule_stability_start_weight", 0.20))
-        * float(constraint_metrics.get("start_deviation_mean_h", 0.0))
-        / takt_h,
-        "score_station_change": float(getattr(config_obj, "reschedule_stability_station_weight", 0.10))
-        * float(constraint_metrics.get("station_change_rate", 0.0)),
-        "score_team_change": float(getattr(config_obj, "reschedule_stability_team_weight", 0.05))
-        * float(constraint_metrics.get("team_change_rate", 0.0)),
-    }
+    terms = calculate_reschedule_objective_terms(
+        makespan=float(makespan),
+        balance_std=float(balance_std),
+        takt_h=float(constraint_metrics.get("takt_h", 0.0)),
+        takt_violation_h=float(constraint_metrics.get("takt_violation_h", 0.0)),
+        start_deviation_mean_h=float(constraint_metrics.get("start_deviation_mean_h", 0.0)),
+        station_change_rate=float(constraint_metrics.get("station_change_rate", 0.0)),
+        team_change_rate=float(constraint_metrics.get("team_change_rate", 0.0)),
+        config_obj=config_obj,
+        ideal_station_load=float(ideal_station_load),
+    )
     score = float(sum(terms.values()))
     selection_score = score if eligible else 1.0e9 + score
     return RescheduleScore(eligible=eligible, score=score, selection_score=selection_score, terms=terms)

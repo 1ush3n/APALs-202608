@@ -440,6 +440,10 @@ Lightning 每个 episode 输出一行精简 rollout 摘要：
 
 自动验证默认每个 episode 执行一次，只运行 Standard 场景，并打印 Makespan、Balance、Reward、人员/站位利用率及耗时。详细指标同时写入 Lightning/TensorBoard。
 
+重调度默认启用统一目标差分密集奖励 `reschedule_use_objective_delta_reward=true`。每个动作的奖励来自验证综合目标在动作前后的变化，分项包括归一化 makespan、负载均衡、takt 超期、开始时间偏差、工位变化率和班组变化率；终局不再重复扣除这些项。TensorBoard 会额外记录 `Reward/ObjectiveDelta`、`Reward/ObjectiveFinalScore`、`Reward/ObjectiveClipFraction` 和 `Reward/Delta/*`。该奖励与旧重调度 reward 不同，正式实验必须使用新的 `experiment_name` 从初始调度模型 warm start，不能将旧 checkpoint 的续训曲线与新奖励训练曲线合并。
+
+物料 release time 在张量化掩码、CPU 掩码、环境边界和合法性审计中统一使用 `float64` 与 `release_time_tolerance_hours=1e-5` 小时。评估默认采用 `eval_mask_mismatch_policy=fail`，掩码放行但环境拒绝时立即报告完整上下文；`recover` 仅供诊断性评估恢复 `task_release_time_not_reached`，训练阶段始终禁止恢复，避免污染 on-policy 轨迹。
+
 重调度模式会改为固定重调度场景验证，打印 `[Eval][Resched]`，并按 `reschedule_selection_score` 保存 best；只有所有固定验证场景满足资格时才允许覆盖 best。
 
 Lightning 每次 PPO 更新后覆盖保存最新 checkpoint；执行自动验证且选择指标改善时，覆盖保存最佳 checkpoint。终端会打印对应的 `[Checkpoint]` 记录。

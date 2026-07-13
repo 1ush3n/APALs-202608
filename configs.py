@@ -120,11 +120,17 @@ class Config:
     reschedule_delay_min: float = 5.0
     reschedule_delay_max: float = 30.0
     reschedule_takt_tolerance: float = 1e-5
+    release_time_tolerance_hours: float = 1.0e-5
+    eval_mask_mismatch_policy: str = "fail"
+    eval_mask_mismatch_max_retries_per_time: int = 16
     reschedule_stability_start_weight: float = 0.20
     reschedule_stability_station_weight: float = 0.10
     reschedule_stability_team_weight: float = 0.05
     reschedule_takt_violation_weight: float = 1.0
     reschedule_infeasible_stability_relax: float = 0.35
+    reschedule_use_objective_delta_reward: bool = False
+    reschedule_objective_delta_multiplier: float = 100.0
+    reschedule_objective_delta_clip: float = 50.0
     reschedule_warm_start: bool = True
     reschedule_eval_num_scenarios: int = 4
 

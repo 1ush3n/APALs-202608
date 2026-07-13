@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from configs import configs
+from core.time_comparison import release_time_tolerance, time_reached_scalar
 from runtime.checkpoints import load_checkpoint
 from runtime.paths import PROJECT_ROOT, resolve_workspace_path
 from runtime.reschedule_manifest import resolve_manifest_eval_entry
@@ -19,6 +20,31 @@ from utils.reschedule import (
     save_reschedule_scenarios,
 )
 from training.observation import refresh_env_observation
+
+
+class MaskEnvironmentMismatchError(RuntimeError):
+    """动作掩码允许的动作被环境硬边界拒绝。"""
+
+
+def _mask_mismatch_message(
+    env,
+    *,
+    action,
+    info: dict,
+    scenario_id: str,
+) -> str:
+    task_id, station_id, team = action
+    release_time = float(info.get("release_time", np.nan))
+    current_time = float(info.get("current_time", getattr(env, "current_time", np.nan)))
+    tolerance = release_time_tolerance(configs)
+    return (
+        "动作掩码与环境边界不一致: "
+        f"scenario={scenario_id} reason={info.get('error', info.get('reason', 'unknown'))} "
+        f"task={int(task_id)} station={int(station_id)} team={[int(w) for w in team]} "
+        f"current_time={current_time:.17g} release_time={release_time:.17g} "
+        f"gap_h={release_time - current_time:.17g} tolerance_h={tolerance:.17g} "
+        f"release_dtype={getattr(getattr(env, 'task_material_ready', None), 'dtype', 'unknown')}"
+    )
 
 
 def ensure_reschedule_baseline_available(config_obj=configs) -> Path | None:
@@ -207,7 +233,11 @@ def _compute_reschedule_constraint_metrics(env) -> dict[str, float]:
     if hasattr(env, "task_material_ready"):
         for task_id, _sid, _team, start, _end in env.assigned_tasks:
             release_time = float(env.task_material_ready[int(task_id)])
-            if release_time > float(start) + 1e-5:
+            if not time_reached_scalar(
+                release_time,
+                float(start),
+                release_time_tolerance(configs),
+            ):
                 metrics["release_violation_count"] += 1.0
 
     if hasattr(env, "raw_data") and "precedence_edges" in env.raw_data:
@@ -320,12 +350,34 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
             done = False
             total_reward = 0.0
             invalid_step_count = 0
+            mismatch_recovery_count = 0
+            blocked_tasks: set[int] = set()
+            blocked_at_time: float | None = None
+            mismatch_retries_at_time = 0
+            mismatch_policy = str(getattr(configs, "eval_mask_mismatch_policy", "fail")).lower()
+            max_mismatch_retries = int(
+                getattr(configs, "eval_mask_mismatch_max_retries_per_time", 16)
+            )
             start_wall = time.time()
 
             for _ in range(env.num_tasks * 3):
                 if done:
                     break
                 task_mask, station_mask, worker_mask = env.get_masks()
+                current_time = float(env.current_time)
+                if (
+                    blocked_at_time is None
+                    or abs(current_time - blocked_at_time) > release_time_tolerance(configs)
+                ):
+                    blocked_tasks.clear()
+                    blocked_at_time = current_time
+                    mismatch_retries_at_time = 0
+                if blocked_tasks:
+                    task_mask = task_mask.clone()
+                    station_mask = station_mask.clone()
+                    blocked = sorted(blocked_tasks)
+                    task_mask[blocked] = True
+                    station_mask[blocked, :] = True
                 if task_mask.all():
                     if env.try_wait_for_resources():
                         state = refresh_env_observation(env)
@@ -347,10 +399,27 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
                 if getattr(configs, "ablation_no_mask", False) and is_invalid:
                     break
                 state, reward, done, info = env.step(action)
-                total_reward += float(reward)
                 if info.get("invalid_action", False):
+                    mismatch_message = _mask_mismatch_message(
+                        env,
+                        action=action,
+                        info=info,
+                        scenario_id=str(scenario_id),
+                    )
+                    recoverable = str(info.get("error", "")) == "task_release_time_not_reached"
+                    if mismatch_policy == "recover" and recoverable:
+                        mismatch_recovery_count += 1
+                        mismatch_retries_at_time += 1
+                        if mismatch_retries_at_time > max_mismatch_retries:
+                            raise MaskEnvironmentMismatchError(
+                                f"{mismatch_message} retries_at_time={mismatch_retries_at_time}"
+                            )
+                        blocked_tasks.add(int(action[0]))
+                        state = refresh_env_observation(env)
+                        continue
                     invalid_step_count += 1
-                    break
+                    raise MaskEnvironmentMismatchError(mismatch_message)
+                total_reward += float(reward)
 
             elapsed = time.time() - start_wall
             complete = len(env.assigned_tasks) == env.num_tasks
@@ -371,6 +440,11 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
             constraints["reschedule_start_time"] = float(scenario.start_time)
             constraints["delayed_task_count"] = float(len(scenario.task_release_times))
             constraints["invalid_step_count"] = float(invalid_step_count)
+            constraints["mask_mismatch_recovery_count"] = float(mismatch_recovery_count)
+            constraints["mask_mismatch_recovered"] = float(mismatch_recovery_count > 0)
+            constraints["release_time_tolerance_hours"] = float(
+                release_time_tolerance(configs)
+            )
             constraints["complete"] = float(complete)
             score_result = calculate_reschedule_composite_score(
                 makespan=final_makespan,
@@ -427,6 +501,9 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
         "duplicate_task_count",
         "missing_task_count",
         "invalid_step_count",
+        "mask_mismatch_recovery_count",
+        "mask_mismatch_recovered",
+        "release_time_tolerance_hours",
         "complete",
         "reschedule_start_time",
         "delayed_task_count",
@@ -477,6 +554,7 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
 
 
 __all__ = [
+    "MaskEnvironmentMismatchError",
     "_compute_assignment_utilization",
     "_compute_reschedule_constraint_metrics",
     "ensure_reschedule_baseline_available",
