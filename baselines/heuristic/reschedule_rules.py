@@ -861,6 +861,7 @@ class BeamSearchRepairRule(PrioritySearchRepairRule):
     team_stability_weight = 0.15
 
     def run(self) -> RescheduleRuleResult:
+        search_started = time.time()
         beam = [(self._fitness(sol), sol) for sol in self._initial_pool(self.beam_width)]
         beam.sort(key=lambda item: item[0])
         best_score, best_solution = beam[0][0], beam[0][1].clone()
@@ -890,7 +891,9 @@ class BeamSearchRepairRule(PrioritySearchRepairRule):
                 stale_levels += 1
             if stale_levels >= self.beam_patience:
                 break
-        return self._decode_solution(best_solution)
+        result = self._decode_solution(best_solution)
+        result.duration_sec = time.time() - search_started
+        return result
 
 
 class IteratedGreedyRepairRule(PrioritySearchRepairRule):
@@ -903,6 +906,7 @@ class IteratedGreedyRepairRule(PrioritySearchRepairRule):
     team_stability_weight = 0.15
 
     def run(self) -> RescheduleRuleResult:
+        search_started = time.time()
         rng = np.random.RandomState(self.seed + 30_000)
         current = self._seed_solution("cpm", rng)
         current_score = self._fitness(current)
@@ -925,7 +929,9 @@ class IteratedGreedyRepairRule(PrioritySearchRepairRule):
                 current, current_score = candidate, candidate_score
             if candidate_score < best_score:
                 best_solution, best_score = candidate.clone(), candidate_score
-        return self._decode_solution(best_solution)
+        result = self._decode_solution(best_solution)
+        result.duration_sec = time.time() - search_started
+        return result
 
 
 class SimulatedAnnealingRepairRule(PrioritySearchRepairRule):
@@ -938,6 +944,7 @@ class SimulatedAnnealingRepairRule(PrioritySearchRepairRule):
     team_stability_weight = 0.15
 
     def run(self) -> RescheduleRuleResult:
+        search_started = time.time()
         rng = np.random.RandomState(self.seed + 40_000)
         current = self._seed_solution("takt", rng)
         current_score = self._fitness(current)
@@ -969,7 +976,9 @@ class SimulatedAnnealingRepairRule(PrioritySearchRepairRule):
             if current_score < best_score:
                 best_solution, best_score = current.clone(), current_score
             temperature = max(self.sa_min_temp, temperature * self.sa_cooling)
-        return self._decode_solution(best_solution)
+        result = self._decode_solution(best_solution)
+        result.duration_sec = time.time() - search_started
+        return result
 
 
 def rule_registry() -> dict[str, Type[RescheduleRuleScheduler]]:
