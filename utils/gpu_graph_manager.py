@@ -76,7 +76,7 @@ class GPUBatchGraphManager:
             'station': num_stations,
         }
         if bool(getattr(self.config, "use_skill_hub", False)):
-            specs['skill'] = int(getattr(self.config, "num_skill_types", 10))
+            specs['skill'] = int(getattr(self.config, "num_skill_types", 5))
         for node_type, nodes_per_graph in specs.items():
             storage = batch[node_type]
             expected_nodes = batch_size * nodes_per_graph

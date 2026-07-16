@@ -70,8 +70,11 @@ def build_task_skill_edges(task_x: torch.Tensor, num_skill_types: int) -> torch.
         f"task_x 特征不足: {task_x.size(1)} < {5 + num_skill_types}"
     )
     skill_slice = task_x[:, 5 : 5 + num_skill_types]
-    skill_ids = torch.argmax(skill_slice, dim=1)
-    task_ids = torch.arange(task_x.size(0), device=task_x.device)
+    has_skill = skill_slice.sum(dim=1) > 0.5
+    task_ids = torch.nonzero(has_skill, as_tuple=False).squeeze(1)
+    if task_ids.numel() == 0:
+        return _empty_edge_index(task_x.device)
+    skill_ids = torch.argmax(skill_slice[task_ids], dim=1)
     return torch.stack((skill_ids, task_ids), dim=0).long()
 
 

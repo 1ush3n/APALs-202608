@@ -57,7 +57,9 @@
 | 列名 (中文) | 别名 (英文) | 数据类型 | 是否必填 | 说明 |
 |------------|------------|---------|---------|------|
 | `AO号` | `TaskID`, `ID`, `工序号` | `str` | **是** | 工序唯一标识，格式决定层级归属 |
-| `类型` | `Skill_Type`, `Type`, `工种` | `int` (0~9) | 否，默认 0 | 技能类型编号，决定所需工人技能匹配 |
+| `类型` | `Node_Type`, `NodeType`, `Type` | `int` (1/2) | 否 | 节点类型：1 为虚拟层级节点，2 为物理工序 |
+| `专业编码` | `Profession_Code`, `Raw_Profession` | `str` | 否 | 原始 17 类专业编码，由物理工序 AO号第二个字符派生 |
+| `工种` | `Skill`, `Skill_Type` | `int` (-1/0~4) | 否 | 5 类聚合工种；虚拟层级节点固定为 -1 |
 | `紧前工序AO号` | `Predecessors`, `Preds`, `紧前工序` | `str` (逗号分隔) | 否 | 显式指定的前置工序 AO号，支持逗号 `,` / 分号 `;` / 中文顿号 `、` |
 | `需求人数` | `Demand_Workers`, `Req_Workers` | `int` (≥1) | 否，默认 1 | 该工序最少需要的工人数 |
 | `加工时间/h` | `Duration`, `Time`, `工时` | `float` (≥0) | 否 | 该工序的标准加工时间，**单位：小时** |
@@ -356,7 +358,9 @@ col_candidates = {
     'task_id':         ['工序号', 'TaskID', 'id', 'Task_ID', 'ID', 'AO号'],
     'duration':        ['装配时间', 'Duration', '工时', 'Time', 'Duration_Time', '加工时间/h'],
     'predecessors':    ['紧前工序', 'Predecessors', 'Preds', 'Predecessor_IDs', '紧前工序AO号'],
-    'skill_type':      ['工种', 'Skill', 'Skill_Type', 'Type', '类型'],
+    'node_type':       ['类型', 'Node_Type', 'NodeType', 'Type'],
+    'profession_code': ['专业编码', 'Profession_Code', 'Raw_Profession'],
+    'skill_type':      ['工种', 'Skill', 'Skill_Type'],
     'fixed_station':   ['限定站位', 'Fixed_Station', 'Station_Constraint'],
     'demand_workers':  ['需求人数', 'Demand_Workers', 'Workers_Required', 'Req_Workers'],
 }
@@ -368,7 +372,8 @@ col_candidates = {
 
 | 内部列名 | 缺失时的默认值 |
 |---------|-------------|
-| `skill_type` | `0` |
+| `node_type` | 按工时推断：正工时为 2，否则为 1（仅兼容旧数据） |
+| `skill_type` | 物理工序为 `0`、虚拟节点为 `-1`（仅兼容旧数据） |
 | `demand_workers` | `1` (且 fillna 为 1) |
 | `fixed_station` | `np.nan` (表示不限定) |
 | `duration` | **不设默认值**（必须有这一列） |
@@ -496,10 +501,12 @@ for i in range(edges.shape[1]):
 assert len(unique_edges) == edges.shape[1]
 print(f"✓ 无重复边 (共 {len(unique_edges)} 条)")
 
-# 验证 6: skill_type 在 [0,9] 之间
-skill_types = data['task_df']['skill_type'].dropna()
-assert skill_types.between(0, 9).all()
-print(f"✓ skill_type 合法 (0~9)")
+# 验证 6：节点类型与工种语义严格分离
+task_df = data['task_df']
+physical = task_df['node_type'].eq(2)
+assert task_df.loc[physical, 'skill_type'].between(0, 4).all()
+assert task_df.loc[~physical, 'skill_type'].eq(-1).all()
+print("节点类型与 5 类工种合法")
 
 # 验证 7: duration 非负
 assert (data['task_df']['duration'] >= 0).all()
@@ -514,6 +521,22 @@ python data_loader.py
 ```
 
 脚本内置的 `__main__` 会尝试加载 `3182.csv` 并打印边矩阵的形状。
+
+### 10.4 从权威 Excel 重建 3182 数据
+
+在 `rag_env` 环境中执行：
+
+```bash
+python scripts/build_3182_dataset.py
+```
+
+转换规则保存在 `conf/data/skill_groups_5.yaml`。脚本从 `data/原始数据.xlsx`
+读取权威字段，逐行校验原有 8 个 CSV 字段，并新增：
+
+- `专业编码`：物理工序 AO号的第二个字符，共 17 类；
+- `工种`：按劳动量均衡聚合为 5 类，虚拟节点固定为 `-1`。
+
+当前 5 类分组是实验性资源建模假设，不等同于工厂确认的专业互换关系。
 
 ---
 

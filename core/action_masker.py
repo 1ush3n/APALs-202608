@@ -134,7 +134,10 @@ class ActionMasker:
         req_demands = task_static_feat_device[ready_indices, 2].long()
         
         free_skills = env.worker_skill_matrix.to(t_device)
-        skills_mask = free_skills[:, req_skills] > 0.5 # [num_workers, len(ready_indices)]
+        valid_skills = req_skills >= 0
+        safe_req_skills = req_skills.clamp(min=0)
+        skills_mask = free_skills[:, safe_req_skills] > 0.5  # [num_workers, len(ready_indices)]
+        skills_mask[:, ~valid_skills] = True
         
         free_locks = torch.from_numpy(env.worker_locks).to(device=t_device, dtype=torch.long)
         stations_1based = torch.arange(env.num_stations, device=t_device) + 1
@@ -228,7 +231,10 @@ class ActionMasker:
         req_demands = env.task_static_feat[ready_indices, 2].long().cpu().numpy()
         
         # skills_mask: [num_workers, len(ready_indices)]
-        skills_mask = free_skills[:, req_skills] > 0.5
+        valid_skills = req_skills >= 0
+        safe_req_skills = np.maximum(req_skills, 0)
+        skills_mask = free_skills[:, safe_req_skills] > 0.5
+        skills_mask[:, ~valid_skills] = True
         
         # lock_compat: [num_workers, num_stations]
         lock_compat = (free_locks[:, None] == 0) | (free_locks[:, None] == np.arange(env.num_stations) + 1)
@@ -297,7 +303,11 @@ class ActionMasker:
                 if fixed != -1
                 else list(range(min_station, min(env.num_stations, max_station + 1)))
             )
-            has_skill = free_skills[:, req_skill] > 0.5
+            has_skill = (
+                free_skills[:, req_skill] > 0.5
+                if req_skill >= 0
+                else np.ones(env.num_workers, dtype=bool)
+            )
             
             for s in station_range:
                 if s < 0 or s >= env.num_stations: continue

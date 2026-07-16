@@ -36,6 +36,7 @@ STRUCTURAL_FIELDS = {
     "hidden_dim", "num_gat_layers", "num_heads", "task_feat_dim",
     "worker_feat_dim", "station_feat_dim", "use_skill_hub",
     "skill_hub_bidirectional", "num_skill_types", "skill_feat_dim",
+    "worker_skill_feature_slots",
     "use_input_layer_norm", "use_gat_layer_norm", "use_head_layer_norm",
     "use_shared_trunk", "use_attention_critic", "use_autoregressive_worker",
 }

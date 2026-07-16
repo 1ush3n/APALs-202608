@@ -43,8 +43,9 @@ class Config:
     station_feat_dim: int = 15           # Station Node Input Features
     use_skill_hub: bool = True           # 是否用 Skill Hub 替代稠密 Worker->Task 技能边
     skill_hub_bidirectional: bool = True # Skill Hub 是否增加 Task->Skill->Worker 反向消息
-    num_skill_types: int = 10            # APAL 工种数量
-    skill_feat_dim: int = 16             # 技能 one-hot 10 维 + 六项资源统计
+    num_skill_types: int = 5             # 当前实验使用的聚合工种数量
+    skill_feat_dim: int = 11             # 技能 one-hot 5 维 + 六项资源统计
+    worker_skill_feature_slots: int = 10 # 工人特征中预留的技能槽位，前 5 维有效、其余补零
     
     # ------------------
     # 泛化性与域随机化 (Domain Randomization)

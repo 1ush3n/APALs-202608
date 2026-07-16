@@ -50,7 +50,7 @@ def _build_observation(*, use_skill_hub: bool, bidirectional: bool):
 def test_default_config_enables_bidirectional_skill_hub() -> None:
     assert configs.use_skill_hub is True
     assert configs.skill_hub_bidirectional is True
-    assert configs.num_skill_types == 10
+    assert configs.num_skill_types == 5
     assert configs.skill_feat_dim == configs.num_skill_types + 6
 
 
@@ -62,8 +62,10 @@ def test_legacy_resource_graph_remains_available() -> None:
 
     assert "skill" not in observation.node_types
     assert ("worker", "can_do", "task") in observation.edge_types
-    worker_skills = observation["worker"].x[:, 1:11] > 0.5
-    task_skills = torch.argmax(observation["task"].x[:, 5:15], dim=1)
+    worker_skills = observation["worker"].x[:, 1 : 1 + configs.num_skill_types] > 0.5
+    task_onehot = observation["task"].x[:, 5 : 5 + configs.num_skill_types]
+    physical_tasks = task_onehot.sum(dim=1) > 0.5
+    task_skills = torch.argmax(task_onehot[physical_tasks], dim=1)
     expected_direct_edges = int(worker_skills[:, task_skills].sum().item())
     assert observation["worker", "can_do", "task"].edge_index.size(1) == expected_direct_edges
     assert observation["task", "precedes", "task"].edge_index.size(1) == 753
@@ -74,9 +76,13 @@ def test_skill_hub_forward_and_bidirectional_modes() -> None:
         use_skill_hub=True,
         bidirectional=False,
     )
-    assert forward["skill"].x.shape == (10, 16)
-    expected_worker_skill_edges = int((forward["worker"].x[:, 1:11] > 0.5).sum().item())
-    expected_task_skill_edges = int(forward["task"].x.size(0))
+    assert forward["skill"].x.shape == (configs.num_skill_types, configs.skill_feat_dim)
+    expected_worker_skill_edges = int(
+        (forward["worker"].x[:, 1 : 1 + configs.num_skill_types] > 0.5).sum().item()
+    )
+    expected_task_skill_edges = int(
+        (forward["task"].x[:, 5 : 5 + configs.num_skill_types].sum(dim=1) > 0.5).sum().item()
+    )
     assert forward["worker", "has_skill", "skill"].edge_index.size(1) == expected_worker_skill_edges
     assert forward["skill", "required_by", "task"].edge_index.size(1) == expected_task_skill_edges
     assert ("task", "requires", "skill") not in forward.edge_types
@@ -88,10 +94,10 @@ def test_skill_hub_forward_and_bidirectional_modes() -> None:
         bidirectional=True,
     )
     assert bidirectional["task", "requires", "skill"].edge_index.size(1) == int(
-        bidirectional["task"].x.size(0)
+        expected_task_skill_edges
     )
     assert bidirectional["skill", "provided_by", "worker"].edge_index.size(1) == int(
-        (bidirectional["worker"].x[:, 1:11] > 0.5).sum().item()
+        (bidirectional["worker"].x[:, 1 : 1 + configs.num_skill_types] > 0.5).sum().item()
     )
 
 

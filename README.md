@@ -614,8 +614,9 @@ python -m pytest -q tests/test_config_loader.py tests/test_lightning_architectur
 model:
   use_skill_hub: true
   skill_hub_bidirectional: true
-  num_skill_types: 10
-  skill_feat_dim: 16
+  num_skill_types: 5
+  skill_feat_dim: 11
+  worker_skill_feature_slots: 10
 ```
 
 - `use_skill_hub: false`：保留原始 `Worker -> Task` 的 `can_do` 直接边，可用于旧模型和消融对照。

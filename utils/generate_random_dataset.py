@@ -16,6 +16,7 @@ import re
 import random
 from environment import AirLineEnv_Graph
 from data_loader import load_data
+from configs import configs
 from runtime.hydra_config import (
     ExtraArgument,
     HydraCliError,
@@ -217,6 +218,11 @@ def generate_random_dataset(template_path, output_path, target_length, time_var)
                 '限定站位': '',
                 '部位容量': ''
             }
+            # 若模板已经包含独立工种字段，新工序继承其插入位置前驱工序的专业与工种。
+            # 这比从随机 AO号推断更稳定，也确保生成数据不会产生空工种。
+            for semantic_column in ('专业编码', '工种'):
+                if semantic_column in df.columns and not A_rows.empty:
+                    new_row[semantic_column] = A_rows.iloc[0][semantic_column]
             
             # 修改节点 B 的紧前工序：将 A 替换为 N
             b_preds_str = str(df.at[df_idx_B, '紧前工序AO号'])
@@ -282,9 +288,11 @@ def validate_generated_dataset(
         assert int(edge_index.max()) < graph_node_count
 
     worker_frame = pd.read_csv(worker_pool_path)
-    skill_columns = [f"skill_{idx}" for idx in range(10)]
+    skill_columns = [f"skill_{idx}" for idx in range(int(configs.num_skill_types))]
     skill_capacity = worker_frame[skill_columns].sum(axis=0).to_numpy(dtype=int)
     for _, row in raw_data["task_df"].iterrows():
+        if int(row["node_type"]) != 2:
+            continue
         skill = int(row["skill_type"])
         demand = max(1, int(row["demand_workers"]))
         if not 0 <= skill < len(skill_capacity):

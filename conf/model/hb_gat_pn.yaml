@@ -12,8 +12,9 @@ model:
   station_feat_dim: 15
   use_skill_hub: true
   skill_hub_bidirectional: true
-  num_skill_types: 10
-  skill_feat_dim: 16
+  num_skill_types: 5
+  skill_feat_dim: 11
+  worker_skill_feature_slots: 10
   use_shared_trunk: false
   use_attention_critic: true
   use_autoregressive_worker: true

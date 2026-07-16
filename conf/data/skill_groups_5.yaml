@@ -1,0 +1,33 @@
+source:
+  workbook: data/原始数据.xlsx
+  sheet_name: 工艺网络数据
+  output_csv: data/3182.csv
+
+schema:
+  physical_node_type: 2
+  virtual_skill_type: -1
+  source_profession_column: 专业
+  profession_code_column: 专业编码
+  skill_type_column: 工种
+
+# 原始数据没有真实工种字段。数据说明规定：类型为 2 的物理工序以 AO 号
+# 第二个字符作为“专业”编码。以下 5 类仅按总劳动量（工时×需求人数）均衡聚合，
+# 不代表工厂已经确认这些专业可以互相替代。
+groups:
+  0: [A, G, J, L, M]
+  1: [D, R, W]
+  2: [B, Q, X]
+  3: [N, Y]
+  4: [C, E, F, K]
+
+output_columns:
+  - 序号
+  - AO号
+  - 类型
+  - 专业编码
+  - 工种
+  - 紧前工序AO号
+  - 需求人数
+  - 加工时间/h
+  - 限定站位
+  - 部位容量

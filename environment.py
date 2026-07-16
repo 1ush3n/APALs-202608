@@ -336,7 +336,12 @@ class AirLineEnv_Graph(gym.Env):
             w_all = torch.arange(n_w_full).repeat_interleave(n_t_full)
             t_all = torch.arange(n_t_full).repeat(n_w_full)
             skills_col = self.task_static_feat[:, 1].squeeze().long()
-            has_skill = self.full_worker_skill_matrix[w_all, skills_col[t_all]] == 1.0
+            task_skills = skills_col[t_all]
+            valid_skill = (task_skills >= 0) & (task_skills < int(configs.num_skill_types))
+            has_skill = torch.zeros_like(valid_skill)
+            has_skill[valid_skill] = (
+                self.full_worker_skill_matrix[w_all[valid_skill], task_skills[valid_skill]] == 1.0
+            )
             ctx['full_can_do_edge_index'] = torch.stack([w_all[has_skill], t_all[has_skill]])
 
     def _resolve_project_path(self, path_like: str | Path) -> Path:
@@ -489,8 +494,8 @@ class AirLineEnv_Graph(gym.Env):
         dur = torch.tensor(task_df['duration'].values, dtype=torch.float).unsqueeze(1)
         skill = torch.tensor(task_df['skill_type'].values, dtype=torch.float).unsqueeze(1)
         demand = torch.tensor(task_df['demand_workers'].values, dtype=torch.float).unsqueeze(1)
-        # 强制至少需要 1 人
-        demand = torch.clamp(demand, min=1.0)
+        # 物理工序至少需要 1 人；虚拟层级节点不占用工人。
+        demand = torch.where(skill.ge(0), torch.clamp(demand, min=1.0), torch.zeros_like(demand))
         
         self.task_static_feat = torch.cat([dur, skill, demand], dim=1)
         
@@ -507,9 +512,23 @@ class AirLineEnv_Graph(gym.Env):
         full_worker_df = pd.read_csv(pool_path)
         self.n_w_max = len(full_worker_df)
         self.full_worker_efficiency = full_worker_df['efficiency'].values
-        self.full_worker_skill_matrix = torch.tensor(
-            full_worker_df[[f'skill_{i}' for i in range(10)]].values, 
-            dtype=torch.float
+        num_skill_types = int(configs.num_skill_types)
+        skill_slots = int(getattr(configs, "worker_skill_feature_slots", num_skill_types))
+        assert 0 < num_skill_types <= skill_slots, "有效工种数必须大于 0 且不超过工人技能槽位数"
+        active_skill_columns = [f'skill_{i}' for i in range(num_skill_types)]
+        missing_skill_columns = sorted(set(active_skill_columns) - set(full_worker_df.columns))
+        if missing_skill_columns:
+            raise ValueError(f"工人池缺少有效技能列：{missing_skill_columns}")
+        active_skill_matrix = torch.tensor(
+            full_worker_df[active_skill_columns].values,
+            dtype=torch.float,
+        )
+        # 输入形状：[W, 5] -> [W, 10]；后 5 个槽位仅为特征布局兼容而补零。
+        skill_padding = torch.zeros((self.n_w_max, skill_slots - num_skill_types))
+        self.full_worker_skill_matrix = torch.cat([active_skill_matrix, skill_padding], dim=1)
+        expected_worker_dim = 1 + skill_slots + 11
+        assert int(configs.worker_feat_dim) == expected_worker_dim, (
+            f"worker_feat_dim={configs.worker_feat_dim}，应为 {expected_worker_dim}"
         )
         
         # Default workers (used in eval)
@@ -524,12 +543,16 @@ class AirLineEnv_Graph(gym.Env):
         
         # [再次鲁棒性检查] Check and Clamp Demand
         # 双重保险：如果初始化后发现某技能工人总数仍少于某任务需求，强制降低该任务需求。
-        skill_capacity = self.worker_skill_matrix.sum(dim=0) # [10]
+        skill_capacity = self.worker_skill_matrix[:, :num_skill_types].sum(dim=0)  # [5]
         
         clamped_count = 0
         for t in range(self.num_tasks):
             t_skill = int(skill[t].item())
             t_demand = int(demand[t].item())
+            if t_skill < 0:
+                continue
+            if t_skill >= num_skill_types:
+                raise ValueError(f"工序 {t} 的工种 {t_skill} 超出 [0, {num_skill_types - 1}]")
             
             cap = int(skill_capacity[t_skill].item())
             if cap == 0:
@@ -593,10 +616,12 @@ class AirLineEnv_Graph(gym.Env):
         self.base_durations = dur.clone() / self.mean_task_time  
         self.base_task_x[:, 0:1] = self.base_durations
         
-        type_onehot = torch.zeros((self.num_tasks, 10))
-        type_indices = skill.long().clamp(0, 9)
-        type_onehot.scatter_(1, type_indices, 1)
-        self.base_task_x[:, 5:15] = type_onehot
+        type_onehot = torch.zeros((self.num_tasks, num_skill_types))
+        type_indices = skill.long().squeeze(1)
+        valid_skill = (type_indices >= 0) & (type_indices < num_skill_types)
+        type_onehot[valid_skill, type_indices[valid_skill]] = 1.0
+        # 输入形状：[T, 5] -> task_x[:, 5:10]；虚拟节点保持全零技能编码。
+        self.base_task_x[:, 5 : 5 + num_skill_types] = type_onehot
         self.base_task_x[:, 16:17] = demand
         
         # [Feature Upgrade] worker base feat + wait_time slot (11 dims padding now, total 22 dims)
@@ -661,6 +686,12 @@ class AirLineEnv_Graph(gym.Env):
             for t in range(self.num_tasks):
                 t_skill = int(self.task_static_feat[t, 1].item())
                 t_demand = int(self.task_static_feat[t, 2].item())
+                if t_skill < 0:
+                    continue
+                if t_skill >= int(configs.num_skill_types):
+                    raise ValueError(
+                        f"工序 {t} 的工种 {t_skill} 超出 [0, {int(configs.num_skill_types) - 1}]"
+                    )
                 skill_max_demand[t_skill] = max(skill_max_demand.get(t_skill, 0), t_demand)
             
             # Step 2: 对每种技能，强制抽取至少 max_demand 个该技能的工人

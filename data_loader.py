@@ -1,12 +1,12 @@
 import pandas as pd
 import torch
 import numpy as np
-import re
 import networkx as nx
 from pathlib import Path
 import os
+from typing import Any
 
-def load_data(file_path):
+def load_data(file_path: str | Path) -> dict[str, Any]:
     """
     加载并解析 Excel/CSV 数据，构建层级拓扑图。
     
@@ -55,7 +55,10 @@ def load_data(file_path):
         'task_id': ['工序号', 'TaskID', 'id', 'Task_ID', 'ID', 'AO号'],
         'duration': ['装配时间', 'Duration', '工时', 'Time', 'Duration_Time', '加工时间/h'],
         'predecessors': ['紧前工序', 'Predecessors', 'Preds', 'Predecessor_IDs', '紧前工序AO号'],
-        'skill_type': ['工种', 'Skill', 'Skill_Type', 'Type','类型'],
+        # 节点类型用于区分虚拟层级节点与物理工序，绝不能再作为工种使用。
+        'node_type': ['类型', 'Node_Type', 'NodeType', 'Type'],
+        'skill_type': ['工种', 'Skill', 'Skill_Type'],
+        'profession_code': ['专业编码', 'Profession_Code', 'Raw_Profession'],
         'fixed_station': ['限定站位', 'Fixed_Station', 'Station_Constraint'],
         'demand_workers': ['需求人数', 'Demand_Workers', 'Workers_Required', 'Req_Workers'],
     }
@@ -71,8 +74,24 @@ def load_data(file_path):
     
     df = df.rename(columns=mapping)
     
-    # 填充默认值
-    if 'skill_type' not in df.columns: df['skill_type'] = 0
+    required_columns = {'task_id', 'duration'}
+    missing_required = sorted(required_columns - set(df.columns))
+    if missing_required:
+        raise ValueError(f"数据缺少必要字段：{missing_required}")
+
+    # 兼容尚未迁移的旧数据集：物理工序暂记为工种 0，虚拟节点统一为 -1。
+    # 该兼容逻辑不从“类型”推导具体工种，因此不会再次混淆两种语义。
+    if 'node_type' not in df.columns:
+        df['node_type'] = np.where(pd.to_numeric(df['duration'], errors='coerce').fillna(0).gt(0), 2, 1)
+    df['node_type'] = pd.to_numeric(df['node_type'], errors='raise').astype(int)
+    if 'skill_type' not in df.columns:
+        df['skill_type'] = np.where(df['node_type'].eq(2), 0, -1)
+    df['skill_type'] = pd.to_numeric(df['skill_type'], errors='raise').astype(int)
+    physical_mask = df['node_type'].eq(2)
+    if df.loc[physical_mask, 'skill_type'].lt(0).any():
+        raise ValueError("物理工序的工种编号必须为非负整数")
+    if df.loc[~physical_mask, 'skill_type'].ne(-1).any():
+        raise ValueError("虚拟层级节点的工种必须为 -1")
     if 'demand_workers' not in df.columns: df['demand_workers'] = 1
     if 'fixed_station' not in df.columns: df['fixed_station'] = np.nan
     

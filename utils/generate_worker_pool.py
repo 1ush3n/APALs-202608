@@ -9,7 +9,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 from configs import configs
 
-def generate_worker_pool():
+def generate_worker_pool() -> None:
     seed = int(getattr(configs, "seed", 42))
     np.random.seed(seed)
     random.seed(seed)
@@ -26,16 +26,16 @@ def generate_worker_pool():
     # 1. 效率因子在 0.8 到 1.2 之间
     efficiencies = np.random.uniform(0.8, 1.2, n_w_max)
     
-    # 2. 技能矩阵 (假设最多 10 种技能)
-    skill_matrix = np.zeros((n_w_max, 10), dtype=int)
+    # 2. 仅生成配置中启用的有效工种列。
+    num_skill_types = int(configs.num_skill_types)
+    assert num_skill_types > 0, "工种数量必须大于 0"
+    skill_matrix = np.zeros((n_w_max, num_skill_types), dtype=int)
     
-    # 保底机制：强制每种技能至少有 5 名顶尖专家
-    for s_idx in range(10):
-        experts = random.sample(range(n_w_max), 5)
-        for e in experts:
-            skill_matrix[e, s_idx] = 1
+    # 用主工种轮转保证五类工种的基础人数完全均衡。
+    for worker_id in range(n_w_max):
+        skill_matrix[worker_id, worker_id % num_skill_types] = 1
             
-    # 其余随机分配 (每人 1~4 个技能)
+    # 再随机补充技能，使每名工人具有 2~4 类技能。
     for w in range(n_w_max):
         current_skills = np.sum(skill_matrix[w])
         target_skills = random.randint(2, 4)  # 每人至少 2 技能，缓解大数据集死锁
@@ -50,13 +50,13 @@ def generate_worker_pool():
     # 3. 构建 DataFrame
     for w in range(n_w_max):
         row = {'worker_id': w, 'efficiency': efficiencies[w]}
-        for s in range(10):
+        for s in range(num_skill_types):
             row[f'skill_{s}'] = skill_matrix[w, s]
         workers.append(row)
         
     df = pd.DataFrame(workers)
     df.to_csv(output_path, index=False)
-    print(f"✅ 成功生成固定工人技能池 (共 {n_w_max} 名工人)，保存于: {output_path}")
+    print(f"成功生成固定工人技能池（共 {n_w_max} 名工人），保存于：{output_path}")
 
 if __name__ == "__main__":
     generate_worker_pool()
