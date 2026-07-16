@@ -26,6 +26,14 @@ class Config:
     n_w_min: int = 60                    # 每回合训练随机抽取的最小工人数 (Domain Randomization)
     n_w: int = 80                        # 每回合训练抽取的最大工人数，及验证(Eval)阶段固定的工人数
     max_slots_per_station: int = 3       # 每站位同时执行的最大工序数（物理工位槽）
+
+    # ------------------
+    # 可行性保持启发式解码器 (Feasibility-preserving Decoder)
+    # ------------------
+    heuristic_worker_preassignment_ratio: float = 0.50  # 预绑定一半工人，其余作为可移动技能保留池
+    heuristic_enable_mobile_skill_reserve: bool = True  # 新绑定不得破坏剩余工位—技能配额的启发式可满足性
+    heuristic_team_candidate_pool: int = 10             # 每次组队参与组合搜索的移动工人候选上限
+    heuristic_team_search_limit: int = 32               # 单个工序最多校验的候选团队数量
     
     # ------------------
     # 模型超参数 (Model Hyperparameters)

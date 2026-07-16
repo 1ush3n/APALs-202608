@@ -886,6 +886,8 @@ class AirLineEnv_Graph(gym.Env):
             self._apply_reschedule_scenario()
             self._advance_time()
         
+        if getattr(self, 'skip_obs_building', False):
+            return None
         return self._get_observation()
 
     def _topological_sort(self):

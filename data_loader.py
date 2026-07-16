@@ -4,7 +4,26 @@ import numpy as np
 import networkx as nx
 from pathlib import Path
 import os
+import re
 from typing import Any
+
+
+def _parse_predecessor_tokens(value: Any) -> list[str]:
+    """把前驱字段规范化为 AO 号列表；空值与 0 表示无显式前驱。"""
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if text.lower() in {"", "0", "nan", "none"}:
+        return []
+
+    tokens: list[str] = []
+    for raw_token in re.split(r"[,，;；]", text):
+        token = raw_token.strip()
+        if token.endswith(".0"):
+            token = token[:-2]
+        if token.lower() not in {"", "0", "nan", "none"}:
+            tokens.append(token)
+    return tokens
 
 def load_data(file_path: str | Path) -> dict[str, Any]:
     """
@@ -107,6 +126,31 @@ def load_data(file_path: str | Path) -> dict[str, Any]:
     # 使用 DataFrame 的 index 作为 internal_id，保证与 Excel 行号严格一致 (0-based)
     df['internal_id'] = df.index
     id_map = {row['task_id']: row['internal_id'] for idx, row in df.iterrows()}
+
+    # 在构图前执行严格引用完整性检查。悬空前驱不能被静默忽略，否则排程会在
+    # 不知情的情况下删除工厂声明的工艺约束，得到形式合法但语义不完整的结果。
+    dangling_predecessors: list[dict[str, Any]] = []
+    for row_index, row in df.iterrows():
+        for predecessor in _parse_predecessor_tokens(row.get('predecessors', np.nan)):
+            if predecessor not in id_map:
+                dangling_predecessors.append(
+                    {
+                        "csv_line": int(row_index) + 2,
+                        "task_id": str(row['task_id']),
+                        "predecessor": predecessor,
+                    }
+                )
+    if dangling_predecessors:
+        examples = "; ".join(
+            f"第{item['csv_line']}行 {item['task_id']} -> {item['predecessor']}"
+            for item in dangling_predecessors[:10]
+        )
+        remainder = len(dangling_predecessors) - min(10, len(dangling_predecessors))
+        suffix = f"；另有 {remainder} 条" if remainder > 0 else ""
+        raise ValueError(
+            f"数据存在 {len(dangling_predecessors)} 条悬空前驱 AO，拒绝静默删除约束："
+            f"{examples}{suffix}"
+        )
     
     # ------------------
     # 4. 状态机解析 (State Machine Parsing)
@@ -182,17 +226,10 @@ def load_data(file_path: str | Path) -> dict[str, Any]:
         succ_id = row['internal_id']
         if succ_id not in all_sub_ids:
             continue
-        preds_str = str(row.get('predecessors', ''))
-        if pd.isna(preds_str) or preds_str.lower() in ['nan', 'none', '', '0']:
-            continue
-        preds_list = preds_str.replace('，', ',').replace(';', ',').split(',')
-        for p_str in preds_list:
-            p_str = p_str.strip()
-            if p_str.endswith('.0'): p_str = p_str[:-2]
-            if p_str and p_str in id_map:
-                pred_id = id_map[p_str]
-                if pred_id in sub_successors and succ_id not in sub_successors[pred_id]:
-                    sub_successors[pred_id].append(succ_id)
+        for p_str in _parse_predecessor_tokens(row.get('predecessors', np.nan)):
+            pred_id = id_map[p_str]
+            if pred_id in sub_successors and succ_id not in sub_successors[pred_id]:
+                sub_successors[pred_id].append(succ_id)
     
     # Step 2: 对每个 Root 按显式 Sub 紧前关系构建边
     for r_idx, r_id in enumerate(root_groups):
@@ -223,20 +260,9 @@ def load_data(file_path: str | Path) -> dict[str, Any]:
     # Pass 3: 显式紧前工序 (Rule D)
     for idx, row in df.iterrows():
         succ_id = row['internal_id']
-        preds_str = str(row.get('predecessors', ''))
-        
-        if pd.isna(preds_str) or preds_str.lower() in ['nan', 'none', '', '0']:
-            continue
-            
-        # 分割并处理
-        preds_list = preds_str.replace('，', ',').replace(';', ',').split(',')
-        for p_str in preds_list:
-            p_str = p_str.strip()
-            if p_str.endswith('.0'): p_str = p_str[:-2]
-            
-            if p_str and p_str in id_map:
-                pred_id = id_map[p_str]
-                edges.append((pred_id, succ_id))
+        for p_str in _parse_predecessor_tokens(row.get('predecessors', np.nan)):
+            pred_id = id_map[p_str]
+            edges.append((pred_id, succ_id))
     
     # 去重
     edges = sorted(list(set(edges)))

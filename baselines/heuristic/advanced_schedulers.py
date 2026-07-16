@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import math
-import random
 import time
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal
@@ -10,6 +9,10 @@ from typing import Any, Iterable, Literal
 import numpy as np
 
 from configs import configs
+from baselines.heuristic.feasibility_decoder import (
+    FeasibilityDecodeResult,
+    FeasibilityPreservingDecoder,
+)
 
 
 SeedRule = Literal["SPT", "LPT", "CPM", "MSL", "Random"]
@@ -29,16 +32,6 @@ class PrioritySolution:
             station_priority=self.station_priority.copy(),
             worker_priority=self.worker_priority.copy(),
         )
-
-
-@dataclass
-class DecodeResult:
-    fitness: float
-    makespan: float
-    balance_std: float
-    assigned_tasks: list[tuple[int, int, list[int], float, float]]
-    complete: bool
-    deadlock_count: int
 
 
 def _to_numpy(value: Any) -> np.ndarray:
@@ -77,11 +70,6 @@ def _rng(seed: int) -> np.random.Generator:
     return np.random.default_rng(int(seed))
 
 
-def _set_seed(seed: int) -> None:
-    np.random.seed(int(seed))
-    random.seed(int(seed))
-
-
 def _resource_metrics(env: Any, assigned_tasks: Iterable[tuple[int, int, list[int], float, float]], makespan: float) -> tuple[float, float]:
     if makespan <= 0:
         return 0.0, 0.0
@@ -100,101 +88,9 @@ def _resource_metrics(env: Any, assigned_tasks: Iterable[tuple[int, int, list[in
     return float(worker_util), float(station_util)
 
 
-class PriorityDecoder:
-    """使用真实 APAL 环境把优先级候选解解码为完整排程。"""
-
-    def __init__(self, env: Any, balance_weight: float = 1.0, max_steps_factor: int = 4):
-        self.env = env
-        self.balance_weight = float(balance_weight)
-        self.max_steps_factor = int(max_steps_factor)
-
-    def decode(self, solution: PrioritySolution, seed: int) -> DecodeResult:
-        _set_seed(seed)
-        env = self.env
-        env.reset(randomize_duration=False, randomize_workers=False, seed=seed)
-        env.skip_obs_building = True
-
-        task_static_feat = _to_numpy(env.task_static_feat)
-        worker_skill_matrix = _to_numpy(env.worker_skill_matrix)
-        max_steps = max(1, env.num_tasks * self.max_steps_factor)
-        done = False
-        deadlock_count = 0
-
-        for _ in range(max_steps):
-            if len(env.assigned_tasks) == env.num_tasks:
-                done = True
-                break
-
-            task_mask_raw, station_mask_raw, _ = env.get_masks()
-            task_mask = _to_numpy(task_mask_raw).astype(bool)
-            station_mask = _to_numpy(station_mask_raw).astype(bool)
-
-            if bool(task_mask.all()):
-                if env.try_wait_for_resources():
-                    continue
-                deadlock_count += 1
-                break
-
-            available_tasks = np.where(~task_mask)[0]
-            ordered_tasks = sorted(available_tasks, key=lambda t: solution.task_priority[int(t)], reverse=True)
-            action = None
-
-            for task_id in ordered_tasks:
-                tid = int(task_id)
-                valid_stations = np.where(~station_mask[tid])[0]
-                if valid_stations.size == 0:
-                    continue
-
-                selected_station = int(max(valid_stations, key=lambda s: solution.station_priority[tid, int(s)]))
-                task_skill = int(task_static_feat[tid, 1])
-                worker_demand = max(1, int(task_static_feat[tid, 2]))
-                worker_locks = _to_numpy(env.worker_locks)
-
-                skilled_workers: list[int] = []
-                for worker_id in range(env.num_workers):
-                    if worker_skill_matrix[worker_id, task_skill] > 0.5:
-                        if worker_locks[worker_id] == 0 or worker_locks[worker_id] == selected_station + 1:
-                            skilled_workers.append(worker_id)
-
-                if len(skilled_workers) < worker_demand:
-                    continue
-
-                skilled_workers.sort(key=lambda w: solution.worker_priority[tid, w], reverse=True)
-                action = (tid, selected_station, skilled_workers[:worker_demand])
-                break
-
-            if action is None:
-                if env.try_wait_for_resources():
-                    continue
-                deadlock_count += 1
-                break
-
-            _, _, done, info = env.step(action)
-            if info.get("invalid_action"):
-                deadlock_count += 1
-                break
-
-        complete = len(env.assigned_tasks) == env.num_tasks
-        if complete:
-            makespan = float(np.max(env.station_wall_clock))
-            balance_std = float(np.std(env.station_loads))
-            fitness = makespan + self.balance_weight * balance_std
-            assigned_tasks = list(env.assigned_tasks)
-        else:
-            makespan = float(env.ideal_makespan * 3.0)
-            balance_std = float(env.ideal_station_load * 3.0)
-            fitness = makespan + self.balance_weight * balance_std
-            assigned_tasks = []
-            deadlock_count = max(1, deadlock_count)
-
-        return DecodeResult(
-            fitness=float(fitness),
-            makespan=makespan,
-            balance_std=balance_std,
-            assigned_tasks=assigned_tasks,
-            complete=complete,
-            deadlock_count=deadlock_count,
-        )
+# 兼容既有元启发式入口；所有高级基线现在共享同一个安全解码器。
+DecodeResult = FeasibilityDecodeResult
+PriorityDecoder = FeasibilityPreservingDecoder
 
 
 class AdvancedSchedulerBase:
@@ -236,6 +132,10 @@ class AdvancedSchedulerBase:
         solution.station_priority = np.tile(station_rank, (self.num_tasks, 1)) + rng.normal(0.0, 0.03, (self.num_tasks, self.num_stations))
         solution.worker_priority = rng.random((self.num_tasks, self.num_workers))
         return solution
+
+    def build_rule_solution(self, rule: SeedRule, seed: int | None = None) -> PrioritySolution:
+        """为规则基线构造可复现的公共优先级编码。"""
+        return self._seed_solution(rule, self.seed if seed is None else int(seed))
 
     def _initial_pool(self, count: int) -> list[PrioritySolution]:
         rules: list[SeedRule] = ["CPM", "SPT", "LPT", "MSL", "Random"]

@@ -30,6 +30,7 @@ from runtime.configuration import (
 )
 from baselines.heuristic.baseline_ga import GeneticAlgorithmScheduler
 from baselines.heuristic.advanced_schedulers import (
+    AdvancedSchedulerBase,
     BeamSearchScheduler,
     IteratedGreedyScheduler,
     SimulatedAnnealingScheduler,
@@ -74,6 +75,20 @@ def select_heuristic_action(env, rule, es, ls):
     根据给定的启发式规则，在当前就绪的任务和可用资源中选择并指派一个合法的动作
     """
     task_mask, station_mask, _ = env.get_masks()
+
+    # 虚拟层级节点不占工位、不需要工人，必须先以资源空动作消费；否则把 skill=-1
+    # 当作真实工种索引会产生“没有可用工人”的假死锁。
+    virtual_ready_mask = (
+        (np.asarray(env.task_status) == 1)
+        & (~np.asarray(env.constraint_engine.physical_mask, dtype=bool))
+    )
+    if hasattr(env, "task_material_ready"):
+        virtual_ready_mask &= np.asarray(env.task_material_ready) <= float(env.current_time) + 1.0e-9
+    ready_virtual = np.where(virtual_ready_mask)[0]
+    if ready_virtual.size > 0:
+        selected_virtual = int(min(ready_virtual, key=lambda task_id: (ls[int(task_id)], int(task_id))))
+        return (selected_virtual, -1, [])
+
     if task_mask.all():
         return None
         
@@ -160,8 +175,53 @@ def run_heuristic_eval(env, rule, num_runs=1, seed=42):
     valid_count = 0
     deadlock_count = 0
     
+    rule = str(rule).upper()
+    safe_decoder_rules = {"SPT", "CPM", "MSL"}
+
     for run in range(num_runs):
         run_seed = seed + run
+
+        if rule in safe_decoder_rules:
+            start_time = time.time()
+            scheduler = AdvancedSchedulerBase(env, seed=run_seed)
+            solution = scheduler.build_rule_solution(rule, run_seed)
+            result = scheduler.decoder.decode(solution, run_seed)
+            inference_time = time.time() - start_time
+            complete = bool(result.complete)
+
+            if complete:
+                valid_count += 1
+                makespan = float(result.makespan)
+                balance = float(result.balance_std)
+                worker_busy_time = 0.0
+                station_busy_time = np.zeros(env.num_stations)
+                for _, sid, team, start, end in result.assigned_tasks:
+                    duration = float(end) - float(start)
+                    worker_busy_time += duration * len(team)
+                    if sid >= 0:
+                        station_busy_time[int(sid)] += duration
+                w_util = worker_busy_time / (env.num_workers * makespan) if makespan > 0 else 0.0
+                max_slots = getattr(configs, "max_slots_per_station", 3)
+                s_util = (
+                    np.sum(station_busy_time) / (env.num_stations * max_slots * makespan)
+                    if makespan > 0
+                    else 0.0
+                )
+                run_makespans.append(makespan)
+                run_balances.append(balance)
+                run_worker_utils.append(float(w_util))
+                run_station_utils.append(float(s_util))
+                run_schedules.append(result.assigned_tasks)
+            else:
+                deadlock_count += 1
+                run_makespans.append(float(result.makespan))
+                run_balances.append(float(result.balance_std))
+                run_worker_utils.append(0.0)
+                run_station_utils.append(0.0)
+                run_schedules.append([])
+            run_durations.append(inference_time)
+            continue
+
         env.reset(randomize_duration=False, randomize_workers=False, seed=run_seed)
         es, ls = compute_cpm_times(env)
         

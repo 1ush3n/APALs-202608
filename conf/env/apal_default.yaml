@@ -9,6 +9,10 @@ env:
   n_w_min: 60
   n_w: 80
   max_slots_per_station: 3
+  heuristic_worker_preassignment_ratio: 0.5
+  heuristic_enable_mobile_skill_reserve: true
+  heuristic_team_candidate_pool: 10
+  heuristic_team_search_limit: 32
   randomize_durations: true
   dur_random_range: 0.2
   curriculum_episodes: 0

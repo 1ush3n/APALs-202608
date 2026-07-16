@@ -79,6 +79,10 @@ def audit_training_data(
         for predecessor in _split_predecessors(value)
         if predecessor not in reference_ids
     }
+    assert not reference_external_predecessors, (
+        "参考数据存在悬空前驱 AO，必须先显式纠错，禁止把它们作为允许例外："
+        f"{sorted(reference_external_predecessors)}"
+    )
     reference = reference.set_index(reference["AO号"].astype(str), drop=False)
     code_to_skill = _load_skill_mapping(mapping_path)
 
@@ -138,11 +142,7 @@ def audit_training_data(
         for task_id, predecessors in zip(ao, frame["紧前工序AO号"], strict=True):
             for predecessor in _split_predecessors(predecessors):
                 if predecessor not in ids:
-                    assert predecessor in reference_external_predecessors, (
-                        f"{path.name} 产生了非源数据已有的悬空前驱 {predecessor}"
-                    )
-                    known_external_predecessor_references += 1
-                    continue
+                    raise AssertionError(f"{path.name} 存在悬空前驱 {predecessor}")
                 graph.add_edge(predecessor, task_id)
         assert nx.is_directed_acyclic_graph(graph), f"{path.name} 工艺网络存在环"
 
