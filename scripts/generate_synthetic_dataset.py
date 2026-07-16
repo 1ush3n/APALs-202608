@@ -32,7 +32,11 @@ def get_active_ancestors(node, drop_set, pred_map, memo, visited):
     memo[node] = active_preds
     return active_preds
 
-def generate(template_path, target_length, seed):
+def generate(
+    template_path: str | Path,
+    target_length: int,
+    seed: int,
+) -> pd.DataFrame | None:
     np.random.seed(seed)
     random.seed(seed)
     df = pd.read_csv(template_path, dtype=str)
@@ -76,13 +80,18 @@ def generate(template_path, target_length, seed):
             df.at[idx, '紧前工序AO号'] = ''
             
     current_edges = []
+    physical_task_ids = set(
+        df.loc[df['类型'] == 2, 'AO号'].astype(str).str.strip()
+    )
     for idx, row in df.iterrows():
         node_id = str(row['AO号']).strip()
         preds_str = str(row.get('紧前工序AO号', ''))
         if pd.notna(preds_str) and preds_str.lower() not in ['nan', 'none', '', '0']:
             for p in re.split(r'[,，]', preds_str):
                 p = p.strip()
-                if p: current_edges.append((p, node_id, idx))
+                # 新物理工序只允许插入两道物理工序之间，不能继承虚拟节点的工种 -1。
+                if p and p in physical_task_ids and node_id in physical_task_ids:
+                    current_edges.append((p, node_id, idx))
                 
     new_rows = []
     added_count = 0
@@ -91,17 +100,38 @@ def generate(template_path, target_length, seed):
     while added_count < num_to_add and len(current_edges) > 0:
         edge_idx = random.randint(0, len(current_edges) - 1)
         node_A, node_B, df_idx_B = current_edges.pop(edge_idx)
-        node_N = f"RAND-N{random.randint(1000, 99999)}-{added_count}"
-        
-        new_row = {
+        source_rows = df[df['AO号'].astype(str).str.strip() == node_A]
+        if source_rows.empty:
+            continue
+        source_row = source_rows.iloc[0]
+        profession_code = str(source_row.get('专业编码', '')).strip().upper()
+        skill_type = int(source_row.get('工种', -1))
+        if not profession_code or skill_type < 0:
+            continue
+
+        same_skill_rows = df[
+            (df['类型'] == 2)
+            & (pd.to_numeric(df['工种'], errors='coerce') == skill_type)
+        ]
+        donor_row = same_skill_rows.iloc[random.randrange(len(same_skill_rows))]
+        donor_duration = max(0.1, float(donor_row['加工时间/h']))
+        sampled_duration = max(0.1, float(np.random.normal(donor_duration, donor_duration * 0.2)))
+        sampled_demand = max(1, int(float(donor_row['需求人数'])))
+
+        # AO号第二个字符继续编码原始专业，使专业编码可由 AO号独立复算。
+        node_N = f"R{profession_code}ND-N{random.randint(1000, 99999)}-{added_count}"
+        new_row = {column: '' for column in df.columns}
+        new_row.update({
             'AO号': node_N,
             '类型': 2,
+            '专业编码': profession_code,
+            '工种': skill_type,
             '紧前工序AO号': node_A,
-            '需求人数': '2',
-            '加工时间/h': 1.0,
+            '需求人数': sampled_demand,
+            '加工时间/h': round(sampled_duration, 2),
             '限定站位': '',
-            '部位容量': ''
-        }
+            '部位容量': '',
+        })
         new_rows.append(new_row)
         
         b_preds_str = str(df.at[df_idx_B, '紧前工序AO号'])
@@ -121,6 +151,8 @@ def generate(template_path, target_length, seed):
         new_df_data.append(row.to_dict())
         
     df = pd.DataFrame(new_df_data)
+    if '序号' in df.columns:
+        df['序号'] = np.arange(1, len(df) + 1)
         
     G2 = nx.DiGraph()
     for idx, row in df.iterrows():

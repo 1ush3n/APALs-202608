@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
 import pandas as pd
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import yaml
 
+from utils.skill_mapping import assign_skill_columns
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 LEGACY_COLUMNS = [
     "序号",
     "AO号",
@@ -92,27 +98,13 @@ def build_dataset(config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
     physical_mask = node_type.eq(physical_type)
     assert set(node_type.unique()) == {1, physical_type}, "节点类型必须仅包含 1 和 2"
 
-    ao = raw["AO号"].astype(str)
-    assert ao[physical_mask].str.len().ge(2).all(), "物理工序 AO号 长度不足，无法提取专业编码"
-    profession_code = pd.Series("", index=raw.index, dtype="object")
-    profession_code.loc[physical_mask] = ao.loc[physical_mask].str[1].str.upper()
-
-    code_to_group = {
-        str(code).strip().upper(): int(group_id)
-        for group_id, codes in config["groups"].items()
-        for code in codes
-    }
-    observed_codes = set(profession_code.loc[physical_mask].unique())
-    assert observed_codes == set(code_to_group), (
-        f"专业编码集合不一致；数据={sorted(observed_codes)}，配置={sorted(code_to_group)}"
+    output = assign_skill_columns(
+        raw,
+        groups=config["groups"],
+        physical_node_type=physical_type,
+        virtual_skill_type=int(schema["virtual_skill_type"]),
+        require_all_codes=True,
     )
-
-    skill_type = pd.Series(int(schema["virtual_skill_type"]), index=raw.index, dtype="int64")
-    skill_type.loc[physical_mask] = profession_code.loc[physical_mask].map(code_to_group).astype(int)
-
-    output = raw.copy()
-    output[schema["profession_code_column"]] = profession_code
-    output[schema["skill_type_column"]] = skill_type
     output = output[config["output_columns"]].copy()
     legacy_projection = raw[LEGACY_COLUMNS].copy()
     _assert_legacy_projection_equal(output, legacy_projection)

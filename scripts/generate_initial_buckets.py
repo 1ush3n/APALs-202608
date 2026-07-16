@@ -34,6 +34,19 @@ BUCKET_ARGS = {
 }
 
 
+def _clear_output_directory(output_dir: Path) -> None:
+    """清空受管生成目录内容，但保留 OneDrive 同步目录本身。"""
+    resolved = output_dir.resolve()
+    generated_root = (PROJECT_ROOT / "data" / "generated").resolve()
+    if not resolved.is_relative_to(generated_root):
+        raise ValueError(f"拒绝清理受管目录之外的路径：{resolved}")
+    for child in resolved.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
 def main(argv: list[str] | None = None) -> None:
     if should_show_help(argv):
         print(hydra_help(BUCKET_ARGS))
@@ -44,10 +57,11 @@ def main(argv: list[str] | None = None) -> None:
         print(str(exc), file=sys.stderr)
         raise SystemExit(2)
 
-    if args.bucket not in {"all", *BUCKETS}:
-        raise ValueError(f"未知数据桶: {args.bucket}")
+    bucket_name = str(args.bucket)
+    if bucket_name not in {"all", *BUCKETS}:
+        raise ValueError(f"未知数据桶: {bucket_name}")
 
-    selected = BUCKETS if args.bucket == "all" else {args.bucket: BUCKETS[args.bucket]}
+    selected = BUCKETS if bucket_name == "all" else {bucket_name: BUCKETS[bucket_name]}
     worker_pool = PROJECT_ROOT / "data" / "worker_pool_fixed.csv"
     seed_offsets = {name: index for index, name in enumerate(BUCKETS)}
 
@@ -56,7 +70,7 @@ def main(argv: list[str] | None = None) -> None:
         if output_dir.exists() and any(output_dir.iterdir()):
             if not bool(args.overwrite):
                 raise FileExistsError(f"{output_dir} 已存在数据；重建时请使用 overwrite=true")
-            shutil.rmtree(output_dir)
+            _clear_output_directory(output_dir)
 
         manifest = generate_bucket(
             PROJECT_ROOT / template_rel,

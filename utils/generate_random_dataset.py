@@ -109,7 +109,12 @@ def find_best_template(target_length):
         candidates.sort(key=lambda x: x[1], reverse=True)
         return candidates[0][0]
 
-def generate_random_dataset(template_path, output_path, target_length, time_var):
+def generate_random_dataset(
+    template_path: str | Path,
+    output_path: str | Path,
+    target_length: int,
+    time_var: float,
+) -> tuple[int, int]:
     df = pd.read_csv(template_path, dtype=str)
     
     df['类型'] = df['类型'].astype(int)
@@ -178,13 +183,18 @@ def generate_random_dataset(template_path, output_path, target_length, time_var)
     if num_to_add > 0:
         # 重新扫描现有的合法边
         current_edges = []
+        physical_task_ids = set(
+            df.loc[df['类型'] == 2, 'AO号'].astype(str).str.strip()
+        )
         for idx, row in df.iterrows():
             node_id = str(row['AO号']).strip()
             preds_str = str(row.get('紧前工序AO号', ''))
             if pd.notna(preds_str) and preds_str.lower() not in ['nan', 'none', '', '0']:
                 for p in re.split(r'[,，]', preds_str):
                     p = p.strip()
-                    if p: current_edges.append((p, node_id, idx)) # 包含 idx 方便修改 df
+                    # 新物理工序只能插入物理工序之间，避免继承虚拟节点的工种 -1。
+                    if p and p in physical_task_ids and node_id in physical_task_ids:
+                        current_edges.append((p, node_id, idx))  # 包含 idx 方便修改 df
                     
         # 获取现有特征分布以供采样
         existing_demands = df.loc[df['类型'] == 2, '需求人数'].dropna().tolist()
@@ -198,11 +208,15 @@ def generate_random_dataset(template_path, output_path, target_length, time_var)
             edge_idx = random.randint(0, len(current_edges) - 1)
             node_A, node_B, df_idx_B = current_edges.pop(edge_idx)
             
-            # 创建新节点 N
-            node_N = f"RAND-N{random.randint(1000, 99999)}-{added_count}"
-            
             # 找到现有的 A 的特征，作为参考
             A_rows = df[df['AO号'].str.strip() == node_A]
+            if A_rows.empty:
+                continue
+            profession_code = str(A_rows.iloc[0].get('专业编码', '')).strip().upper()
+            if not profession_code:
+                continue
+            # AO号第二个字符编码原始专业，确保专业字段可由 AO号独立复算。
+            node_N = f"R{profession_code}ND-N{random.randint(1000, 99999)}-{added_count}"
             mean_duration = A_rows['加工时间/h'].values[0] if not A_rows.empty and float(A_rows['加工时间/h'].values[0]) > 0 else 1.0
             
             # 给新节点赋予随机属性
@@ -228,15 +242,18 @@ def generate_random_dataset(template_path, output_path, target_length, time_var)
             b_preds_str = str(df.at[df_idx_B, '紧前工序AO号'])
             b_preds_list = [p.strip() for p in re.split(r'[,，]', b_preds_str) if p.strip()]
             
-            if node_A in b_preds_list:
-                b_preds_list.remove(node_A)
-                b_preds_list.append(node_N)
-                df.at[df_idx_B, '紧前工序AO号'] = ','.join(b_preds_list)
-                
+            if node_A not in b_preds_list:
+                continue
+            b_preds_list.remove(node_A)
+            b_preds_list.append(node_N)
+            df.at[df_idx_B, '紧前工序AO号'] = ','.join(b_preds_list)
+
             # 【核心修复】直接在 CSV 的物理位置上，将 N 插入到 B 的紧邻上方
             # 这样 N 就能完美继承 B 所在的隐式 Subgroup，绝对避免产生前后逆流的循环依赖 (Cyclic Dependency)
             df.loc[df_idx_B - 0.001 - (added_count * 0.0001)] = new_row
-            
+
+            # 新增 N -> B 仍是一条合法物理边，可继续细分，保证目标规模大于模板时不会提前耗尽边。
+            current_edges.append((node_N, node_B, df_idx_B))
             added_count += 1
             
         if added_count > 0:
@@ -245,6 +262,11 @@ def generate_random_dataset(template_path, output_path, target_length, time_var)
             
     # 工时随机扰动 (仅对剩下的 Type 2，且新节点刚才已经随过了，其实这里也可以统一步骤)
     surviving_type2_mask = df['类型'] == 2
+    actual_type2_count = int(surviving_type2_mask.sum())
+    if actual_type2_count != int(target_length):
+        raise RuntimeError(
+            f"目标物理工序数为 {target_length}，实际仅生成 {actual_type2_count}"
+        )
     mu = df.loc[surviving_type2_mask, '加工时间/h'].astype(float).values
     sigma = mu * time_var
     new_durations = np.random.normal(loc=mu, scale=sigma)

@@ -12,6 +12,7 @@ class Config:
     data_dir: str = "data"
     data_file_path: str = str(Path("data") / "283.csv") # 默认验证集基准图
     worker_pool_path: str = str(Path("data") / "worker_pool_fixed.csv")
+    worker_pool_size: int = 1000          # 可复现固定候选池容量；每回合再动态抽取子集
     # 脚本专属参数的兼容承载字段：正常情况下由 ExtraArgument 截获；
     # 若旧脚本或远端环境误把它们传入 Hydra 覆盖，也不应阻断评估入口。
     manifest_path: str = ""

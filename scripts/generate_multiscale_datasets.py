@@ -104,23 +104,26 @@ def main(argv: list[str] | None = None) -> None:
             if df is None:
                 adjusted_target = max(min_ops, adjusted_target - 50)
                 continue
-            actual_len = len(df)
-            if min_ops <= actual_len <= max_ops:
+            actual_ops = int((pd.to_numeric(df['类型'], errors='raise') == 2).sum())
+            if min_ops <= actual_ops <= max_ops:
                 break
-            if actual_len > max_ops:
-                adjusted_target = max(min_ops, adjusted_target - (actual_len - max_ops) - 10)
+            if actual_ops > max_ops:
+                adjusted_target = max(min_ops, adjusted_target - (actual_ops - max_ops) - 10)
             else:
-                adjusted_target = min(max_ops, adjusted_target + (min_ops - actual_len) + 10)
+                adjusted_target = min(max_ops, adjusted_target + (min_ops - actual_ops) + 10)
             df = None
         if df is None:
             print(f"[SKIP] target={target_ops} seed={seed} template={template.name}")
             continue
-        out_path = output_dir / f"syn_{len(df)}_{seed}.csv"
+        actual_ops = int((pd.to_numeric(df['类型'], errors='raise') == 2).sum())
+        out_path = output_dir / f"syn_{actual_ops}_{seed}.csv"
         df.to_csv(out_path, index=False, encoding="utf-8-sig")
         generated += 1
         print(f"[{generated}/{count}] {out_path.name} target={target_ops} adjusted={adjusted_target} template={template.name}")
 
-    print(f"生成完成: {generated}/{count} -> {output_dir}")
+    if generated != count:
+        raise RuntimeError(f"仅生成 {generated}/{count} 个训练文件，拒绝接受不完整训练集")
+    print(f"生成完成：{generated}/{count} -> {output_dir}")
 
 
 if __name__ == "__main__":
