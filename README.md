@@ -360,6 +360,29 @@ python train.py \
   train.batch_size=128
 ```
 
+需要让 GPU 训练与验证解耦时，可显式开启异步 CPU 验证。训练进程独占 GPU，独立 worker 使用 4 个 CPU 线程，仅验证 manifest 中的 `real_680/medium_000`；有界队列最多保留 4 个待验证候选，队列满时训练会等待，因此不会丢弃任何应验证的 episode：
+
+```bash
+python train.py \
+  experiment=reschedule_task_delay \
+  experiment_name=reschedule_hgppo_objective_aligned_async_seed42 \
+  train_data_path_or_dir=data/generated/reschedule_train_400_600 \
+  reschedule_baseline_model_path=checkpoints/initial_schedule/bestmodel/best_model.pth \
+  reschedule_manifest_path=data/reschedule_manifests/reschedule_400_600_seed20260701_physical_v2.json \
+  reschedule_eval_instance_id=real_680 \
+  async_eval_enabled=true \
+  async_eval_instance_id=real_680 \
+  async_eval_scenario_id=medium_000 \
+  async_eval_cpu_threads=4 \
+  async_eval_queue_capacity=4 \
+  eval_freq=1 \
+  seed=42
+```
+
+异步 worker 使用完整 Lightning checkpoint 恢复模型和 ScheduleFree 优化器状态，但确定性选动作时只执行 Actor，不计算无用的 Critic；观测缓存只复用静态图拓扑，动态节点特征和动态分配边仍逐步刷新。训练正常结束前会等待队列清空。进程或服务器中断后，用相同 `run_id` 和 `resume=true` 恢复时，会重新接管 `pending/running` 任务。
+
+训练期单场景异步验证仅用于高频选择 best，不能代替论文中的正式评估。训练完成后仍须使用 `scripts/evaluate_reschedule_manifest.py` 在固定 low/medium/high 全场景上报告结果。
+
 训练完成后评估真实多规模数据：
 
 ```bash
@@ -392,6 +415,8 @@ python scripts/evaluate_reschedule_rules.py \
 | 最终配置与运行清单 | `runs/reschedule_task_delay/<run_id>/configs/` |
 | 固定验证场景 | `results/reschedule_eval_scenarios.csv` |
 | TensorBoard 日志 | `runs/reschedule_task_delay/<run_id>/logs/tensorboard/` |
+| 异步验证队列与逐轮结果 | `runs/reschedule_task_delay/<run_id>/checkpoints/async_eval/` |
+| 异步验证 TensorBoard | `runs/reschedule_task_delay/<run_id>/checkpoints/async_eval/tensorboard/` |
 
 如果显式使用 `artifact_layout=legacy`，才会写入旧的 `checkpoints/reschedule_task_delay/` 与 `/root/tf-logs/` 结构。`trainer=legacy` 现在会明确报错。
 
@@ -444,7 +469,7 @@ Lightning 每个 episode 输出一行精简 rollout 摘要：
 
 物料 release time 在张量化掩码、CPU 掩码、环境边界和合法性审计中统一使用 `float64` 与 `release_time_tolerance_hours=1e-5` 小时。评估默认采用 `eval_mask_mismatch_policy=fail`，掩码放行但环境拒绝时立即报告完整上下文；`recover` 仅供诊断性评估恢复 `task_release_time_not_reached`，训练阶段始终禁止恢复，避免污染 on-policy 轨迹。
 
-重调度模式会改为固定重调度场景验证，打印 `[Eval][Resched]`，并按 `reschedule_selection_score` 保存 best；只有所有固定验证场景满足资格时才允许覆盖 best。
+重调度同步模式会在主进程执行固定场景验证，打印 `[Eval][Resched]`，并按 `reschedule_selection_score` 保存 best；只有所有固定验证场景满足资格时才允许覆盖 best。开启 `async_eval_enabled=true` 后，主进程改为打印 `[AsyncEval]` 入队信息，CPU worker 打印 `[AsyncEval][Done/Best]`，并按指定单场景的合法性和 `selection_score` 原子更新同一路径的 `best.ckpt`。
 
 Lightning 每次 PPO 更新后覆盖保存最新 checkpoint；执行自动验证且选择指标改善时，覆盖保存最佳 checkpoint。终端会打印对应的 `[Checkpoint]` 记录。
 

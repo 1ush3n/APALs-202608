@@ -114,6 +114,7 @@ class APALLightningModule(pl.LightningModule):
         self.policy = agent.policy
         self.last_completed_episode = 0
         self.last_eval_metrics: dict[str, float] | None = None
+        self.last_update_committed = False
 
     def configure_optimizers(self):
         return self.agent.optimizer
@@ -125,6 +126,26 @@ class APALLightningModule(pl.LightningModule):
             self.rollout_service.config,
             episode=int(self.last_completed_episode),
         )
+        agent_state = {
+            "current_step": int(getattr(self.agent, "current_step", 0)),
+            "batch_size": int(getattr(self.agent, "batch_size", 0)),
+        }
+        if hasattr(self.agent, "scaler"):
+            agent_state["scaler"] = self.agent.scaler.state_dict()
+        checkpoint["apal_agent_state"] = agent_state
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        metadata = checkpoint.get("apal_metadata", {})
+        if isinstance(metadata, dict):
+            self.last_completed_episode = int(metadata.get("episode", 0))
+        agent_state = checkpoint.get("apal_agent_state", {})
+        if not isinstance(agent_state, dict):
+            return
+        self.agent.current_step = int(agent_state.get("current_step", self.agent.current_step))
+        self.agent.batch_size = int(agent_state.get("batch_size", self.agent.batch_size))
+        scaler_state = agent_state.get("scaler")
+        if isinstance(scaler_state, dict) and hasattr(self.agent, "scaler"):
+            self.agent.scaler.load_state_dict(scaler_state)
 
     def transfer_batch_to_device(
         self,
@@ -139,6 +160,7 @@ class APALLightningModule(pl.LightningModule):
     def training_step(self, batch: RolloutUpdate, batch_idx: int):
         assert isinstance(batch, RolloutUpdate), type(batch)
         self.last_eval_metrics = None
+        self.last_update_committed = False
         self.agent.validate_snapshot_homogeneity(batch.memory.states)
         metrics = self.agent.update(batch.memory, batch.env, current_ep=batch.episode)
         if float(metrics.get("OOM/SkippedUpdate", 0.0)) > 0.0:
@@ -168,11 +190,15 @@ class APALLightningModule(pl.LightningModule):
                     if name == "Loss/Total":
                         self.log("loss", float(value), on_step=True, on_epoch=False, prog_bar=True)
 
-        if batch.episode % self.eval_freq == 0:
+        async_eval_enabled = bool(
+            getattr(getattr(self.rollout_service, "config", None), "async_eval_enabled", False)
+        )
+        if not async_eval_enabled and batch.episode % self.eval_freq == 0:
             self.last_eval_metrics = self.rollout_service.evaluate(batch.episode)
             for name, value in self.last_eval_metrics.items():
                 self.log(f"Eval/{name}", float(value), on_step=True, on_epoch=False)
         self.last_completed_episode = int(batch.episode)
+        self.last_update_committed = True
         return None
 
     def on_fit_end(self) -> None:

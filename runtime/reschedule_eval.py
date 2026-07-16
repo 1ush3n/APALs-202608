@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import torch
@@ -19,7 +20,7 @@ from utils.reschedule import (
     sample_task_delay_scenario,
     save_reschedule_scenarios,
 )
-from training.observation import refresh_env_observation
+from training.observation import CachedEnvironmentObservation, refresh_env_observation
 
 
 class MaskEnvironmentMismatchError(RuntimeError):
@@ -307,7 +308,18 @@ def _compute_reschedule_constraint_metrics(env) -> dict[str, float]:
     return metrics
 
 
-def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=None, current_ep=0):
+def evaluate_reschedule_model(
+    env,
+    agent,
+    num_runs=4,
+    temperature=None,
+    writer=None,
+    current_ep=0,
+    *,
+    scenario_ids: Sequence[str] | None = None,
+    use_cached_observation: bool = False,
+    skip_value_estimation: bool = False,
+):
     """评估 APAL 预测-反应式重调度策略。"""
     if temperature is None:
         temperature = getattr(configs, "eval_temperature", 0.0)
@@ -332,21 +344,52 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
     score_rows = []
     scenario_path = ensure_reschedule_eval_scenarios_available(configs)
     scenario_items = [] if scenario_path is None else load_reschedule_scenarios(scenario_path)
-    if num_runs is not None:
-        scenario_items = scenario_items[: max(1, int(num_runs))]
+    indexed_scenarios = list(enumerate(scenario_items))
+    if scenario_ids is not None:
+        by_id = {
+            str(scenario_id): (source_idx, scenario_id, scenario)
+            for source_idx, (scenario_id, scenario) in indexed_scenarios
+        }
+        missing = [str(scenario_id) for scenario_id in scenario_ids if str(scenario_id) not in by_id]
+        if missing:
+            raise KeyError(f"重调度场景文件中不存在指定场景: {missing}")
+        selected_scenarios = [by_id[str(scenario_id)] for scenario_id in scenario_ids]
+    else:
+        selected_scenarios = [
+            (source_idx, scenario_id, scenario)
+            for source_idx, (scenario_id, scenario) in indexed_scenarios
+        ]
+        if num_runs is not None:
+            selected_scenarios = selected_scenarios[: max(1, int(num_runs))]
     verbose_progress = bool(getattr(configs, "verbose_reschedule_eval_progress", False))
     if verbose_progress:
         print(
-            f"[RescheduleEval] scenarios={len(scenario_items)} path={scenario_path} "
+            f"[RescheduleEval] scenarios={len(selected_scenarios)} path={scenario_path} "
             f"temperature={float(temperature):.4g}",
             flush=True,
         )
 
+    previous_skip_obs = bool(getattr(env, "skip_obs_building", False))
+    observation_cache = CachedEnvironmentObservation(env) if use_cached_observation else None
+    if observation_cache is not None:
+        env.skip_obs_building = True
+    optimizer_mode_managed_once = bool(skip_value_estimation and getattr(agent, "use_schedule_free", False))
+    if optimizer_mode_managed_once:
+        agent.optimizer.eval()
+
     try:
         base_seed = int(getattr(configs, "reschedule_eval_scenario_seed", 42))
-        for idx, (scenario_id, scenario) in enumerate(scenario_items):
+        for output_idx, (source_idx, scenario_id, scenario) in enumerate(selected_scenarios):
             setattr(env, "_forced_reschedule_scenario", scenario)
-            state = env.reset(randomize_duration=False, randomize_workers=False, seed=base_seed + idx)
+            if observation_cache is not None:
+                observation_cache.clear()
+            state = env.reset(
+                randomize_duration=False,
+                randomize_workers=False,
+                seed=base_seed + source_idx,
+            )
+            if observation_cache is not None:
+                state = observation_cache.refresh()
             done = False
             total_reward = 0.0
             invalid_step_count = 0
@@ -380,19 +423,28 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
                     station_mask[blocked, :] = True
                 if task_mask.all():
                     if env.try_wait_for_resources():
-                        state = refresh_env_observation(env)
+                        state = (
+                            observation_cache.refresh()
+                            if observation_cache is not None
+                            else refresh_env_observation(env)
+                        )
                         continue
                     break
 
-                action_ret = agent.select_action(
-                    state.to(agent.device),
-                    mask_task=task_mask.to(agent.device),
-                    mask_station_matrix=station_mask.to(agent.device),
-                    mask_worker=worker_mask.to(agent.device),
-                    deterministic=(temperature == 0.0),
-                    temperature=temperature,
-                    is_eval=True,
-                )
+                selection_kwargs = {
+                    "mask_task": task_mask.to(agent.device),
+                    "mask_station_matrix": station_mask.to(agent.device),
+                    "mask_worker": worker_mask.to(agent.device),
+                    "deterministic": temperature == 0.0,
+                    "temperature": temperature,
+                    "is_eval": True,
+                }
+                if skip_value_estimation:
+                    selection_kwargs.update(
+                        compute_value=False,
+                        manage_optimizer_mode=not optimizer_mode_managed_once,
+                    )
+                action_ret = agent.select_action(state.to(agent.device), **selection_kwargs)
                 if action_ret[0] is None:
                     break
                 action, _, _, _, is_invalid = action_ret
@@ -415,11 +467,17 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
                                 f"{mismatch_message} retries_at_time={mismatch_retries_at_time}"
                             )
                         blocked_tasks.add(int(action[0]))
-                        state = refresh_env_observation(env)
+                        state = (
+                            observation_cache.refresh()
+                            if observation_cache is not None
+                            else refresh_env_observation(env)
+                        )
                         continue
                     invalid_step_count += 1
                     raise MaskEnvironmentMismatchError(mismatch_message)
                 total_reward += float(reward)
+                if observation_cache is not None and not done:
+                    state = observation_cache.refresh()
 
             elapsed = time.time() - start_wall
             complete = len(env.assigned_tasks) == env.num_tasks
@@ -436,7 +494,8 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
 
             constraints = _compute_reschedule_constraint_metrics(env)
             constraints["scenario_id"] = scenario_id
-            constraints["scenario_index"] = float(idx)
+            constraints["scenario_index"] = float(source_idx)
+            constraints["scenario_reset_seed"] = float(base_seed + source_idx)
             constraints["reschedule_start_time"] = float(scenario.start_time)
             constraints["delayed_task_count"] = float(len(scenario.task_release_times))
             constraints["invalid_step_count"] = float(invalid_step_count)
@@ -468,7 +527,7 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
             schedules.append(schedule)
             if verbose_progress:
                 print(
-                    f"[RescheduleEval] {idx + 1}/{len(scenario_items)} {scenario_id} "
+                    f"[RescheduleEval] {output_idx + 1}/{len(selected_scenarios)} {scenario_id} "
                     f"mk={final_makespan:.2f} score={float(score_result.score):.4f} "
                     f"elig={int(score_result.eligible)} complete={int(complete)} "
                     f"dur={elapsed:.2f}s",
@@ -477,8 +536,11 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
     finally:
         if hasattr(env, "_forced_reschedule_scenario"):
             delattr(env, "_forced_reschedule_scenario")
+        env.skip_obs_building = previous_skip_obs
         for key, value in backups.items():
             setattr(configs, key, value)
+        if optimizer_mode_managed_once and was_training:
+            agent.optimizer.train()
         if was_training:
             agent.policy.train()
 
@@ -505,6 +567,7 @@ def evaluate_reschedule_model(env, agent, num_runs=4, temperature=None, writer=N
         "mask_mismatch_recovered",
         "release_time_tolerance_hours",
         "complete",
+        "scenario_reset_seed",
         "reschedule_start_time",
         "delayed_task_count",
         "takt_h",

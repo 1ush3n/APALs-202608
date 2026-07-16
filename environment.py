@@ -7,6 +7,7 @@ from gymnasium import spaces
 import os
 import pandas as pd
 import heapq
+import hashlib
 from collections import OrderedDict
 from typing import Tuple, List, Dict, Optional, Any, Iterable
 from pathlib import Path
@@ -20,6 +21,7 @@ from core.time_comparison import release_time_tolerance, time_reached_scalar
 from utils.resource_graph import (
     SkillHubTopology,
     apply_resource_graph,
+    build_skill_features,
     build_skill_hub_topology,
     build_task_skill_edges,
     build_worker_skill_edges,
@@ -1734,7 +1736,13 @@ class AirLineEnv_Graph(gym.Env):
             })
         return snapshot
         
-    def rebuild_state_from_snapshot(self, snapshot):
+    def rebuild_state_from_snapshot(
+        self,
+        snapshot,
+        *,
+        reusable_state: HeteroData | None = None,
+        reuse_resource_topology: bool = False,
+    ):
         """
         基于快照恢复成 PyG 图结构，避免完整异构图深拷贝带来的极高缓存占用。
         """
@@ -1779,7 +1787,28 @@ class AirLineEnv_Graph(gym.Env):
                 for name, value in restore_fields.items():
                     setattr(self, name, value)
         
-        data = ctx['base_data'].clone()
+        raw_worker_topology_key = snapshot.get("worker_topology_key")
+        topology_digest = hashlib.sha256(
+            repr(raw_worker_topology_key).encode("utf-8")
+        ).hexdigest()
+        topology_key = (
+            f"skill={int(bool(getattr(configs, 'use_skill_hub', False)))};"
+            f"bidir={int(bool(getattr(configs, 'skill_hub_bidirectional', False)))};"
+            f"tasks={int(ctx['num_tasks'])};workers={int(len(snapshot['worker_free_time']))};"
+            f"worker_topology={topology_digest}"
+        )
+        if reusable_state is not None:
+            if not reuse_resource_topology:
+                raise ValueError("传入 reusable_state 时必须显式启用 reuse_resource_topology")
+            cached_key = getattr(reusable_state, "apal_resource_topology_key", None)
+            if cached_key != topology_key:
+                raise ValueError(
+                    "可复用观测的静态拓扑与当前快照不一致: "
+                    f"cached={cached_key!r}, current={topology_key!r}"
+                )
+            data = reusable_state
+        else:
+            data = ctx['base_data'].clone()
         
         task_x = ctx['base_task_x'].clone()
         task_x[:, 1:5] = 0.0
@@ -1839,17 +1868,27 @@ class AirLineEnv_Graph(gym.Env):
             worker_x[w, 21] = fatigue_f
             
         data['worker'].x = worker_x
-        apply_resource_graph(
-            data,
-            task_x,
-            worker_x,
-            configs,
-            skill_hub_topology=self._skill_hub_topology(
-                ctx["task_skill_edge_index"],
+        if reusable_state is not None:
+            if bool(getattr(configs, "use_skill_hub", False)):
+                skill_x = build_skill_features(worker_x, int(configs.num_skill_types))
+                if skill_x.size(1) != int(configs.skill_feat_dim):
+                    raise ValueError(
+                        f"skill_feat_dim 配置错误: {configs.skill_feat_dim}，"
+                        f"实际需要 {skill_x.size(1)}"
+                    )
+                data["skill"].x = skill_x
+        else:
+            apply_resource_graph(
+                data,
+                task_x,
                 worker_x,
-                snapshot.get("worker_topology_key"),
-            ),
-        )
+                configs,
+                skill_hub_topology=self._skill_hub_topology(
+                    ctx["task_skill_edge_index"],
+                    worker_x,
+                    snapshot.get("worker_topology_key"),
+                ),
+            )
         
         station_x = ctx['base_station_x'].clone()
         station_x[:, 0] = torch.tensor(snapshot['station_loads'], dtype=torch.float) / max(1.0, ctx['ideal_station_load'])
@@ -1914,6 +1953,7 @@ class AirLineEnv_Graph(gym.Env):
              
         data['task', 'done_by', 'worker'].edge_index = t_w_edge
         
+        data.apal_resource_topology_key = topology_key
         return data
 
     def get_current_fatigue_factor(self, worker_id: int, target_time: float) -> float:

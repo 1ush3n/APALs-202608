@@ -134,6 +134,21 @@ class Config:
     reschedule_warm_start: bool = True
     reschedule_eval_num_scenarios: int = 4
 
+    # 训练期异步验证：默认关闭，开启后仅支持重调度 Lightning 训练。
+    async_eval_enabled: bool = False
+    async_eval_device: str = "cpu"
+    async_eval_cpu_threads: int = 4
+    async_eval_queue_capacity: int = 4
+    async_eval_instance_id: str = "real_680"
+    async_eval_scenario_id: str = "medium_000"
+    async_eval_wait_on_finish: bool = True
+    async_eval_failure_policy: str = "fail"
+    async_eval_max_retries: int = 1
+    async_eval_poll_interval_sec: float = 1.0
+    async_eval_heartbeat_interval_sec: float = 30.0
+    async_eval_stale_timeout_sec: float = 900.0
+    async_eval_use_cached_observation: bool = True
+
     # ⑤ 工人疲劳衰减与恢复
     enable_worker_fatigue: bool = False     # 默认关闭
     fatigue_threshold_hours: float = 4.0    # 疲劳阈值 (连续工作N小时后效率开始衰减)

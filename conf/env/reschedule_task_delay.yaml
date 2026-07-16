@@ -38,6 +38,20 @@ reschedule_task_delay:
   reschedule_objective_delta_clip: 50.0
   reschedule_warm_start: true
   reschedule_eval_num_scenarios: 4
+  # 默认保留同步验证；显式开启后由独立 CPU 进程验证固定场景并选择 best。
+  async_eval_enabled: false
+  async_eval_device: cpu
+  async_eval_cpu_threads: 4
+  async_eval_queue_capacity: 4
+  async_eval_instance_id: real_680
+  async_eval_scenario_id: medium_000
+  async_eval_wait_on_finish: true
+  async_eval_failure_policy: fail
+  async_eval_max_retries: 1
+  async_eval_poll_interval_sec: 1.0
+  async_eval_heartbeat_interval_sec: 30.0
+  async_eval_stale_timeout_sec: 900.0
+  async_eval_use_cached_observation: true
   adaptive_ppo_batch_by_tasks: true
   adaptive_ppo_batch_small_task_max: 530
   adaptive_ppo_batch_large_task_min: 550

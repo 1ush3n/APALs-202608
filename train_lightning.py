@@ -30,9 +30,12 @@ from runtime.reschedule_eval import (
     load_warm_start_weights_with_input_expansion,
 )
 from runtime.reschedule_manifest import resolve_manifest_eval_entry
+from runtime.reschedule_manifest import load_reschedule_manifest
+from utils.reschedule import load_reschedule_scenarios
 from runtime.seed import set_seed
 from training.lightning_module import APALDataModule, APALLightningModule
 from training.rollout_service import APALRolloutService
+from training.async_evaluation import AsyncEvaluationManager
 from utils.vector_env import EnvCreator, VectorEnv
 from runtime.artifacts import run_context as create_run_context, uses_runs_layout, write_run_context_files, write_run_manifest
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
@@ -89,6 +92,31 @@ def _maybe_load_reschedule_warm_start(model: torch.nn.Module, device: torch.devi
     )
 
 
+def _validate_async_eval_target() -> None:
+    """在启动训练环境前验证异步 best 选择的实例和固定场景。"""
+    if not bool(getattr(configs, "async_eval_enabled", False)):
+        return
+    manifest_path = str(getattr(configs, "reschedule_manifest_path", "") or "").strip()
+    if not manifest_path:
+        raise ValueError("开启异步验证时必须配置 reschedule_manifest_path")
+    manifest = load_reschedule_manifest(manifest_path)
+    instance_id = str(configs.async_eval_instance_id)
+    scenario_id = str(configs.async_eval_scenario_id)
+    entry = manifest.get(instance_id)
+    if entry.scenario_path is None or not entry.scenario_path.is_file():
+        raise FileNotFoundError(f"异步验证实例缺少场景文件: {instance_id}")
+    scenario_ids = [str(name) for name, _scenario in load_reschedule_scenarios(entry.scenario_path)]
+    if scenario_id not in scenario_ids:
+        raise KeyError(f"异步验证场景不存在: {instance_id}/{scenario_id}")
+    source_index = scenario_ids.index(scenario_id)
+    reset_seed = int(configs.reschedule_eval_scenario_seed) + source_index
+    print(
+        f"[AsyncEval] target={instance_id}/{scenario_id} "
+        f"scenario_index={source_index} reset_seed={reset_seed}",
+        flush=True,
+    )
+
+
 class RolloutCheckpoint(Callback):
     """按 PPO rollout 更新保存最新模型，并按验证 Makespan 保存最佳模型。"""
 
@@ -102,6 +130,16 @@ class RolloutCheckpoint(Callback):
             self.latest_path = Path(latest_path)
             self.best_path = Path(best_path)
         self.best_score = float("inf")
+        self.async_manager = (
+            AsyncEvaluationManager(
+                config=configs,
+                latest_path=self.latest_path,
+                best_path=self.best_path,
+                project_root=PROJECT_ROOT,
+            )
+            if bool(getattr(configs, "async_eval_enabled", False))
+            else None
+        )
 
     @property
     def state_key(self) -> str:
@@ -123,10 +161,19 @@ class RolloutCheckpoint(Callback):
         batch,
         batch_idx: int,
     ) -> None:
+        if not bool(getattr(pl_module, "last_update_committed", True)):
+            return
         self.latest_path.parent.mkdir(parents=True, exist_ok=True)
         self.best_path.parent.mkdir(parents=True, exist_ok=True)
         episode = int(pl_module.last_completed_episode)
         eval_metrics = pl_module.last_eval_metrics
+
+        if self.async_manager is not None:
+            if episode % max(1, int(pl_module.eval_freq)) == 0:
+                self.async_manager.submit(trainer, episode=episode)
+            else:
+                trainer.save_checkpoint(str(self.latest_path))
+            return
 
         if eval_metrics is not None:
             makespan = float(eval_metrics["makespan"])
@@ -178,12 +225,28 @@ class RolloutCheckpoint(Callback):
             flush=True,
         )
 
+    def on_fit_end(self, trainer: pl.Trainer, pl_module: APALLightningModule) -> None:
+        if self.async_manager is not None:
+            self.async_manager.finalize(
+                wait=bool(getattr(configs, "async_eval_wait_on_finish", True))
+            )
+
+    def on_exception(
+        self,
+        trainer: pl.Trainer,
+        pl_module: APALLightningModule,
+        exception: BaseException,
+    ) -> None:
+        if self.async_manager is not None:
+            self.async_manager.terminate_for_exception()
+
 
 def run(args, *, config_initialized: bool = False) -> None:
     if not config_initialized:
         initialize_training_config(args)
     set_seed(int(configs.seed))
     _apply_reschedule_eval_manifest_override()
+    _validate_async_eval_target()
 
     checkpoint_paths = resolve_checkpoint_paths(configs)
     checkpoint_dir = checkpoint_paths["lightning_dir"]

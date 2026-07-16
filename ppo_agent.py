@@ -396,7 +396,19 @@ class PPOAgent:
         clipped_losses = (clipped_values - returns).pow(2)
         return torch.max(value_losses, clipped_losses).mean()
 
-    def select_action(self, obs: HeteroData, mask_task: Optional[torch.Tensor] = None, mask_station_matrix: Optional[torch.Tensor] = None, mask_worker: Optional[torch.Tensor] = None, deterministic: bool = False, temperature: float = 1.0, is_eval: bool = False) -> Tuple[Tuple[int, int, List[int]], float, float, Optional[torch.Tensor]]:
+    def select_action(
+        self,
+        obs: HeteroData,
+        mask_task: Optional[torch.Tensor] = None,
+        mask_station_matrix: Optional[torch.Tensor] = None,
+        mask_worker: Optional[torch.Tensor] = None,
+        deterministic: bool = False,
+        temperature: float = 1.0,
+        is_eval: bool = False,
+        *,
+        compute_value: bool = True,
+        manage_optimizer_mode: bool = True,
+    ) -> Tuple[Optional[Tuple[int, int, List[int]]], float, float, Optional[torch.Tensor], bool]:
         """
         閫夋嫨鍔ㄤ綔 (Select Action)銆?
         
@@ -416,7 +428,7 @@ class PPOAgent:
         """
         no_mask = self.config.ablation_no_mask
         
-        if self.use_schedule_free:
+        if self.use_schedule_free and manage_optimizer_mode:
             if is_eval:
                 self.optimizer.eval()
             else:
@@ -428,7 +440,8 @@ class PPOAgent:
         else:
             active_policy = self.policy
 
-        with torch.no_grad():
+        inference_context = torch.inference_mode if is_eval else torch.no_grad
+        with inference_context():
             with self.autocast_context():
                 x_dict, global_context = active_policy(obs)
                 
@@ -608,8 +621,11 @@ class PPOAgent:
             action_logprob = task_logprob + station_logprob + total_worker_logprob
             # 鐗╃悊闅旂 Critic 闃叉鍏跺法澶х殑 Value Error 姊害鎹ｆ瘉搴曞眰鍏变韩 GAT 鎷撴墤鐗瑰緛
             # 浼犲叆瀹屾暣鐨?state (batch_data)锛岀敱浜庡浜?with torch.no_grad() 涓嬶紝姝ゅ鏃犻渶 detach锛岀洿鎺ュ墠鍚戞彁鍙栦环鍊笺€?
-            with self.autocast_context():
-                state_value = active_policy.get_value(obs, actor_x_dict_encoded=x_dict)
+            if compute_value:
+                with self.autocast_context():
+                    state_value = active_policy.get_value(obs, actor_x_dict_encoded=x_dict)
+            else:
+                state_value = torch.zeros((), device=self.device)
             
             action_tuple = (t_idx, station_action.item(), team_indices)
             
