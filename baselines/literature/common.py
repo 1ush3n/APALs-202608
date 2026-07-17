@@ -19,6 +19,7 @@ from runtime.seed import set_seed
 from training.memory import Memory
 from training.observation import refresh_env_observation
 from utils.visualization import plot_gantt
+from worker_feature_layout import resolve_worker_feature_layout
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -94,6 +95,14 @@ def append_ppo_transition(
     memory.is_truncated.append(False)
 
 
+def rollout_step_limit(num_tasks: int) -> int:
+    """返回训练 rollout 的步数上限；仅冒烟配置可显式截断。"""
+
+    natural_limit = max(1, int(num_tasks) * 2)
+    configured_limit = int(getattr(configs, "rollout_max_steps", 0))
+    return min(natural_limit, configured_limit) if configured_limit > 0 else natural_limit
+
+
 def collect_ppo_episode(
     env: AirLineEnv_Graph,
     agent: Any,
@@ -107,7 +116,7 @@ def collect_ppo_episode(
     total_reward = 0.0
     invalid_count = 0
     start_time = time.time()
-    max_steps = max(1, int(env.num_tasks) * 2)
+    max_steps = rollout_step_limit(env.num_tasks)
 
     for _ in range(max_steps):
         if done or len(env.assigned_tasks) == env.num_tasks:
@@ -297,6 +306,7 @@ def save_literature_checkpoint(
     extra: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    worker_layout = resolve_worker_feature_layout(configs)
     payload = {
         "algorithm": algorithm,
         "literature_family": literature_family,
@@ -311,6 +321,10 @@ def save_literature_checkpoint(
         "hidden_dim": int(getattr(configs, "hidden_dim", 128)),
         "num_gat_layers": int(getattr(configs, "num_gat_layers", 1)),
         "num_heads": int(getattr(configs, "num_heads", 1)),
+        "worker_feat_dim": worker_layout.total_dim,
+        "num_skill_types": worker_layout.num_skill_types,
+        "worker_skill_feature_slots": worker_layout.skill_slots,
+        "worker_feature_layout_version": "five_skill_v2",
         "best_makespan": float(best_makespan) if np.isfinite(best_makespan) else None,
         **(extra or {}),
     }

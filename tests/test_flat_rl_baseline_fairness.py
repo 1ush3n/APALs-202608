@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 import torch
 
 from baselines.evaluate_flat_rl_baseline import evaluate_model
@@ -34,11 +35,12 @@ class _AlwaysDeadlockedEnv:
         return False
 
 
-def test_flat_rl_eval_records_fixed_failed_runs_instead_of_skipping() -> None:
+@pytest.mark.parametrize("algorithm", ["l2d_ppo_apal", "graph_ddqn_apal"])
+def test_graph_baseline_eval_records_fixed_failed_runs_instead_of_skipping(algorithm: str) -> None:
     env = _AlwaysDeadlockedEnv()
     metrics, schedule, runs = evaluate_model(
         model=torch.nn.Identity(),
-        algorithm="basic_ppo",
+        algorithm=algorithm,
         env=env,
         device=torch.device("cpu"),
         seed=100,

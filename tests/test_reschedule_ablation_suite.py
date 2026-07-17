@@ -15,9 +15,8 @@ def _base_args(tmp_path: Path) -> Namespace:
     train_dir.mkdir()
     full = tmp_path / "full.ckpt"
     no_gat = tmp_path / "no_gat.ckpt"
-    no_pointer = tmp_path / "no_pointer.ckpt"
     no_attention = tmp_path / "no_attention.ckpt"
-    for path in (full, no_gat, no_pointer, no_attention):
+    for path in (full, no_gat, no_attention):
         path.write_text("checkpoint", encoding="utf-8")
     manifest.write_text(
         json.dumps(
@@ -39,7 +38,7 @@ def _base_args(tmp_path: Path) -> Namespace:
     )
     return Namespace(
         mode="plan",
-        variants=["full", "no_gat", "no_pointer", "no_mask", "no_skill_hub", "no_attention"],
+        variants=["full", "no_gat", "no_attention"],
         instance_ids=["real_680"],
         seeds=[42],
         train_data_path_or_dir=str(train_dir),
@@ -53,9 +52,6 @@ def _base_args(tmp_path: Path) -> Namespace:
         artifact_layout="runs",
         full_model_path=str(full),
         no_gat_model_path=str(no_gat),
-        no_pointer_model_path=str(no_pointer),
-        no_mask_model_path=str(full),
-        no_skill_hub_model_path=str(full),
         no_attention_model_path=str(no_attention),
         run_id_prefix="resched_ablation",
         output_dir=str(tmp_path / "out"),
@@ -72,9 +68,6 @@ def test_reschedule_ablation_commands_fix_environment_and_seed(tmp_path: Path) -
     assert [row.variant for row in rows] == [
         "full",
         "no_gat",
-        "no_pointer",
-        "no_mask",
-        "no_skill_hub",
         "no_attention",
     ]
     for row in rows:
@@ -96,14 +89,16 @@ def test_reschedule_ablation_variant_overrides_and_warm_starts(tmp_path: Path) -
     assert rows["full"].overrides == ""
     assert rows["no_gat"].warm_start_path == str(tmp_path / "no_gat.ckpt")
     assert "ablation_no_gat=true" in rows["no_gat"].command
-    assert rows["no_pointer"].warm_start_path == str(tmp_path / "no_pointer.ckpt")
-    assert "ablation_no_pointer=true" in rows["no_pointer"].command
-    assert rows["no_mask"].warm_start_path == str(tmp_path / "full.ckpt")
-    assert "ablation_no_mask=true" in rows["no_mask"].command
-    assert "use_skill_hub=false" in rows["no_skill_hub"].command
-    assert "skill_hub_bidirectional=false" in rows["no_skill_hub"].command
     assert rows["no_attention"].warm_start_path == str(tmp_path / "no_attention.ckpt")
     assert "use_attention_critic=false" in rows["no_attention"].command
+
+
+@pytest.mark.parametrize("variant", ["no_mask", "no_pointer", "no_skill_hub", "no_attention_pooling"])
+def test_reschedule_ablation_explicitly_rejects_unavailable_variants(tmp_path: Path, variant: str) -> None:
+    args = _base_args(tmp_path)
+    args.variants = [variant]
+    with pytest.raises(ValueError, match="当前不可执行"):
+        build_command_rows(args)
 
 
 def test_reschedule_ablation_rejects_missing_manifest_instance(tmp_path: Path) -> None:

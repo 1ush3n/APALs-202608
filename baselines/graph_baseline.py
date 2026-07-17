@@ -12,6 +12,7 @@ from torch_geometric.nn import global_mean_pool
 
 from configs import configs
 from models.hb_gat_pn import FeatureEmbedder, HeteroGATEncoder, get_activation, get_head_layer_norm
+from worker_feature_layout import resolve_worker_feature_layout
 
 
 GRAPH_BASELINE_FEATURE_MODE = "graph_hetero"
@@ -40,6 +41,7 @@ def worker_static_mask_from_obs(
     station_idx: int,
     worker_mask: torch.Tensor | None,
     device: torch.device,
+    config: Any = configs,
 ) -> torch.Tensor:
     """计算与主方法一致的 worker 技能和工位锁定静态约束。True 表示不可选。"""
     return worker_static_mask_from_features(
@@ -49,6 +51,7 @@ def worker_static_mask_from_obs(
         station_idx=station_idx,
         worker_mask=worker_mask,
         device=device,
+        config=config,
     )
 
 
@@ -60,6 +63,7 @@ def worker_static_mask_from_features(
     station_idx: int,
     worker_mask: torch.Tensor | None,
     device: torch.device,
+    config: Any = configs,
 ) -> torch.Tensor:
     """从原始节点特征计算 worker 技能和工位锁定约束。"""
     worker_x = worker_x.to(device)
@@ -69,9 +73,17 @@ def worker_static_mask_from_features(
     else:
         mask = worker_mask.to(device=device, dtype=torch.bool).clone()
 
-    task_type_idx = int(torch.argmax(task_x[int(task_idx), 5:15]).item())
-    has_skill = worker_x[:, 1:11][:, task_type_idx] > 0.5
-    worker_locks = torch.argmax(worker_x[:, 13:21], dim=1)
+    worker_layout = resolve_worker_feature_layout(config)
+    task_skill_end = 5 + worker_layout.num_skill_types
+    if task_x.size(1) < task_skill_end:
+        raise ValueError(f"任务特征维度不足: {task_x.size(1)} < {task_skill_end}")
+    if worker_x.size(1) != worker_layout.total_dim:
+        raise ValueError(
+            f"工人特征维度错误: {worker_x.size(1)} != {worker_layout.total_dim}"
+        )
+    task_type_idx = int(torch.argmax(task_x[int(task_idx), 5:task_skill_end]).item())
+    has_skill = worker_x[:, worker_layout.skill_slice][:, task_type_idx] > 0.5
+    worker_locks = torch.argmax(worker_x[:, worker_layout.lock_slice], dim=1)
     station_action = int(station_idx) + 1
     valid_lock = (worker_locks == 0) | (worker_locks == station_action)
     return mask | (~has_skill) | (~valid_lock)
@@ -346,6 +358,7 @@ def _decode_graph_action_from_encoded(
         station_idx=station_idx,
         worker_mask=worker_mask,
         device=device,
+        config=model.config,
     ).unsqueeze(0)
     worker_embs_batched = worker_embs.unsqueeze(0)
     team: list[int] = []

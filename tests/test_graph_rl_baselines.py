@@ -12,6 +12,7 @@ from baselines.graph_baseline import (
     select_graph_actions_batch,
 )
 from configs import Config
+from worker_feature_layout import resolve_worker_feature_layout
 
 
 def _make_config() -> Config:
@@ -24,6 +25,8 @@ def _make_config() -> Config:
     cfg.use_input_layer_norm = False
     cfg.use_gat_layer_norm = False
     cfg.use_head_layer_norm = False
+    assert cfg.num_skill_types == 5
+    assert cfg.skill_feat_dim == 11
     return cfg
 
 
@@ -31,16 +34,24 @@ def _edge(src: list[int], dst: list[int]) -> torch.Tensor:
     return torch.tensor([src, dst], dtype=torch.long)
 
 
-def _graph(num_tasks: int, num_workers: int = 4, num_stations: int = 2) -> HeteroData:
+def _graph(
+    num_tasks: int,
+    num_workers: int = 4,
+    num_stations: int = 2,
+    config: Config | None = None,
+) -> HeteroData:
+    """构造与当前五技能 APAL 图输入尺寸完全一致的最小图。"""
+    config = config or _make_config()
+    worker_layout = resolve_worker_feature_layout(config)
     data = HeteroData()
-    data["task"].x = torch.zeros(num_tasks, 18)
+    data["task"].x = torch.zeros(num_tasks, config.task_feat_dim)
     data["task"].x[:, 5] = 1.0
     data["task"].x[:, 16] = 1.0
-    data["worker"].x = torch.zeros(num_workers, 22)
+    data["worker"].x = torch.zeros(num_workers, config.worker_feat_dim)
     data["worker"].x[:, 1] = 1.0
-    data["worker"].x[:, 13] = 1.0
-    data["station"].x = torch.zeros(num_stations, 15)
-    data["skill"].x = torch.zeros(10, 16)
+    data["worker"].x[:, worker_layout.lock_start] = 1.0
+    data["station"].x = torch.zeros(num_stations, config.station_feat_dim)
+    data["skill"].x = torch.zeros(config.num_skill_types, config.skill_feat_dim)
     data["skill"].x[:, 0] = 1.0
 
     if num_tasks > 1:
@@ -58,9 +69,10 @@ def _graph(num_tasks: int, num_workers: int = 4, num_stations: int = 2) -> Heter
 
 
 def test_graph_baseline_outputs_follow_graph_size() -> None:
-    model = GraphBaselineActorCritic(_make_config())
-    small = _graph(3)
-    large = _graph(5)
+    config = _make_config()
+    model = GraphBaselineActorCritic(config)
+    small = _graph(3, config=config)
+    large = _graph(5, config=config)
 
     small_x, small_ctx = model(small)
     large_x, large_ctx = model(large)
@@ -72,8 +84,9 @@ def test_graph_baseline_outputs_follow_graph_size() -> None:
 
 
 def test_select_graph_action_uses_masks_and_variable_workers() -> None:
-    model = GraphBaselineActorCritic(_make_config())
-    graph = _graph(4, num_workers=5)
+    config = _make_config()
+    model = GraphBaselineActorCritic(config)
+    graph = _graph(4, num_workers=5, config=config)
     task_mask = torch.tensor([True, False, False, False])
     station_mask = torch.zeros(4, 2, dtype=torch.bool)
     worker_mask = torch.zeros(5, dtype=torch.bool)
@@ -95,9 +108,13 @@ def test_select_graph_action_uses_masks_and_variable_workers() -> None:
 
 def test_batched_graph_action_matches_serial_for_variable_graphs() -> None:
     torch.manual_seed(42)
-    model = GraphBaselineActorCritic(_make_config())
+    config = _make_config()
+    model = GraphBaselineActorCritic(config)
     model.eval()
-    graphs = [_graph(3, num_workers=4), _graph(5, num_workers=6)]
+    graphs = [
+        _graph(3, num_workers=4, config=config),
+        _graph(5, num_workers=6, config=config),
+    ]
     masks = [
         (
             torch.tensor([True, False, False]),

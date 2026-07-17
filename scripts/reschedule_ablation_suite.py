@@ -46,38 +46,26 @@ VARIANTS: dict[str, RescheduleAblationVariant] = {
         "no_gat_model_path",
         ("ablation_no_gat=true",),
     ),
-    "no_pointer": RescheduleAblationVariant(
-        "no_pointer",
-        "no_pointer_model_path",
-        ("ablation_no_pointer=true",),
-    ),
-    "no_mask": RescheduleAblationVariant(
-        "no_mask",
-        "no_mask_model_path",
-        ("ablation_no_mask=true",),
-    ),
-    "no_skill_hub": RescheduleAblationVariant(
-        "no_skill_hub",
-        "no_skill_hub_model_path",
-        ("use_skill_hub=false", "skill_hub_bidirectional=false"),
-    ),
     "no_attention": RescheduleAblationVariant(
         "no_attention",
         "no_attention_model_path",
         ("use_attention_critic=false",),
     ),
-    "no_attention_pooling": RescheduleAblationVariant(
-        "no_attention_pooling",
-        "no_attention_model_path",
-        ("use_attention_critic=false",),
-    ),
+}
+
+# 这些变体不能被一键套件静默纳入。保留原因可让命令入口直接给出可审计的错误。
+UNAVAILABLE_VARIANT_REASONS: dict[str, str] = {
+    "no_mask": "当前 APAL 自回归解码无法在无可行性掩码下运行，不能作为有效实验。",
+    "no_pointer": "需要重新设计合理的无 Pointer 解码器，当前实现不代表可解释消融。",
+    "no_skill_hub": "用户已暂缓该消融，不能混入当前默认训练计划。",
+    "no_attention_pooling": "与 no_attention 语义重复，请改用 no_attention。",
 }
 
 
 EXTRA_ARGUMENTS: dict[str, ExtraArgument] = {
     "mode": ExtraArgument(default="plan", help="plan 只生成命令；run 顺序执行命令"),
     "variants": ExtraArgument(
-        default=["full", "no_gat", "no_pointer", "no_mask", "no_skill_hub", "no_attention"],
+        default=["full", "no_gat", "no_attention"],
         help="消融变体列表",
     ),
     "instance_ids": ExtraArgument(default=["real_680"], help="manifest 中的验证实例列表"),
@@ -99,15 +87,6 @@ EXTRA_ARGUMENTS: dict[str, ExtraArgument] = {
     "artifact_layout": ExtraArgument(default="runs", help="统一运行目录布局"),
     "full_model_path": ExtraArgument(default="checkpoints/initial_schedule/680.ckpt", help="full warm start"),
     "no_gat_model_path": ExtraArgument(default="checkpoints/initial_schedule/680_no_gat.ckpt", help="no_gat warm start"),
-    "no_pointer_model_path": ExtraArgument(
-        default="checkpoints/initial_schedule/680_no_pointer.ckpt",
-        help="no_pointer warm start",
-    ),
-    "no_mask_model_path": ExtraArgument(default="checkpoints/initial_schedule/680.ckpt", help="no_mask warm start"),
-    "no_skill_hub_model_path": ExtraArgument(
-        default="checkpoints/initial_schedule/680.ckpt",
-        help="no_skill_hub warm start",
-    ),
     "no_attention_model_path": ExtraArgument(
         default="checkpoints/initial_schedule/680_no-attention-pooling.ckpt",
         help="no_attention warm start",
@@ -172,8 +151,15 @@ def _normalize_variants(raw_variants: Iterable[Any]) -> list[RescheduleAblationV
     variants: list[RescheduleAblationVariant] = []
     for raw in raw_variants:
         name = str(raw).strip()
+        if name in UNAVAILABLE_VARIANT_REASONS:
+            raise ValueError(
+                f"重调度消融变体 {name} 当前不可执行：{UNAVAILABLE_VARIANT_REASONS[name]}"
+            )
         if name not in VARIANTS:
-            raise KeyError(f"未知重调度消融变体: {name}；可用: {sorted(VARIANTS)}")
+            raise KeyError(
+                f"未知重调度消融变体: {name}；当前可用: {sorted(VARIANTS)}；"
+                f"暂不可用: {sorted(UNAVAILABLE_VARIANT_REASONS)}"
+            )
         variants.append(VARIANTS[name])
     if not variants:
         raise ValueError("至少需要一个消融变体")

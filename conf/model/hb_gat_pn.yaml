@@ -8,13 +8,13 @@ model:
   use_gat_layer_norm: false
   use_head_layer_norm: false
   task_feat_dim: 18
-  worker_feat_dim: 22
+  worker_feat_dim: 17
   station_feat_dim: 15
   use_skill_hub: true
   skill_hub_bidirectional: true
   num_skill_types: 5
   skill_feat_dim: 11
-  worker_skill_feature_slots: 10
+  worker_skill_feature_slots: 5
   use_shared_trunk: false
   use_attention_critic: true
   use_autoregressive_worker: true

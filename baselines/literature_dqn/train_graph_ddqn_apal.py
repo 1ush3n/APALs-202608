@@ -50,6 +50,7 @@ from baselines.literature.common import (
     make_eval_env,
     make_training_env,
     prepare_literature_output,
+    rollout_step_limit,
     save_literature_checkpoint,
     select_episode_dataset,
     training_data_source,
@@ -899,9 +900,9 @@ def _train_vectorized(
                 ready = []
                 for index in running:
                     step_counts[index] += 1
-                    max_steps = max(1, int(vector_env.envs[index].num_tasks) * 2)
+                    max_steps = rollout_step_limit(vector_env.envs[index].num_tasks)
                     if step_counts[index] > max_steps:
-                        invalid_counts[index] += 1
+                        # 受控冒烟截断不是非法动作；默认配置的上限为自然完整 rollout。
                         dones[index] = True
                     else:
                         ready.append(index)
@@ -1217,7 +1218,8 @@ def train(args: Any) -> None:
         replay_attempts = 0
         episode_start = time.time()
 
-        while not done and step_count < max(1, int(train_env.num_tasks) * 2) and len(train_env.assigned_tasks) < train_env.num_tasks:
+        max_steps = rollout_step_limit(train_env.num_tasks)
+        while not done and step_count < max_steps and len(train_env.assigned_tasks) < train_env.num_tasks:
             step_count += 1
             masks = train_env.get_masks()
             while bool(masks[0].all()):
@@ -1269,7 +1271,7 @@ def train(args: Any) -> None:
             if progress_interval_steps > 0 and step_count % progress_interval_steps == 0:
                 print(
                     f"[{METHOD_NAME}][Progress] ep={episode}/{max_episodes} "
-                    f"step={step_count}/{max(1, int(train_env.num_tasks) * 2)} "
+                    f"step={step_count}/{max_steps} "
                     f"assigned={len(train_env.assigned_tasks)}/{int(train_env.num_tasks)} "
                     f"replay_updates={replay_updates} utd={_realized_utd(agent, utd_scheduler):.3f} "
                     f"replay_buffer={len(agent.memory)} "

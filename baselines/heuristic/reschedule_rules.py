@@ -191,7 +191,7 @@ class RescheduleRuleScheduler:
         release_times = np.asarray(getattr(self.env, "task_material_ready", np.zeros(self.env.num_tasks)), dtype=float).copy()
         critical_tail = _critical_tail_lengths(self.env)
         max_skill = int(np.max(skills)) if skills.size else 0
-        num_skills = max(int(getattr(configs, "num_skill_types", 10)), max_skill + 1)
+        num_skills = max(int(getattr(configs, "num_skill_types", 5)), max_skill + 1)
         capable_workers = []
         for skill_id in range(num_skills):
             if skill_id < worker_skill_matrix.shape[1]:

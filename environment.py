@@ -14,6 +14,7 @@ from pathlib import Path
 
 from data_loader import load_data
 from configs import configs
+from worker_feature_layout import resolve_worker_feature_layout
 from core.event_engine import Event, EventType, EventQueue
 from core.action_masker import ActionMasker
 from core.constraints import Assignment, ConstraintEngine, ScheduleValidationReport
@@ -512,9 +513,10 @@ class AirLineEnv_Graph(gym.Env):
         full_worker_df = pd.read_csv(pool_path)
         self.n_w_max = len(full_worker_df)
         self.full_worker_efficiency = full_worker_df['efficiency'].values
-        num_skill_types = int(configs.num_skill_types)
-        skill_slots = int(getattr(configs, "worker_skill_feature_slots", num_skill_types))
-        assert 0 < num_skill_types <= skill_slots, "有效工种数必须大于 0 且不超过工人技能槽位数"
+        worker_layout = resolve_worker_feature_layout(configs)
+        self.worker_feature_layout = worker_layout
+        num_skill_types = worker_layout.num_skill_types
+        skill_slots = worker_layout.skill_slots
         active_skill_columns = [f'skill_{i}' for i in range(num_skill_types)]
         missing_skill_columns = sorted(set(active_skill_columns) - set(full_worker_df.columns))
         if missing_skill_columns:
@@ -523,10 +525,9 @@ class AirLineEnv_Graph(gym.Env):
             full_worker_df[active_skill_columns].values,
             dtype=torch.float,
         )
-        # 输入形状：[W, 5] -> [W, 10]；后 5 个槽位仅为特征布局兼容而补零。
-        skill_padding = torch.zeros((self.n_w_max, skill_slots - num_skill_types))
-        self.full_worker_skill_matrix = torch.cat([active_skill_matrix, skill_padding], dim=1)
-        expected_worker_dim = 1 + skill_slots + 11
+        # 输入形状：[W, 5]；当前五技能口径不再补齐历史十槽位。
+        self.full_worker_skill_matrix = active_skill_matrix
+        expected_worker_dim = worker_layout.total_dim
         assert int(configs.worker_feat_dim) == expected_worker_dim, (
             f"worker_feat_dim={configs.worker_feat_dim}，应为 {expected_worker_dim}"
         )
@@ -624,8 +625,15 @@ class AirLineEnv_Graph(gym.Env):
         self.base_task_x[:, 5 : 5 + num_skill_types] = type_onehot
         self.base_task_x[:, 16:17] = demand
         
-        # [Feature Upgrade] worker base feat + wait_time slot (11 dims padding now, total 22 dims)
-        self.base_worker_x = torch.cat([self.worker_static_feat, self.worker_skill_matrix, torch.zeros((self.num_workers, 11))], dim=1)
+        # 工人特征：[效率 | 5 技能 | 等待 | 空闲 | 8 锁状态 | 疲劳]，共 17 维。
+        self.base_worker_x = torch.cat(
+            [
+                self.worker_static_feat,
+                self.worker_skill_matrix,
+                torch.zeros((self.num_workers, worker_layout.total_dim - 1 - skill_slots)),
+            ],
+            dim=1,
+        )
         self._active_worker_topology_key = worker_topology_key(
             self.base_worker_x,
             int(configs.num_skill_types),
@@ -725,9 +733,19 @@ class AirLineEnv_Graph(gym.Env):
         self.worker_skill_matrix = self.full_worker_skill_matrix[w_indices]
         self.worker_static_feat = torch.tensor(self.worker_efficiency, dtype=torch.float).unsqueeze(1)
         
-        # 重建动态的 base_worker_x (维度随 num_workers 变化, 增加至 22 维以容纳疲劳因子)
-        # 1(efficiency) + 10(skills) + 11(Padding: 1 wait, 1 free, 8 locks, 1 fatigue) = 22 dims
-        self.base_worker_x = torch.cat([self.worker_static_feat, self.worker_skill_matrix, torch.zeros((self.num_workers, 11))], dim=1)
+        worker_layout = resolve_worker_feature_layout(configs)
+        self.worker_feature_layout = worker_layout
+        # 1 效率 + 5 技能 + 11 个动态资源特征 = 17 维。
+        self.base_worker_x = torch.cat(
+            [
+                self.worker_static_feat,
+                self.worker_skill_matrix,
+                torch.zeros(
+                    (self.num_workers, worker_layout.total_dim - 1 - worker_layout.skill_slots)
+                ),
+            ],
+            dim=1,
+        )
         self._active_worker_topology_key = worker_topology_key(
             self.base_worker_x,
             int(configs.num_skill_types),
@@ -1642,21 +1660,27 @@ class AirLineEnv_Graph(gym.Env):
         # [Feature Upgrade: 连续时间特征支撑排队决策]
         # 计算工人的预估等待时间: max(0, worker_free_time - current_time) / self.mean_task_time，使用对数归一化
         wait_times_w = np.maximum(0, self.worker_free_time - self.current_time)
-        # Efficiency(0), Skills(1~10), ProjectedWait(11)
-        worker_x[:, 11] = torch.log1p(torch.tensor(wait_times_w, dtype=torch.float) / self.mean_task_time)
+        worker_layout = resolve_worker_feature_layout(configs)
+        assert worker_x.size(1) == worker_layout.total_dim, (
+            f"工人特征维度错误: {worker_x.size(1)} != {worker_layout.total_dim}"
+        )
+        # 效率(0)、技能(1:6)、等待时间(6)。
+        worker_x[:, worker_layout.wait_idx] = torch.log1p(
+            torch.tensor(wait_times_w, dtype=torch.float) / self.mean_task_time
+        )
         
         is_free_bool = (self.worker_free_time <= self.current_time)
-        worker_x[:, 12] = torch.tensor(is_free_bool, dtype=torch.float)
+        worker_x[:, worker_layout.free_idx] = torch.tensor(is_free_bool, dtype=torch.float)
         
         # [Feature Upgrade] One-Hot Encode Lock state 
-        worker_x[:, 13:21] = 0.0 # Clear
+        worker_x[:, worker_layout.lock_slice] = 0.0
         lock_indices = torch.tensor(self.worker_locks, dtype=torch.long)
         lock_indices = torch.clamp(lock_indices, max=7) 
-        worker_x[torch.arange(self.num_workers), 13 + lock_indices] = 1.0
+        worker_x[torch.arange(self.num_workers), worker_layout.lock_start + lock_indices] = 1.0
         
-        # [Dynamic Events] 工人疲劳因子写入第 [21] 维 (动态 Lazy 计算，确保无滞后)
+        # 工人疲劳因子写入最终一维，动态 Lazy 计算确保无滞后。
         for w in range(self.num_workers):
-            worker_x[w, 21] = self.get_current_fatigue_factor(w, self.current_time)
+            worker_x[w, worker_layout.fatigue_idx] = self.get_current_fatigue_factor(w, self.current_time)
             
         data['worker'].x = worker_x
         apply_resource_graph(
@@ -1870,19 +1894,25 @@ class AirLineEnv_Graph(gym.Env):
         snap_num_workers = len(snapshot['worker_free_time'])
         worker_x = torch.as_tensor(snapshot['base_worker_x']).clone()
         
-        # [Feature Upgrade: Wait time rebuild]，使用对数归一化
+        worker_layout = resolve_worker_feature_layout(configs)
+        assert worker_x.size(1) == worker_layout.total_dim, (
+            f"快照工人特征维度错误: {worker_x.size(1)} != {worker_layout.total_dim}"
+        )
+        # 等待时间重建，使用对数归一化。
         wait_times_w = np.maximum(0, snapshot['worker_free_time'] - snapshot['current_time'])
-        worker_x[:, 11] = torch.log1p(torch.tensor(wait_times_w, dtype=torch.float) / ctx['mean_task_time'])
+        worker_x[:, worker_layout.wait_idx] = torch.log1p(
+            torch.tensor(wait_times_w, dtype=torch.float) / ctx['mean_task_time']
+        )
         
         is_free_bool = (snapshot['worker_free_time'] <= snapshot['current_time'])
-        worker_x[:, 12] = torch.tensor(is_free_bool, dtype=torch.float)
+        worker_x[:, worker_layout.free_idx] = torch.tensor(is_free_bool, dtype=torch.float)
         
-        worker_x[:, 13:21] = 0.0
+        worker_x[:, worker_layout.lock_slice] = 0.0
         snap_locks = snapshot['worker_locks']
         lock_indices = torch.tensor(snap_locks, dtype=torch.long).clamp(max=7)
-        worker_x[torch.arange(snap_num_workers), 13 + lock_indices] = 1.0
+        worker_x[torch.arange(snap_num_workers), worker_layout.lock_start + lock_indices] = 1.0
         
-        # [Dynamic Events] 重建第 21 维工人疲劳因子 (Lazy 评估)
+        # 重建最终一维工人疲劳因子（Lazy 评估）。
         snap_cum = snapshot.get('worker_cumulative_work', np.zeros(snap_num_workers))
         snap_last = snapshot.get('worker_last_busy_end', np.zeros(snap_num_workers))
         for w in range(snap_num_workers):
@@ -1898,7 +1928,7 @@ class AirLineEnv_Graph(gym.Env):
             f_min = getattr(configs, 'fatigue_efficiency_floor', 0.60)
             overtime = max(0.0, cum_work - alpha)
             fatigue_f = max(f_min, 1.0 - beta * overtime / (alpha * 2))
-            worker_x[w, 21] = fatigue_f
+            worker_x[w, worker_layout.fatigue_idx] = fatigue_f
             
         data['worker'].x = worker_x
         if reusable_state is not None:

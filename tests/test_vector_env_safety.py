@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from configs import configs
 from tests.runtime_safety import seed_everything, temporary_config
 from utils.vector_env import EnvCreator, VectorEnv
+from worker_feature_layout import resolve_worker_feature_layout
 
 
 pytestmark = pytest.mark.vector_safe
@@ -34,6 +35,8 @@ class _FailingEnvCreator:
 
 
 def _pick_simple_actions(obs_list, masks_list):
+    worker_layout = resolve_worker_feature_layout(configs)
+    task_skill_end = 5 + worker_layout.num_skill_types
     actions = []
     for obs, masks in zip(obs_list, masks_list):
         task_mask, station_mask, worker_mask = masks
@@ -50,11 +53,11 @@ def _pick_simple_actions(obs_list, masks_list):
 
         station_id = int(valid_stations[0].item())
         demand = max(1, int(obs["task"].x[task_id, -1].item()))
-        task_type_idx = int(torch.argmax(obs["task"].x[task_id, 5:15]).item())
+        task_type_idx = int(torch.argmax(obs["task"].x[task_id, 5:task_skill_end]).item())
 
         worker_feats = obs["worker"].x
         has_skill = worker_feats[:, 1 + task_type_idx] > 0.5
-        worker_locks = torch.argmax(worker_feats[:, 13:21], dim=1)
+        worker_locks = torch.argmax(worker_feats[:, worker_layout.lock_slice], dim=1)
         lock_mask = (worker_locks != 0) & (worker_locks != station_id + 1)
         combined_mask = worker_mask | (~has_skill) | lock_mask
         valid_workers = torch.where(~combined_mask)[0]

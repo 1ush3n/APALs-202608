@@ -345,6 +345,7 @@ class EnvProxy:
         """
         from configs import configs
         from environment import _fill_station_macro_features
+        from worker_feature_layout import resolve_worker_feature_layout
         from utils.resource_graph import (
             SkillHubTopology,
             apply_resource_graph,
@@ -393,17 +394,23 @@ class EnvProxy:
         # 2. 重建工人节点特征
         snap_num_workers = len(snapshot['worker_free_time'])
         worker_x = torch.as_tensor(snapshot['base_worker_x']).clone()
+        worker_layout = resolve_worker_feature_layout(configs)
+        assert worker_x.size(1) == worker_layout.total_dim, (
+            f"快照工人特征维度错误: {worker_x.size(1)} != {worker_layout.total_dim}"
+        )
         
         wait_times_w = np.maximum(0, snapshot['worker_free_time'] - snapshot['current_time'])
-        worker_x[:, 11] = torch.log1p(torch.tensor(wait_times_w, dtype=torch.float) / ctx['mean_task_time'])
+        worker_x[:, worker_layout.wait_idx] = torch.log1p(
+            torch.tensor(wait_times_w, dtype=torch.float) / ctx['mean_task_time']
+        )
         
         is_free_bool = (snapshot['worker_free_time'] <= snapshot['current_time'])
-        worker_x[:, 12] = torch.tensor(is_free_bool, dtype=torch.float)
+        worker_x[:, worker_layout.free_idx] = torch.tensor(is_free_bool, dtype=torch.float)
         
-        worker_x[:, 13:21] = 0.0
+        worker_x[:, worker_layout.lock_slice] = 0.0
         snap_locks = snapshot['worker_locks']
         lock_indices = torch.tensor(snap_locks, dtype=torch.long).clamp(max=7)
-        worker_x[torch.arange(snap_num_workers), 13 + lock_indices] = 1.0
+        worker_x[torch.arange(snap_num_workers), worker_layout.lock_start + lock_indices] = 1.0
         
         snap_cum = snapshot.get('worker_cumulative_work', np.zeros(snap_num_workers))
         snap_last = snapshot.get('worker_last_busy_end', np.zeros(snap_num_workers))
@@ -420,7 +427,7 @@ class EnvProxy:
             f_min = getattr(configs, 'fatigue_efficiency_floor', 0.60)
             overtime = max(0.0, cum_work - alpha)
             fatigue_f = max(f_min, 1.0 - beta * overtime / (alpha * 2))
-            worker_x[w, 21] = fatigue_f
+            worker_x[w, worker_layout.fatigue_idx] = fatigue_f
             
         data['worker'].x = worker_x
         topology = None

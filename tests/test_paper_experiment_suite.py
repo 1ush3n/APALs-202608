@@ -18,6 +18,9 @@ from runtime.paper_metrics import (
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
 def test_statistical_summary_and_significance_use_seeded_rows() -> None:
     rows = [
         {"method": "full", "dataset": "680", "makespan": 300.0, "seed": 0},
@@ -77,10 +80,10 @@ def test_dataset_profile_rows_use_apal_loader(tmp_path: Path) -> None:
     data_path = tmp_path / "mini.csv"
     pd.DataFrame(
         [
-            {"AO号": "A", "类型": 1, "紧前工序AO号": "", "需求人数": 0, "加工时间/h": 0.0, "限定站位": ""},
-            {"AO号": "A-1", "类型": 1, "紧前工序AO号": "", "需求人数": 0, "加工时间/h": 0.0, "限定站位": ""},
-            {"AO号": "AAQS00-0010", "类型": 2, "紧前工序AO号": "", "需求人数": 2, "加工时间/h": 1.5, "限定站位": 1},
-            {"AO号": "AAQS00-0020", "类型": 3, "紧前工序AO号": "AAQS00-0010", "需求人数": 1, "加工时间/h": 2.5, "限定站位": ""},
+            {"AO号": "A", "类型": 1, "工种": -1, "紧前工序AO号": "", "需求人数": 0, "加工时间/h": 0.0, "限定站位": ""},
+            {"AO号": "A-1", "类型": 1, "工种": -1, "紧前工序AO号": "", "需求人数": 0, "加工时间/h": 0.0, "限定站位": ""},
+            {"AO号": "AAQS00-0010", "类型": 2, "工种": 0, "紧前工序AO号": "", "需求人数": 2, "加工时间/h": 1.5, "限定站位": 1},
+            {"AO号": "AAQS00-0020", "类型": 2, "工种": 1, "紧前工序AO号": "AAQS00-0010", "需求人数": 1, "加工时间/h": 2.5, "限定站位": ""},
         ]
     ).to_csv(data_path, index=False, encoding="utf-8-sig")
 
@@ -89,6 +92,7 @@ def test_dataset_profile_rows_use_apal_loader(tmp_path: Path) -> None:
     assert rows[0]["node_count"] == 4
     assert rows[0]["real_task_count"] == 2
     assert rows[0]["critical_path_lower_bound"] >= 2.5
+    assert rows[0]["skill_type_count"] == 2
     assert rows[0]["skill_entropy"] > 0.0
 
 
@@ -152,3 +156,16 @@ def test_bare_evaluation_summary_is_treated_as_full_method(tmp_path: Path) -> No
     rows = collect_result_rows([tmp_path / "results"])
     assert rows[0]["method"] == "full"
     assert rows[0]["dataset"] == "680"
+
+
+def test_current_paper_suite_excludes_unavailable_and_replaced_methods() -> None:
+    config = load_paper_config(
+        PROJECT_ROOT / "conf" / "experiment" / "paper_experiment_suite.yaml",
+        PROJECT_ROOT,
+    )
+    active_methods = set(config.methods)
+    active_ablations = set(config.ablations)
+    forbidden = {"no_mask", "no_pointer", "no_skill_hub", "BasicPPO", "DQN", "GraphPPO"}
+    assert not (active_methods & forbidden)
+    assert not (active_ablations & forbidden)
+    assert {"full", "no_gat", "no_attention"} <= active_ablations

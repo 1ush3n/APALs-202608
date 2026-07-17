@@ -13,6 +13,7 @@ from contextlib import nullcontext
 from typing import Tuple, List, Dict, Optional, Any
 from torch_geometric.data import HeteroData
 from configs import configs
+from worker_feature_layout import resolve_worker_feature_layout
 try:
     from schedulefree import AdamWScheduleFree
 except ImportError:
@@ -282,6 +283,15 @@ class PPOAgent:
 
         task_x = batch["task"].x.to(self.device)
         worker_x = batch["worker"].x.to(self.device)
+        worker_layout = resolve_worker_feature_layout(self.config)
+        num_skill_types = worker_layout.num_skill_types
+        task_skill_end = 5 + num_skill_types
+        if task_x.size(1) < task_skill_end:
+            raise ValueError(f"任务特征维度不足: {task_x.size(1)} < {task_skill_end}")
+        if worker_x.size(1) != worker_layout.total_dim:
+            raise ValueError(
+                f"工人特征维度错误: {worker_x.size(1)} != {worker_layout.total_dim}"
+            )
         task_batch = batch["task"].batch.to(self.device, dtype=torch.long)
         worker_batch = batch["worker"].batch.to(self.device, dtype=torch.long)
 
@@ -295,7 +305,7 @@ class PPOAgent:
                 selected_task_global[batch_id] = task_nodes[selected_task[batch_id]]
 
         selected_task_raw = task_x[selected_task_global]
-        task_type_idx = torch.argmax(selected_task_raw[:, 5:15], dim=1)
+        task_type_idx = torch.argmax(selected_task_raw[:, 5:task_skill_end], dim=1)
 
         if hasattr(batch["worker"], "ptr") and batch["worker"].ptr is not None:
             worker_ptr = batch["worker"].ptr.to(self.device, dtype=torch.long)
@@ -311,10 +321,10 @@ class PPOAgent:
 
         worker_skill_idx = task_type_idx[worker_batch]
         row_idx = torch.arange(worker_x.size(0), device=self.device, dtype=torch.long)
-        has_skill = worker_x[:, 1:11][row_idx, worker_skill_idx] > 0.5
+        has_skill = worker_x[:, worker_layout.skill_slice][row_idx, worker_skill_idx] > 0.5
         skill_mask_flat = ~has_skill
 
-        worker_locks = torch.argmax(worker_x[:, 13:21], dim=1)
+        worker_locks = torch.argmax(worker_x[:, worker_layout.lock_slice], dim=1)
         station_action = selected_station + 1
         lock_mask_flat = (worker_locks != 0) & (worker_locks != station_action[worker_batch])
 
@@ -529,15 +539,23 @@ class PPOAgent:
             current_worker_mask = mask_worker.clone() if mask_worker is not None else torch.zeros(obs['worker'].num_nodes, dtype=torch.bool).to(self.device)
             
             worker_feats = obs['worker'].x
-            worker_skills = worker_feats[:, 1:11] # 10 dim
+            worker_layout = resolve_worker_feature_layout(self.config)
+            if worker_feats.size(1) != worker_layout.total_dim:
+                raise ValueError(
+                    f"工人特征维度错误: {worker_feats.size(1)} != {worker_layout.total_dim}"
+                )
+            task_skill_end = 5 + worker_layout.num_skill_types
+            if obs['task'].x.size(1) < task_skill_end:
+                raise ValueError(f"任务特征维度不足: {obs['task'].x.size(1)} < {task_skill_end}")
+            worker_skills = worker_feats[:, worker_layout.skill_slice]
             
-            task_type_idx = torch.argmax(obs['task'].x[t_idx, 5:15]).item() 
+            task_type_idx = torch.argmax(obs['task'].x[t_idx, 5:task_skill_end]).item()
             
             has_skill = worker_skills[:, task_type_idx] > 0.5
             skill_mask = ~has_skill 
             
             s_act = station_action.item() + 1
-            worker_locks = torch.argmax(worker_feats[:, 13:21], dim=1)
+            worker_locks = torch.argmax(worker_feats[:, worker_layout.lock_slice], dim=1)
             lock_mask = (worker_locks != 0) & (worker_locks != s_act)
             
             if no_mask:
@@ -797,14 +815,24 @@ class PPOAgent:
                 current_worker_mask = m_worker.clone().to(self.device) if m_worker is not None else torch.zeros(obs_worker_num_nodes, dtype=torch.bool).to(self.device)
                 
                 worker_feats = obs_list[i]['worker'].x
-                worker_skills = worker_feats[:, 1:11]
+                worker_layout = resolve_worker_feature_layout(self.config)
+                if worker_feats.size(1) != worker_layout.total_dim:
+                    raise ValueError(
+                        f"工人特征维度错误: {worker_feats.size(1)} != {worker_layout.total_dim}"
+                    )
+                task_skill_end = 5 + worker_layout.num_skill_types
+                if obs_list[i]['task'].x.size(1) < task_skill_end:
+                    raise ValueError(
+                        f"任务特征维度不足: {obs_list[i]['task'].x.size(1)} < {task_skill_end}"
+                    )
+                worker_skills = worker_feats[:, worker_layout.skill_slice]
                 
-                task_type_idx = torch.argmax(obs_list[i]['task'].x[t_idx, 5:15]).item() 
+                task_type_idx = torch.argmax(obs_list[i]['task'].x[t_idx, 5:task_skill_end]).item()
                 has_skill = worker_skills[:, task_type_idx] > 0.5
                 skill_mask = ~has_skill 
                 
                 s_act = station_action.item() + 1
-                worker_locks = torch.argmax(worker_feats[:, 13:21], dim=1)
+                worker_locks = torch.argmax(worker_feats[:, worker_layout.lock_slice], dim=1)
                 lock_mask = (worker_locks != 0) & (worker_locks != s_act)
                 
                 if no_mask:

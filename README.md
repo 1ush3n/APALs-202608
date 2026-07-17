@@ -603,8 +603,10 @@ python -m pytest -q
 关键架构测试：
 
 ```powershell
-python -m pytest -q tests/test_config_loader.py tests/test_lightning_architecture.py tests/test_vector_env_safety.py
+python tests/run_preflight_tests.py
 ```
+
+该前检查只执行真实图的初始化、图构建、模型前向和首步合法动作，不替代服务器上的正式训练与大规模验证。
 
 ## Skill Hub 资源图
 
@@ -616,7 +618,7 @@ model:
   skill_hub_bidirectional: true
   num_skill_types: 5
   skill_feat_dim: 11
-  worker_skill_feature_slots: 10
+  worker_skill_feature_slots: 5
 ```
 
 - `use_skill_hub: false`：保留原始 `Worker -> Task` 的 `can_do` 直接边，可用于旧模型和消融对照。
@@ -624,6 +626,7 @@ model:
 - `skill_hub_bidirectional: true`：额外启用 `Task -> Skill -> Worker` 反向消息；设为 `false` 时仅保留正向链路。
 - Skill Hub 与旧直接边互斥，不会同时参与消息传递。
 - 新旧图结构的模型参数不兼容；加载 checkpoint 时必须使用训练该 checkpoint 时相同的图模式。
+- 工人节点特征统一为 17 维：`[效率 | 5 个技能 | 等待 | 空闲 | 8 个工位锁状态 | 疲劳]`；历史 22 维 checkpoint 不可与当前五槽位模型混用。
 
 ## CUDA OOM 保护
 
@@ -913,7 +916,7 @@ python train.py \
   enable_multi_benchmark_eval=false
 ```
 
-若需要用四基准归一化综合评分保存 best model，则去掉 `enable_multi_benchmark_eval=false`，使用配置文件中的 `data/283.csv`、`data/680.csv`、`data/2338.csv`、`data/3182.csv` 进行验证。旧的 `tests/test_sensitivity_analysis.py` 属于历史实验脚本，不建议作为当前论文消融入口。
+若需要用四基准归一化综合评分保存 best model，则去掉 `enable_multi_benchmark_eval=false`，使用配置文件中的 `data/283.csv`、`data/680.csv`、`data/2338.csv`、`data/3182.csv` 进行验证。历史敏感性脚本已从自动测试集中移除，不应作为当前论文消融入口。
 
 #### 常用参数说明：
 - `--data_dir`：数据集文件所在的根目录（默认 `data`）。

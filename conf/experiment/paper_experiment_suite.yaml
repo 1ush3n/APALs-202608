@@ -26,12 +26,9 @@ reference_makespans:
 methods:
   - full
   - no_gat
-  - no_pointer
-  - no_mask
-  - no_skill_hub
   - no_attention
-  - BasicPPO
-  - DQN
+  - L2D-PPO-APAL
+  - Graph-DDQN-APAL
   - SPT
   - LPT
   - EDD
@@ -58,19 +55,6 @@ ablations:
     experiment: scale_400_800_schedule
     overrides:
       - ablation_no_gat=true
-  no_pointer:
-    experiment: scale_400_800_schedule
-    overrides:
-      - ablation_no_pointer=true
-  no_mask:
-    experiment: scale_400_800_schedule
-    overrides:
-      - ablation_no_mask=true
-  no_skill_hub:
-    experiment: scale_400_800_schedule
-    overrides:
-      - use_skill_hub=false
-      - skill_hub_bidirectional=false
   no_attention:
     experiment: scale_400_800_schedule
     overrides:
@@ -80,7 +64,10 @@ checkpoints:
   full:
     "680": checkpoints/initial_schedule/best_680.ckpt
   no_gat: {}
-  no_pointer: {}
-  no_mask: {}
-  no_skill_hub: {}
   no_attention: {}
+
+# 非活动项目（不进入 commands plan，也不应被一键训练）：
+# - no_mask：当前解码器没有 mask 时不可运行。
+# - no_pointer：等待重新设计能代表无 Pointer 的合理解码器。
+# - no_skill_hub：代码路径保留，但当前实验计划暂缓。
+# - BasicPPO、DQN、GraphPPO：历史/已替代方法，不进入当前严格主表。

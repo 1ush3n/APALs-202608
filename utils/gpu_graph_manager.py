@@ -3,6 +3,7 @@ from torch_geometric.data import Batch
 import numpy as np
 from typing import Any
 from configs import configs
+from worker_feature_layout import resolve_worker_feature_layout
 from utils.resource_graph import (
     apply_batched_resource_graph,
     build_worker_skill_edges,
@@ -251,13 +252,24 @@ class GPUBatchGraphManager:
             batch_template['task'].x[:, 23] = ((flat_current_times_t - flat_base_start) / torch.clamp(flat_base_makespan, min=1e-6)) * delay_mask.float()
         
         # ② Worker 特征
+        worker_layout = resolve_worker_feature_layout(self.config)
+        if batch_template['worker'].x.size(1) != worker_layout.total_dim:
+            raise ValueError(
+                "GPU 工人特征维度错误: "
+                f"{batch_template['worker'].x.size(1)} != {worker_layout.total_dim}"
+            )
         wait_w = torch.clamp(flat_free_time - flat_current_times_w, min=0.0)
-        batch_template['worker'].x[:, 11] = torch.log1p(wait_w / mean_task_time)
-        batch_template['worker'].x[:, 12] = (flat_free_time <= flat_current_times_w).float()
+        batch_template['worker'].x[:, worker_layout.wait_idx] = torch.log1p(wait_w / mean_task_time)
+        batch_template['worker'].x[:, worker_layout.free_idx] = (
+            flat_free_time <= flat_current_times_w
+        ).float()
         
-        batch_template['worker'].x[:, 13:21] = 0.0
+        batch_template['worker'].x[:, worker_layout.lock_slice] = 0.0
         flat_locks_clamped = torch.clamp(flat_locks, max=7)
-        batch_template['worker'].x[torch.arange(batch_size * num_workers, device=t_device), 13 + flat_locks_clamped] = 1.0
+        batch_template['worker'].x[
+            torch.arange(batch_size * num_workers, device=t_device),
+            worker_layout.lock_start + flat_locks_clamped,
+        ] = 1.0
         
         # GPU 疲劳系数自适应计算
         fatigue_recovery_ratio = getattr(self.config, 'fatigue_recovery_ratio', 0.5)
@@ -273,7 +285,7 @@ class GPUBatchGraphManager:
         
         overtime = torch.clamp(cum_work - fatigue_threshold, min=0.0)
         fatigue_f = torch.clamp(1.0 - fatigue_decay * overtime / (fatigue_threshold * 2), min=fatigue_floor)
-        batch_template['worker'].x[:, 21] = fatigue_f
+        batch_template['worker'].x[:, worker_layout.fatigue_idx] = fatigue_f
         
         # ③ Station 特征
         batch_template['station'].x[:, 0] = flat_loads / max(1.0, ideal_station_load)

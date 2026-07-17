@@ -6,6 +6,11 @@ from typing import Protocol
 import torch
 from torch_geometric.data import HeteroData
 
+from worker_feature_layout import (
+    build_worker_feature_layout,
+    resolve_worker_feature_layout,
+)
+
 
 LEGACY_RESOURCE_EDGE = ("worker", "can_do", "task")
 SKILL_FORWARD_EDGES = (
@@ -27,6 +32,8 @@ class ResourceGraphConfig(Protocol):
     use_skill_hub: bool
     skill_hub_bidirectional: bool
     num_skill_types: int
+    worker_skill_feature_slots: int
+    worker_feat_dim: int
 
 
 @dataclass(frozen=True)
@@ -103,9 +110,17 @@ def worker_topology_key(worker_x: torch.Tensor, num_skill_types: int) -> tuple[i
     return int(worker_x.size(0)), skill_mask.numpy().tobytes()
 
 
-def build_skill_features(worker_x: torch.Tensor, num_skill_types: int) -> torch.Tensor:
+def build_skill_features(
+    worker_x: torch.Tensor,
+    num_skill_types: int,
+    worker_skill_feature_slots: int | None = None,
+) -> torch.Tensor:
     """构建 Skill 节点特征：[技能 one-hot, 六项资源统计]。"""
     assert worker_x.dim() == 2, f"worker_x 必须为二维张量，实际为 {tuple(worker_x.shape)}"
+    layout = build_worker_feature_layout(num_skill_types, worker_skill_feature_slots)
+    assert worker_x.size(1) == layout.total_dim, (
+        f"worker_x 特征维度错误: {worker_x.size(1)} != {layout.total_dim}"
+    )
     skill_mask = worker_x[:, 1 : 1 + num_skill_types] > 0.5
     num_workers = max(1, int(worker_x.size(0)))
     counts = skill_mask.sum(dim=0)
@@ -118,19 +133,11 @@ def build_skill_features(worker_x: torch.Tensor, num_skill_types: int) -> torch.
     )
     eligible_ratio = counts.to(worker_x.dtype) / float(num_workers)
 
-    is_free = (
-        worker_x[:, 12] > 0.5
-        if worker_x.size(1) > 12
-        else torch.ones(worker_x.size(0), dtype=torch.bool, device=worker_x.device)
-    )
-    is_mobile = (
-        worker_x[:, 13] > 0.5
-        if worker_x.size(1) > 13
-        else torch.ones(worker_x.size(0), dtype=torch.bool, device=worker_x.device)
-    )
-    efficiency = worker_x[:, 0]
-    wait_time = worker_x[:, 11] if worker_x.size(1) > 11 else torch.zeros_like(efficiency)
-    fatigue = worker_x[:, 21] if worker_x.size(1) > 21 else torch.ones_like(efficiency)
+    is_free = worker_x[:, layout.free_idx] > 0.5
+    is_mobile = worker_x[:, layout.lock_start] > 0.5
+    efficiency = worker_x[:, layout.efficiency_idx]
+    wait_time = worker_x[:, layout.wait_idx]
+    fatigue = worker_x[:, layout.fatigue_idx]
 
     mask_f = skill_mask.to(worker_x.dtype)
     free_ratio = (mask_f * is_free[:, None]).sum(dim=0) / safe_counts
@@ -168,6 +175,11 @@ def apply_resource_graph(
     num_skill_types = int(config.num_skill_types)
     if num_skill_types <= 0:
         raise ValueError("num_skill_types 必须大于 0")
+    worker_layout = resolve_worker_feature_layout(config)
+    if worker_x.size(1) != worker_layout.total_dim:
+        raise ValueError(
+            f"worker_x 特征维度错误: {worker_x.size(1)} != {worker_layout.total_dim}"
+        )
 
     if not bool(config.use_skill_hub):
         worker_skill = build_worker_skill_edges(worker_x, num_skill_types)
@@ -203,7 +215,11 @@ def apply_resource_graph(
         raise ValueError("缓存的 Worker-Skill 拓扑与当前工人节点数不匹配")
     if skill_to_task.numel() and int(skill_to_task[1].max()) >= task_x.size(0):
         raise ValueError("缓存的 Task-Skill 拓扑与当前任务节点数不匹配")
-    skill_x = build_skill_features(worker_x, num_skill_types)
+    skill_x = build_skill_features(
+        worker_x,
+        num_skill_types,
+        worker_layout.skill_slots,
+    )
     expected_skill_dim = int(getattr(config, "skill_feat_dim", skill_x.size(1)))
     if skill_x.size(1) != expected_skill_dim:
         raise ValueError(
@@ -243,6 +259,11 @@ def apply_batched_resource_graph(
     clear_resource_graph(data)
 
     num_skill_types = int(config.num_skill_types)
+    worker_layout = resolve_worker_feature_layout(config)
+    if worker_x.size(1) != worker_layout.total_dim:
+        raise ValueError(
+            f"批量 worker_x 特征维度错误: {worker_x.size(1)} != {worker_layout.total_dim}"
+        )
     if not bool(config.use_skill_hub):
         edge_parts: list[torch.Tensor] = []
         for batch_idx in range(batch_size):
@@ -276,6 +297,7 @@ def apply_batched_resource_graph(
         build_skill_features(
             worker_x[batch_idx * num_workers : (batch_idx + 1) * num_workers],
             num_skill_types,
+            worker_layout.skill_slots,
         )
         for batch_idx in range(batch_size)
     ]

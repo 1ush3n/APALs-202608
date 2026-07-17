@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from uuid import uuid4
-
 import pandas as pd
 import torch
+import yaml
 
 from data_loader import load_data
 from scripts.build_3182_dataset import (
+    CORRECTIONS_PATH,
     PROJECT_ROOT,
     _assert_legacy_projection_equal,
+    _normalize_predecessor_tokens,
     build_dataset,
     load_mapping_config,
 )
@@ -21,10 +22,11 @@ CSV_PATH = PROJECT_ROOT / "data" / "3182.csv"
 
 def test_3182_is_reproducible_from_authoritative_excel() -> None:
     config = load_mapping_config(CONFIG_PATH)
-    expected, legacy = build_dataset(config)
+    expected, _legacy = build_dataset(config)
     actual = pd.read_csv(CSV_PATH)
 
-    _assert_legacy_projection_equal(actual, legacy)
+    # 构建脚本会在保留原始 Excel 全部稳定字段的前提下应用已登记的前驱修正。
+    _assert_legacy_projection_equal(actual, expected)
     assert actual["专业编码"].fillna("").tolist() == expected["专业编码"].tolist()
     assert actual["工种"].astype(int).tolist() == expected["工种"].astype(int).tolist()
 
@@ -40,8 +42,23 @@ def test_node_type_and_skill_type_are_independent() -> None:
     assert loaded.loc[physical, "profession_code"].nunique() == 17
 
 
-def test_legacy_type_column_is_not_reused_as_skill() -> None:
-    legacy_path = PROJECT_ROOT / "tests" / f".legacy_{uuid4().hex}.csv"
+def test_registered_predecessor_corrections_are_applied_to_all_target_datasets() -> None:
+    payload = yaml.safe_load(CORRECTIONS_PATH.read_text(encoding="utf-8"))
+    corrections = payload["corrections"]
+    assert corrections
+
+    for correction in corrections:
+        for dataset in correction["datasets"]:
+            frame = pd.read_csv(PROJECT_ROOT / dataset)
+            rows = frame.loc[frame["AO号"].astype(str).eq(correction["task_ao"])]
+            assert len(rows) == 1
+            predecessors = _normalize_predecessor_tokens(rows.iloc[0]["紧前工序AO号"])
+            assert correction["removed_predecessor_ao"] not in predecessors
+            assert predecessors == correction["retained_predecessors"]
+
+
+def test_legacy_type_column_is_not_reused_as_skill(tmp_path) -> None:
+    legacy_path = tmp_path / "legacy_without_skill_column.csv"
     pd.DataFrame(
         {
             "AO号": ["A", "AA0001-0010"],

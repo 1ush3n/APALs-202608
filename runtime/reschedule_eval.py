@@ -92,10 +92,26 @@ def ensure_reschedule_baseline_available(config_obj=configs) -> Path | None:
 
 
 def load_warm_start_weights_with_input_expansion(model: torch.nn.Module, model_path: Path, device: torch.device) -> dict[str, int]:
-    """加载初始调度模型；当 task 输入维度扩展时复制旧权重的已有列。"""
+    """加载初始调度模型；仅允许任务输入维度从初始调度扩展到重调度。"""
     checkpoint = load_checkpoint(model_path, map_location=device)
     source_state = checkpoint.state_dict
     target_state = model.state_dict()
+    worker_key = "embedder.worker_emb.0.weight"
+    source_worker = source_state.get(worker_key)
+    target_worker = target_state.get(worker_key)
+    if (source_worker is None) != (target_worker is None):
+        raise ValueError("warm start checkpoint 缺少 worker 输入嵌入权重，无法验证特征布局")
+    if source_worker is not None and target_worker is not None and (
+        source_worker.ndim != 2 or target_worker.ndim != 2
+    ):
+        raise ValueError("warm start 的 worker 输入嵌入权重维度错误")
+    if source_worker is not None and target_worker is not None and source_worker.shape[1] != target_worker.shape[1]:
+        raise ValueError(
+            "warm start 的工人特征布局不兼容："
+            f"checkpoint 输入维度={source_worker.shape[1]}，"
+            f"当前模型输入维度={target_worker.shape[1]}。"
+            "当前仅支持任务特征扩展；历史 22 维工人特征 checkpoint 不能部分加载。"
+        )
     loaded_exact = 0
     loaded_expanded = 0
     skipped = 0

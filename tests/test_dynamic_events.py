@@ -15,8 +15,20 @@ from core.event_engine import Event, EventType, EventQueue
 from core.action_masker import ActionMasker
 from environment import AirLineEnv_Graph
 from configs import configs
+from worker_feature_layout import resolve_worker_feature_layout
 
 DATA_PATH = os.path.join(ROOT_DIR, "data", "283.csv")
+
+
+@pytest.fixture(autouse=True)
+def _restore_global_config_after_each_case():
+    """动态事件测试可以覆盖全局开关，但不得污染后续训练前检查。"""
+
+    original = configs.to_flat_dict()
+    try:
+        yield
+    finally:
+        configs.update_from_dict(original)
 
 def setup_module(module):
     """全局初始化配置，确保基准图存在"""
@@ -215,13 +227,15 @@ def test_worker_fatigue_and_lazy_recovery():
     
     # 4. 验证 GNN 能感知动态恢复后的值
     obs = env._get_observation()
-    assert abs(obs['worker'].x[w, 21].item() - 1.0) < 1e-5, "GNN should read dynamically recovered fatigue factor"
+    worker_layout = resolve_worker_feature_layout(configs)
+    assert abs(obs['worker'].x[w, worker_layout.fatigue_idx].item() - 1.0) < 1e-5, "GNN 应读取动态恢复后的疲劳因子"
 
 
 def test_gnn_dimension_alignment():
     """验证新维度在特征数组中的对齐与拼接大小"""
     configs.task_feat_dim = 18
-    configs.worker_feat_dim = 22
+    worker_layout = resolve_worker_feature_layout(configs)
+    configs.worker_feat_dim = worker_layout.total_dim
     configs.station_feat_dim = 15
 
     env = AirLineEnv_Graph(data_path_or_dir=DATA_PATH, seed=42)
@@ -229,5 +243,7 @@ def test_gnn_dimension_alignment():
 
     # 检查返回的异构图各张量维度
     assert obs['task'].x.shape[1] == 18, f"Task features should have 18 columns, got {obs['task'].x.shape[1]}"
-    assert obs['worker'].x.shape[1] == 22, f"Worker features should have 22 columns, got {obs['worker'].x.shape[1]}"
+    assert obs['worker'].x.shape[1] == worker_layout.total_dim, (
+        f"Worker features should have {worker_layout.total_dim} columns, got {obs['worker'].x.shape[1]}"
+    )
     assert obs['station'].x.shape[1] == 15, f"Station features should have 15 columns, got {obs['station'].x.shape[1]}"

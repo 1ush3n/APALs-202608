@@ -7,9 +7,11 @@ from typing import Any, Mapping
 import torch
 
 from configs import Config
+from worker_feature_layout import resolve_worker_feature_layout
 
 
 FORMAT_VERSION = 1
+WORKER_FEATURE_LAYOUT_VERSION = "five_skill_v2"
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,9 @@ class ModelSpec:
     task_feat_dim: int | None = None
     worker_feat_dim: int | None = None
     station_feat_dim: int | None = None
+    num_skill_types: int | None = None
+    worker_skill_feature_slots: int | None = None
+    worker_feature_layout_version: str | None = None
 
     @property
     def use_skill_hub(self) -> bool:
@@ -45,10 +50,17 @@ def build_model_spec(config: Config) -> ModelSpec:
         else "skill_hub_bidirectional" if config.skill_hub_bidirectional
         else "skill_hub_forward"
     )
+    worker_layout = resolve_worker_feature_layout(config)
     return ModelSpec(
-        mode, int(config.hidden_dim), int(config.num_gat_layers),
-        int(config.task_feat_dim), int(config.worker_feat_dim),
-        int(config.station_feat_dim),
+        resource_graph_mode=mode,
+        hidden_dim=int(config.hidden_dim),
+        num_gat_layers=int(config.num_gat_layers),
+        task_feat_dim=int(config.task_feat_dim),
+        worker_feat_dim=int(config.worker_feat_dim),
+        station_feat_dim=int(config.station_feat_dim),
+        num_skill_types=worker_layout.num_skill_types,
+        worker_skill_feature_slots=worker_layout.skill_slots,
+        worker_feature_layout_version=WORKER_FEATURE_LAYOUT_VERSION,
     )
 
 
@@ -119,13 +131,18 @@ def infer_model_spec(state_dict: Mapping[str, torch.Tensor]) -> ModelSpec:
         if key.startswith("encoder.layers.")
         and len(parts := key.split(".")) > 2 and parts[2].isdigit()
     }
+    worker_feat_dim = int(worker.shape[1]) if worker is not None else None
+    is_current_layout = worker_feat_dim == 17
     return ModelSpec(
-        mode,
-        int(task.shape[0]) if task is not None else None,
-        max(indexes) + 1 if indexes else None,
-        int(task.shape[1]) if task is not None else None,
-        int(worker.shape[1]) if worker is not None else None,
-        int(station.shape[1]) if station is not None else None,
+        resource_graph_mode=mode,
+        hidden_dim=int(task.shape[0]) if task is not None else None,
+        num_gat_layers=max(indexes) + 1 if indexes else None,
+        task_feat_dim=int(task.shape[1]) if task is not None else None,
+        worker_feat_dim=worker_feat_dim,
+        station_feat_dim=int(station.shape[1]) if station is not None else None,
+        num_skill_types=5 if is_current_layout else None,
+        worker_skill_feature_slots=5 if is_current_layout else None,
+        worker_feature_layout_version=(WORKER_FEATURE_LAYOUT_VERSION if is_current_layout else None),
     )
 
 
@@ -144,11 +161,40 @@ def apply_checkpoint_model_spec(
     *,
     explicit_fields: set[str] | None = None,
 ) -> None:
+    current_layout = resolve_worker_feature_layout(config)
+    if (
+        spec.worker_feat_dim is not None
+        and int(spec.worker_feat_dim) != current_layout.total_dim
+    ):
+        raise ValueError(
+            "checkpoint 的工人特征布局与当前五技能布局不兼容："
+            f"checkpoint worker_feat_dim={spec.worker_feat_dim}，"
+            f"当前要求 {current_layout.total_dim}。"
+            "历史 22 维 checkpoint 不能用于当前模型，请使用 17 维五技能 checkpoint 或重新训练。"
+        )
+    if spec.num_skill_types not in (None, current_layout.num_skill_types):
+        raise ValueError(
+            "checkpoint 的工种数量与当前配置不兼容："
+            f"checkpoint={spec.num_skill_types}，当前={current_layout.num_skill_types}。"
+        )
+    if spec.worker_skill_feature_slots not in (None, current_layout.skill_slots):
+        raise ValueError(
+            "checkpoint 的工人技能槽位与当前配置不兼容："
+            f"checkpoint={spec.worker_skill_feature_slots}，当前={current_layout.skill_slots}。"
+        )
     inferred = {
         "use_skill_hub": spec.use_skill_hub,
         "skill_hub_bidirectional": spec.skill_hub_bidirectional,
     }
-    for key in ("hidden_dim", "num_gat_layers", "task_feat_dim", "worker_feat_dim", "station_feat_dim"):
+    for key in (
+        "hidden_dim",
+        "num_gat_layers",
+        "task_feat_dim",
+        "worker_feat_dim",
+        "station_feat_dim",
+        "num_skill_types",
+        "worker_skill_feature_slots",
+    ):
         value = getattr(spec, key)
         if value is not None:
             inferred[key] = value

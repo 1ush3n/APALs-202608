@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -28,6 +29,9 @@ LEGACY_COLUMNS = [
     "限定站位",
     "部位容量",
 ]
+
+CORRECTIONS_PATH = PROJECT_ROOT / "data" / "data_corrections.yaml"
+PREDECESSOR_COLUMN = LEGACY_COLUMNS[3]
 
 
 def _resolve_project_path(value: str | Path) -> Path:
@@ -59,15 +63,22 @@ def _canonical_text(series: pd.Series) -> pd.Series:
     return series.fillna("").astype(str)
 
 
-def _assert_legacy_projection_equal(actual: pd.DataFrame, expected: pd.DataFrame) -> None:
-    """确认旧 8 字段与权威 Excel 完全一致。"""
+def _assert_legacy_projection_equal(
+    actual: pd.DataFrame,
+    expected: pd.DataFrame,
+    *,
+    compare_predecessors: bool = True,
+) -> None:
+    """确认稳定旧字段一致；前驱列可由已登记数据修正覆盖。"""
     assert list(actual.columns.intersection(LEGACY_COLUMNS)) == LEGACY_COLUMNS, (
         "输出缺少旧版字段或字段顺序发生变化"
     )
     assert len(actual) == len(expected), "输出行数与权威 Excel 不一致"
 
     numeric_columns = ["序号", "类型", "需求人数", "加工时间/h", "限定站位", "部位容量"]
-    text_columns = ["AO号", "紧前工序AO号"]
+    text_columns = ["AO号"]
+    if compare_predecessors:
+        text_columns.append(PREDECESSOR_COLUMN)
     for column in numeric_columns:
         left = pd.to_numeric(actual[column], errors="coerce").to_numpy(dtype=float)
         right = pd.to_numeric(expected[column], errors="coerce").to_numpy(dtype=float)
@@ -76,6 +87,76 @@ def _assert_legacy_projection_equal(actual: pd.DataFrame, expected: pd.DataFrame
         left = _canonical_text(actual[column])
         right = _canonical_text(expected[column])
         assert left.equals(right), f"旧字段 {column} 与权威 Excel 不一致"
+
+
+def _normalize_predecessor_tokens(value: object) -> list[str]:
+    if pd.isna(value):
+        return []
+    text = str(value).strip()
+    if text.lower() in {"", "0", "nan", "none"}:
+        return []
+    return [
+        token.strip()
+        for token in re.split(r"[,;，、]", text)
+        if token.strip() and token.strip().lower() not in {"0", "nan", "none"}
+    ]
+
+
+def _project_relative_path(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def apply_registered_data_corrections(
+    frame: pd.DataFrame,
+    *,
+    output_path: Path,
+    corrections_path: Path = CORRECTIONS_PATH,
+) -> pd.DataFrame:
+    """把经数据所有者确认的前驱修正显式应用到派生 CSV。"""
+    if not corrections_path.exists():
+        return frame.copy()
+
+    raw = yaml.safe_load(corrections_path.read_text(encoding="utf-8")) or {}
+    corrections = raw.get("corrections", [])
+    if not isinstance(corrections, list):
+        raise ValueError(f"数据修正文件 corrections 必须为列表: {corrections_path}")
+
+    target = _project_relative_path(output_path)
+    adjusted = frame.copy()
+    for correction in corrections:
+        if not isinstance(correction, dict):
+            raise ValueError(f"无效的数据修正规则: {correction!r}")
+        datasets = {
+            Path(str(item)).as_posix()
+            for item in correction.get("datasets", [])
+        }
+        if target not in datasets:
+            continue
+
+        task_ao = str(correction["task_ao"])
+        removed = str(correction["removed_predecessor_ao"])
+        retained = [str(item) for item in correction.get("retained_predecessors", [])]
+        matches = adjusted["AO号"].astype(str).eq(task_ao)
+        if int(matches.sum()) != 1:
+            raise ValueError(f"数据修正目标 AO 必须在 {output_path} 中唯一: {task_ao}")
+
+        original = _normalize_predecessor_tokens(adjusted.loc[matches, PREDECESSOR_COLUMN].iloc[0])
+        if removed not in original:
+            raise ValueError(
+                f"数据修正目标未包含待删除前驱: {task_ao} -> {removed}; 当前={original}"
+            )
+        actual_retained = [item for item in original if item != removed]
+        if actual_retained != retained:
+            raise ValueError(
+                f"数据修正后的前驱与登记值不一致: {task_ao}; "
+                f"实际={actual_retained}, 登记={retained}"
+            )
+        adjusted.loc[matches, PREDECESSOR_COLUMN] = ",".join(retained) if retained else np.nan
+    return adjusted
 
 
 def build_dataset(config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -108,6 +189,11 @@ def build_dataset(config: dict[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame]:
     output = output[config["output_columns"]].copy()
     legacy_projection = raw[LEGACY_COLUMNS].copy()
     _assert_legacy_projection_equal(output, legacy_projection)
+    output = apply_registered_data_corrections(
+        output,
+        output_path=_resolve_project_path(source["output_csv"]),
+    )
+    _assert_legacy_projection_equal(output, legacy_projection, compare_predecessors=False)
     return output, legacy_projection
 
 
