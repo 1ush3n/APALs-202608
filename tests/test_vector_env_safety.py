@@ -225,6 +225,102 @@ def test_vector_env_step_snapshot_rebuild_shapes_low_memory() -> None:
                 vec_env.close()
 
 
+def test_vector_env_fused_rollout_matches_legacy_state_queries() -> None:
+    """融合 IPC 只能减少往返次数，不得改变 reset/step 后的环境状态。"""
+    seed_everything(46)
+    overrides = {
+        "n_w": 40,
+        "n_m": 5,
+        "max_slots_per_station": 3,
+        "randomize_durations": False,
+        "enable_dynamic_events": False,
+        "enable_station_breakdown": False,
+        "enable_material_delay": False,
+    }
+
+    vec_env = None
+    with temporary_config(configs, overrides):
+        make_env = EnvCreator(str(PROJECT_ROOT / "data" / "283.csv"), seed_offset=450)
+        vec_env = VectorEnv(make_env, num_envs=2)
+        try:
+            fused_masks, fused_snapshots = vec_env.reset_rollout_all(
+                randomize_duration=False,
+                randomize_workers=False,
+            )
+            legacy_masks, legacy_snapshots = vec_env.get_masks_and_snapshots_all()
+            for fused, legacy in zip(fused_masks, legacy_masks):
+                _assert_masks_equal(fused, legacy)
+            for fused, legacy in zip(fused_snapshots, legacy_snapshots):
+                _assert_snapshot_core_equal(fused, legacy)
+
+            observations = [
+                proxy.rebuild_state_from_snapshot(snapshot)
+                for proxy, snapshot in zip(vec_env.envs, fused_snapshots)
+            ]
+            actions = _pick_simple_actions(observations, fused_masks)
+            action_map = {
+                index: action
+                for index, action in enumerate(actions)
+                if action is not None
+            }
+            fused_steps = vec_env.step_rollout_indices(action_map)
+            queried_states = vec_env.get_rollout_state_indices(list(action_map))
+
+            assert set(fused_steps) == set(action_map)
+            for index in action_map:
+                next_masks, next_snapshot, reward, done, info = fused_steps[index]
+                queried_masks, queried_snapshot = queried_states[index]
+                _assert_masks_equal(next_masks, queried_masks)
+                _assert_snapshot_core_equal(next_snapshot, queried_snapshot)
+                assert isinstance(reward, float)
+                assert isinstance(done, bool)
+                assert isinstance(info, dict)
+        finally:
+            if vec_env is not None:
+                vec_env.close()
+
+
+def test_vector_env_fused_wait_preserves_event_driven_queue_semantics() -> None:
+    """融合等待必须先推进到未来事件，不能把暂时无资源误报为死锁。"""
+    seed_everything(47)
+    overrides = {
+        "n_w": 40,
+        "n_m": 5,
+        "max_slots_per_station": 3,
+        "randomize_durations": False,
+        "enable_dynamic_events": True,
+        "enable_station_breakdown": False,
+        "enable_material_delay": True,
+        "prob_material_delay_base": 1.0,
+        "material_delay_min": 5.0,
+        "material_delay_max": 5.0,
+    }
+
+    vec_env = None
+    with temporary_config(configs, overrides):
+        make_env = EnvCreator(str(PROJECT_ROOT / "data" / "283.csv"), seed_offset=470)
+        vec_env = VectorEnv(make_env, num_envs=1)
+        try:
+            initial_masks, initial_snapshots = vec_env.reset_rollout_all(
+                randomize_duration=False,
+                randomize_workers=False,
+            )
+            assert initial_masks[0][0].all()
+            assert initial_snapshots[0]["current_time"] == 0.0
+
+            waited, waited_masks, waited_snapshot = vec_env.wait_rollout_indices([0])[0]
+            queried_masks, queried_snapshot = vec_env.get_rollout_state_indices([0])[0]
+
+            assert waited
+            assert waited_snapshot["current_time"] == 5.0
+            assert not waited_masks[0].all()
+            _assert_masks_equal(waited_masks, queried_masks)
+            _assert_snapshot_core_equal(waited_snapshot, queried_snapshot)
+        finally:
+            if vec_env is not None:
+                vec_env.close()
+
+
 def test_vector_env_indexed_reset_step_and_switch() -> None:
     seed_everything(45)
     overrides = {

@@ -40,6 +40,7 @@ class APALRolloutService:
         self._last_dataset_idx: int | None = None
         self._last_effective_batch_size: int | None = None
         self._rng = np.random.RandomState(int(config.seed))
+        self.use_ipc_fusion = bool(getattr(config, "enable_rollout_ipc_fusion", False))
 
     def _adaptive_batch_for_task_count(self, num_tasks: int) -> tuple[int | None, str]:
         if not bool(getattr(self.config, "adaptive_ppo_batch_by_tasks", False)):
@@ -129,6 +130,8 @@ class APALRolloutService:
         forward_seconds = 0.0
         rebuild_seconds = 0.0
         environment_step_seconds = 0.0
+        detailed_profile_sums: dict[str, float] = {}
+        detailed_profile_samples = 0
         loop_steps = 0
         environment_steps = 0
         objective_delta_sums = np.zeros(self.num_envs, dtype=float)
@@ -153,10 +156,22 @@ class APALRolloutService:
             and episode > int(self.config.curriculum_episodes)
         )
         heartbeat.update("reset", 0, 0, 0)
-        states = self.vector_env.reset_all(
-            randomize_duration=apply_noise,
-            randomize_workers=apply_noise,
-        )
+        if self.use_ipc_fusion:
+            masks_list, snapshots = self.vector_env.reset_rollout_all(
+                randomize_duration=apply_noise,
+                randomize_workers=apply_noise,
+            )
+            states: list[Any] = [
+                self.vector_env.envs[index].rebuild_state_from_snapshot(snapshots[index])
+                for index in range(self.num_envs)
+            ]
+        else:
+            states = self.vector_env.reset_all(
+                randomize_duration=apply_noise,
+                randomize_workers=apply_noise,
+            )
+            masks_list = []
+            snapshots = []
         memories = [Memory() for _ in range(self.num_envs)]
         dones = [False] * self.num_envs
         max_steps = max(int(env.num_tasks) for env in self.vector_env.envs) * 2
@@ -175,16 +190,29 @@ class APALRolloutService:
                     active_count,
                     self.num_envs - active_count,
                 )
-                stage_started = time.perf_counter()
-                masks_list, snapshots = self.vector_env.get_masks_and_snapshots_all()
-                ipc_seconds += time.perf_counter() - stage_started
+                if not self.use_ipc_fusion:
+                    stage_started = time.perf_counter()
+                    masks_list, snapshots = self.vector_env.get_masks_and_snapshots_all()
+                    ipc_seconds += time.perf_counter() - stage_started
                 active = [idx for idx, done in enumerate(dones) if not done]
 
                 waiting_indices = [idx for idx in active if masks_list[idx][0].all()]
                 stage_started = time.perf_counter()
-                wait_results = self._try_wait_for_resources_indices(waiting_indices)
-                refreshed_indices = [idx for idx in waiting_indices if wait_results[idx]]
-                refreshed_states = self._get_rollout_state_indices(refreshed_indices)
+                if self.use_ipc_fusion:
+                    fused_wait = self.vector_env.wait_rollout_indices(waiting_indices)
+                    wait_results = {
+                        index: fused_wait[index][0]
+                        for index in waiting_indices
+                    }
+                    refreshed_states = {
+                        index: (fused_wait[index][1], fused_wait[index][2])
+                        for index in waiting_indices
+                        if fused_wait[index][0]
+                    }
+                else:
+                    wait_results = self._try_wait_for_resources_indices(waiting_indices)
+                    refreshed_indices = [idx for idx in waiting_indices if wait_results[idx]]
+                    refreshed_states = self._get_rollout_state_indices(refreshed_indices)
                 ipc_seconds += time.perf_counter() - stage_started
 
                 for idx in waiting_indices:
@@ -218,6 +246,11 @@ class APALRolloutService:
                     self.num_envs - len(active),
                 )
                 stage_started = time.perf_counter()
+                profile_breakdown = bool(
+                    getattr(self.config, "enable_rollout_detailed_profiler", False)
+                    and episode % max(1, int(self.config.rollout_profile_interval)) == 0
+                    and step % max(1, int(self.vector_env.envs[0].num_tasks) // 4) == 0
+                )
                 with torch.inference_mode():
                     results = self.agent.select_actions_batch(
                         obs_list=[states[idx] for idx in active],
@@ -229,8 +262,15 @@ class APALRolloutService:
                         deterministic=False,
                         temperature=float(self.config.sample_temperature),
                         is_eval=False,
+                        profile_breakdown=profile_breakdown,
                     )
                 forward_seconds += time.perf_counter() - stage_started
+                if profile_breakdown:
+                    detailed_profile_samples += 1
+                    for key, value in self.agent.last_action_profile.items():
+                        detailed_profile_sums[key] = (
+                            detailed_profile_sums.get(key, 0.0) + float(value)
+                        )
 
                 actions = [None] * self.num_envs
                 for result_idx, env_idx in enumerate(active):
@@ -256,9 +296,27 @@ class APALRolloutService:
                     self.num_envs - len(active),
                 )
                 stage_started = time.perf_counter()
-                next_snapshots, rewards, step_dones, step_infos = (
-                    self.vector_env.step_snapshot_all(actions)
-                )
+                if self.use_ipc_fusion:
+                    fused_steps = self.vector_env.step_rollout_indices(
+                        {index: actions[index] for index in active}
+                    )
+                    next_snapshots = list(snapshots)
+                    rewards = [0.0] * self.num_envs
+                    step_dones = list(dones)
+                    step_infos: list[dict | None] = [None] * self.num_envs
+                    for index in active:
+                        next_masks, next_snapshot, reward, step_done, step_info = (
+                            fused_steps[index]
+                        )
+                        masks_list[index] = next_masks
+                        next_snapshots[index] = next_snapshot
+                        rewards[index] = reward
+                        step_dones[index] = step_done
+                        step_infos[index] = step_info
+                else:
+                    next_snapshots, rewards, step_dones, step_infos = (
+                        self.vector_env.step_snapshot_all(actions)
+                    )
                 environment_step_seconds += time.perf_counter() - stage_started
                 environment_steps += len(active)
 
@@ -295,6 +353,8 @@ class APALRolloutService:
                             env_idx
                         ].rebuild_state_from_snapshot(next_snapshots[env_idx])
                         rebuild_seconds += time.perf_counter() - stage_started
+                if self.use_ipc_fusion:
+                    snapshots = next_snapshots
         finally:
             heartbeat.stop()
 
@@ -327,6 +387,15 @@ class APALRolloutService:
                 extra_metrics[f"Reward/Delta/{label}"] = float(
                     np.mean(objective_term_sums[key])
                 )
+        if detailed_profile_samples > 0:
+            for key, value in detailed_profile_sums.items():
+                label = "".join(part.title() for part in key.removesuffix("_ms").split("_"))
+                extra_metrics[f"Rollout/Profile/{label}Ms"] = float(
+                    value / detailed_profile_samples
+                )
+            extra_metrics["Rollout/Profile/SampleCount"] = float(
+                detailed_profile_samples
+            )
         metrics = RolloutMetrics(
             episode=int(episode),
             average_reward=float(np.mean([sum(memory.rewards) for memory in memories])),
@@ -383,6 +452,21 @@ class APALRolloutService:
                 f"{metrics.rebuild_ms:.1f}/{metrics.environment_step_ms:.1f}",
                 flush=True,
             )
+            profile_metrics = {
+                key.removeprefix("Rollout/Profile/"): value
+                for key, value in metrics.extra_metrics.items()
+                if key.startswith("Rollout/Profile/") and key != "Rollout/Profile/SampleCount"
+            }
+            if profile_metrics:
+                detail = " ".join(
+                    f"{name}={value:.2f}"
+                    for name, value in sorted(profile_metrics.items())
+                )
+                print(
+                    f"[RolloutProfile] ep={metrics.episode} "
+                    f"samples={int(metrics.extra_metrics['Rollout/Profile/SampleCount'])} {detail}",
+                    flush=True,
+                )
 
         return RolloutUpdate(
             memory=merged,

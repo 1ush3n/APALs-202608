@@ -136,6 +136,26 @@ def _worker(
                     'current_time': getattr(env, 'current_time', 0.0),
                 }
                 conn.send(("OK", (obs, dynamic_info)))
+
+            elif cmd == 'reset_rollout':
+                old_skip_obs = getattr(env, 'skip_obs_building', False)
+                try:
+                    env.skip_obs_building = True
+                    env.reset(**data)
+                finally:
+                    env.skip_obs_building = old_skip_obs
+                masks = _masks_to_ipc(env.get_masks())
+                snap = _snapshot_to_ipc(env.get_state_snapshot())
+                dynamic_info = {
+                    'station_wall_clock': getattr(env, 'station_wall_clock', None),
+                    'assigned_tasks': getattr(env, 'assigned_tasks', None),
+                    'task_status': getattr(env, 'task_status', None),
+                    'num_tasks': getattr(env, 'num_tasks', None),
+                    'ideal_makespan': getattr(env, 'ideal_makespan', None),
+                    'mean_task_time': getattr(env, 'mean_task_time', None),
+                    'current_time': getattr(env, 'current_time', 0.0),
+                }
+                conn.send(("OK", (masks, snap, dynamic_info)))
                 
             elif cmd == 'get_masks':
                 masks = env.get_masks()
@@ -172,6 +192,29 @@ def _worker(
                     }
                     info['dynamic_info'] = dynamic_info
                     conn.send(("OK", (snap, reward, done, info)))
+
+            elif cmd == 'step_rollout':
+                if data is None:
+                    reward = 0.0
+                    done = True
+                    info = {}
+                else:
+                    old_skip_obs = getattr(env, 'skip_obs_building', False)
+                    try:
+                        env.skip_obs_building = True
+                        _, reward, done, info = env.step(data)
+                    finally:
+                        env.skip_obs_building = old_skip_obs
+                masks = _masks_to_ipc(env.get_masks())
+                snap = _snapshot_to_ipc(env.get_state_snapshot())
+                dynamic_info = {
+                    'station_wall_clock': getattr(env, 'station_wall_clock', None),
+                    'assigned_tasks': getattr(env, 'assigned_tasks', None),
+                    'task_status': getattr(env, 'task_status', None),
+                    'current_time': getattr(env, 'current_time', 0.0),
+                }
+                info['dynamic_info'] = dynamic_info
+                conn.send(("OK", (masks, snap, reward, done, info)))
                 
             elif cmd == 'try_wait_for_resources':
                 res = env.try_wait_for_resources()
@@ -182,6 +225,18 @@ def _worker(
                     'current_time': getattr(env, 'current_time', 0.0),
                 }
                 conn.send(("OK", (res, dynamic_info)))
+
+            elif cmd == 'wait_rollout':
+                res = env.try_wait_for_resources()
+                masks = _masks_to_ipc(env.get_masks())
+                snap = _snapshot_to_ipc(env.get_state_snapshot())
+                dynamic_info = {
+                    'station_wall_clock': getattr(env, 'station_wall_clock', None),
+                    'assigned_tasks': getattr(env, 'assigned_tasks', None),
+                    'task_status': getattr(env, 'task_status', None),
+                    'current_time': getattr(env, 'current_time', 0.0),
+                }
+                conn.send(("OK", (res, masks, snap, dynamic_info)))
                 
             elif cmd == 'get_state_snapshot':
                 snap = _snapshot_to_ipc(env.get_state_snapshot())
@@ -659,6 +714,35 @@ class VectorEnv:
             results.append(obs)
         return results
 
+    def reset_rollout_all(
+        self,
+        randomize_duration: bool = False,
+        randomize_workers: bool = False,
+    ) -> tuple[
+        List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
+        List[dict],
+    ]:
+        """复位后一次返回 rollout 所需 masks 与 snapshot，不构造或传输 HeteroData。"""
+        request = {
+            'randomize_duration': bool(randomize_duration),
+            'randomize_workers': bool(randomize_workers),
+        }
+        for index in range(self.num_envs):
+            self.parent_conns[index].send(('reset_rollout', request))
+        worker_results = self._recv_workers_unordered(
+            list(range(self.num_envs)),
+            "reset_rollout",
+        )
+        masks_list = []
+        snapshots = []
+        for index in range(self.num_envs):
+            masks, snapshot, dynamic_info = worker_results[index]
+            self.envs[index].update_dynamic_properties(dynamic_info)
+            self.envs[index].update_static_properties(dynamic_info)
+            masks_list.append(tuple(torch.from_numpy(mask) for mask in masks))
+            snapshots.append(snapshot)
+        return masks_list, snapshots
+
     def reset_indices(
         self,
         requests: dict[int, dict[str, Any]],
@@ -735,6 +819,40 @@ class VectorEnv:
             results[index] = (snapshot, float(reward), bool(done), info)
         return results
 
+    def step_rollout_indices(
+        self,
+        actions: dict[int, Any],
+    ) -> dict[
+        int,
+        tuple[
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+            dict,
+            float,
+            bool,
+            dict,
+        ],
+    ]:
+        """只步进活跃环境，并在同一次 IPC 中返回下一 masks 与 snapshot。"""
+        target_indices = sorted(int(index) for index in actions)
+        if not target_indices:
+            return {}
+        for index in target_indices:
+            self.parent_conns[index].send(('step_rollout', actions[index]))
+        worker_results = self._recv_workers_unordered(target_indices, "step_rollout")
+        results = {}
+        for index in target_indices:
+            masks, snapshot, reward, done, info = worker_results[index]
+            if 'dynamic_info' in info:
+                self.envs[index].update_dynamic_properties(info.pop('dynamic_info'))
+            results[index] = (
+                tuple(torch.from_numpy(mask) for mask in masks),
+                snapshot,
+                float(reward),
+                bool(done),
+                info,
+            )
+        return results
+
     def get_masks_all(self) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """异步收集各进程环境的动作空间掩码"""
         for i in range(self.num_envs):
@@ -797,6 +915,35 @@ class VectorEnv:
             res, dynamic_info = worker_results[index]
             self.envs[index].update_dynamic_properties(dynamic_info)
             results[index] = bool(res)
+        return results
+
+    def wait_rollout_indices(
+        self,
+        indices: List[int],
+    ) -> dict[
+        int,
+        tuple[
+            bool,
+            Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+            dict,
+        ],
+    ]:
+        """等待资源并在同一次 IPC 中返回推进后的 masks 与 snapshot。"""
+        target_indices = [int(index) for index in indices]
+        if not target_indices:
+            return {}
+        for index in target_indices:
+            self.parent_conns[index].send(('wait_rollout', None))
+        worker_results = self._recv_workers_unordered(target_indices, "wait_rollout")
+        results = {}
+        for index in target_indices:
+            waited, masks, snapshot, dynamic_info = worker_results[index]
+            self.envs[index].update_dynamic_properties(dynamic_info)
+            results[index] = (
+                bool(waited),
+                tuple(torch.from_numpy(mask) for mask in masks),
+                snapshot,
+            )
         return results
 
     def get_state_snapshot_all(self) -> List[dict]:

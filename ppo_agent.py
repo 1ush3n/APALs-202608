@@ -9,6 +9,7 @@ import copy
 import numpy as np
 import gc
 import random
+import time
 from contextlib import nullcontext
 from typing import Tuple, List, Dict, Optional, Any
 from torch_geometric.data import HeteroData
@@ -668,7 +669,9 @@ class PPOAgent:
         mask_worker_list: List[Optional[torch.Tensor]],
         deterministic: bool = False,
         temperature: float = 1.0,
-        is_eval: bool = False
+        is_eval: bool = False,
+        *,
+        profile_breakdown: bool = False,
     ) -> List[Tuple[Tuple[int, int, List[int]], float, float, Optional[torch.Tensor], bool]]:
         """
         鎵归噺閫夋嫨鍔ㄤ綔 (Batch Select Action)銆?
@@ -701,6 +704,8 @@ class PPOAgent:
             active_policy = self.policy
 
         batch_size = len(obs_list)
+        if len(mask_task_list) != batch_size:
+            raise ValueError("obs_list 与动作掩码批次数量不一致")
         results = []
         state_value_tensors = []
         decoded_actions = []
@@ -708,19 +713,50 @@ class PPOAgent:
         worker_mask_refs = []
         eval_fail_flags = []
 
+        profile: Dict[str, float] = {}
+
+        def _profile_sync() -> None:
+            if profile_breakdown and self.amp_device_type == "cuda":
+                torch.cuda.synchronize(self.device)
+
         with torch.no_grad():
             # 1. 鎵归噺鎵撳寘寮傛瀯鍥捐娴嬫暟鎹苟閫佸叆 GPU锛屼互 O(1) 澶嶆潅搴﹁繍琛?GNN 缂栫爜鍜?Critic 浠峰€肩綉缁?
+            if profile_breakdown:
+                _profile_sync()
+                stage_started = time.perf_counter()
             batch_obs = Batch.from_data_list(obs_list)
             task_ptr = batch_obs['task'].ptr.tolist()
             station_ptr = batch_obs['station'].ptr.tolist()
             worker_ptr = batch_obs['worker'].ptr.tolist()
+            if profile_breakdown:
+                _profile_sync()
+                profile["batch_build_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
+            if profile_breakdown:
+                stage_started = time.perf_counter()
             batch_obs = batch_obs.to(self.device)
-            
+            if profile_breakdown:
+                _profile_sync()
+                profile["h2d_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
             with self.autocast_context():
+                if profile_breakdown:
+                    stage_started = time.perf_counter()
                 x_dict_batch, global_context_batch = active_policy(batch_obs)
+                if profile_breakdown:
+                    _profile_sync()
+                    profile["actor_encoder_ms"] = (time.perf_counter() - stage_started) * 1000.0
+
+                if profile_breakdown:
+                    stage_started = time.perf_counter()
                 state_values_batch = active_policy.get_value(batch_obs, actor_x_dict_encoded=x_dict_batch)
+                if profile_breakdown:
+                    _profile_sync()
+                    profile["critic_encoder_ms"] = (time.perf_counter() - stage_started) * 1000.0
 
             # 2. 閫愪釜鎻愬彇鍚勭幆澧冪殑灞€閮ㄥ瓙鍥剧壒寰侊紝鍦ㄤ富杩涚▼鎵ц杞婚噺鐨?Pointer Head 鑷洖褰掑姩浣滈€夋嫨
+            if profile_breakdown:
+                stage_started = time.perf_counter()
             for i in range(batch_size):
                 # 渚濋潬 PyG 鐨?.batch 绱㈠紩瀵瑰瓙鍥剧壒寰佽繘琛屽眬閮ㄥ垏鍒?
                 task_start, task_end = task_ptr[i], task_ptr[i + 1]
@@ -767,7 +803,8 @@ class PPOAgent:
                 selected_task_emb = task_embs[t_idx].unsqueeze(0) # [1, H]
                 
                 # 鑾峰彇璇ヤ换鍔＄殑宸ヤ汉浜烘暟闇€姹?
-                demand = self.get_task_demand(obs_list[i]['task'].x, t_idx)
+                source_task_x = obs_list[i]['task'].x
+                demand = self.get_task_demand(source_task_x, t_idx)
                 
                 # ------------------
                 # 2.2 閫夋嫨绔欎綅 (Select Station)
@@ -811,7 +848,7 @@ class PPOAgent:
                 worker_logprobs = []
                 
                 m_worker = mask_worker_list[i]
-                obs_worker_num_nodes = obs_list[i]['worker'].num_nodes
+                obs_worker_num_nodes = worker_end - worker_start
                 current_worker_mask = m_worker.clone().to(self.device) if m_worker is not None else torch.zeros(obs_worker_num_nodes, dtype=torch.bool).to(self.device)
                 
                 worker_feats = obs_list[i]['worker'].x
@@ -821,13 +858,13 @@ class PPOAgent:
                         f"工人特征维度错误: {worker_feats.size(1)} != {worker_layout.total_dim}"
                     )
                 task_skill_end = 5 + worker_layout.num_skill_types
-                if obs_list[i]['task'].x.size(1) < task_skill_end:
+                if source_task_x.size(1) < task_skill_end:
                     raise ValueError(
-                        f"任务特征维度不足: {obs_list[i]['task'].x.size(1)} < {task_skill_end}"
+                        f"任务特征维度不足: {source_task_x.size(1)} < {task_skill_end}"
                     )
                 worker_skills = worker_feats[:, worker_layout.skill_slice]
                 
-                task_type_idx = torch.argmax(obs_list[i]['task'].x[t_idx, 5:task_skill_end]).item()
+                task_type_idx = torch.argmax(source_task_x[t_idx, 5:task_skill_end]).item()
                 has_skill = worker_skills[:, task_type_idx] > 0.5
                 skill_mask = ~has_skill 
                 
@@ -963,6 +1000,11 @@ class PPOAgent:
                     is_invalid_action,
                 )
             )
+
+        if profile_breakdown:
+            _profile_sync()
+            profile["action_decode_ms"] = (time.perf_counter() - stage_started) * 1000.0
+        self.last_action_profile = profile if profile_breakdown else {}
 
         return results
 

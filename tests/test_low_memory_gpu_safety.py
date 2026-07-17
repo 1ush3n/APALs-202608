@@ -200,6 +200,38 @@ def test_ppo_select_actions_batch_two_envs_low_memory() -> None:
             assert not is_invalid
 
 
+def test_rollout_detailed_profiler_reports_all_forward_stages() -> None:
+    device = _gpu_required()
+    with temporary_config(configs, _low_memory_overrides()), guarded_cuda_test():
+        envs = [_make_env(52), _make_env(53)]
+        states = [
+            env.reset(randomize_duration=False, randomize_workers=False, seed=152 + index)
+            for index, env in enumerate(envs)
+        ]
+        masks = [env.get_masks() for env in envs]
+        agent = _make_agent(device)
+
+        results = agent.select_actions_batch(
+            obs_list=states,
+            mask_task_list=[item[0] for item in masks],
+            mask_station_matrix_list=[item[1] for item in masks],
+            mask_worker_list=[item[2] for item in masks],
+            deterministic=True,
+            is_eval=False,
+            profile_breakdown=True,
+        )
+
+        assert len(results) == 2
+        assert set(agent.last_action_profile) == {
+            "batch_build_ms",
+            "h2d_ms",
+            "actor_encoder_ms",
+            "critic_encoder_ms",
+            "action_decode_ms",
+        }
+        assert all(value >= 0.0 for value in agent.last_action_profile.values())
+
+
 def test_ppo_update_tiny_trajectory_low_memory() -> None:
     device = _gpu_required()
     with temporary_config(configs, _low_memory_overrides()), guarded_cuda_test():
