@@ -384,6 +384,23 @@ def run_advanced_eval(env, method, args, seed=42):
     makespan, balance_std, assigned_tasks = scheduler.run()
     duration = time.time() - start_time
     metrics = build_metrics(env, makespan, balance_std, assigned_tasks, duration)
+    search_diagnostics = scheduler.search_diagnostics()
+    metrics.update(search_diagnostics)
+    if assigned_tasks:
+        metrics["failure_type"] = None
+    elif search_diagnostics["candidate_deadlock_count"] > 0:
+        metrics["failure_type"] = "no_legal_schedule_with_deadlocks"
+    elif search_diagnostics["illegal_candidate_count"] > 0:
+        metrics["failure_type"] = "all_candidates_illegal"
+        # 完整但非法的排程不是资源死锁，必须单独报告。
+        metrics["deadlock_count"] = 0
+    else:
+        metrics["failure_type"] = "no_complete_schedule"
+    if not assigned_tasks:
+        print(
+            f"[方法失败但评估继续] method={method}, "
+            f"failure_type={metrics['failure_type']}, diagnostics={search_diagnostics}"
+        )
     return metrics, assigned_tasks
 
 def save_eval_results(method, dataset_name, metrics, assigned_tasks, env, output_root):

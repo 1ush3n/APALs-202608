@@ -301,16 +301,31 @@ class ConstraintEngine:
             if capacities.shape[0] != self.num_stations:
                 raise ValueError("站位容量数量必须与 num_stations 一致")
         for station_id, intervals in station_intervals.items():
-            events: list[tuple[float, int]] = []
-            for start, end, _task_id in intervals:
+            events: list[tuple[float, int, int]] = []
+            for start, end, task_id in intervals:
                 if end - start > tolerance:
-                    events.extend(((start, 1), (end, -1)))
+                    events.extend(((start, 1, task_id), (end, -1, task_id)))
             events.sort(key=lambda item: (item[0], item[1]))
             active = 0
-            for _time, delta in events:
+            active_tasks: set[int] = set()
+            for event_time, delta, task_id in events:
                 active += delta
+                if delta < 0:
+                    active_tasks.discard(task_id)
+                else:
+                    active_tasks.add(task_id)
                 if active > int(capacities[station_id]):
                     violations["station_slot_violation_count"] += 1
+                    if len(examples["station_slot_violation_count"]) < 5:
+                        examples["station_slot_violation_count"].append(
+                            {
+                                "station_id": int(station_id),
+                                "time": float(event_time),
+                                "active_count": int(active),
+                                "capacity": int(capacities[station_id]),
+                                "active_task_ids": sorted(active_tasks),
+                            }
+                        )
                     break
 
         return ScheduleValidationReport(violations=violations, examples=examples)

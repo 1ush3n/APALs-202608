@@ -31,6 +31,7 @@ class FeasibilityDecodeResult:
     assigned_tasks: list[tuple[int, int, list[int], float, float]]
     complete: bool
     deadlock_count: int
+    failure_type: str | None = None
     validation_report: ScheduleValidationReport | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
@@ -101,6 +102,8 @@ class FeasibilityPreservingDecoder:
 
         max_steps = max(1, int(env.num_tasks) * self.max_steps_factor)
         deadlock_count = 0
+        failure_type: str | None = None
+        failure_details: dict[str, Any] = {}
 
         for _ in range(max_steps):
             if len(env.assigned_tasks) == env.num_tasks:
@@ -110,7 +113,9 @@ class FeasibilityPreservingDecoder:
             if virtual_task is not None:
                 _, _, _, info = env.step((virtual_task, -1, []))
                 if info.get("invalid_action"):
-                    raise RuntimeError(f"虚拟节点动作被环境拒绝：{info}")
+                    failure_type = "invalid_action"
+                    failure_details = dict(info)
+                    break
                 continue
 
             task_mask_raw, station_mask_raw, _ = env.get_masks()
@@ -137,12 +142,15 @@ class FeasibilityPreservingDecoder:
                 if env.try_wait_for_resources():
                     continue
                 deadlock_count += 1
+                failure_type = "deadlock"
                 break
 
             task_id, _, _ = action
             _, _, _, info = env.step(action)
             if info.get("invalid_action"):
-                raise RuntimeError(f"可行性解码器生成了非法动作：{info}")
+                failure_type = "invalid_action"
+                failure_details = dict(info)
+                break
             self._remove_completed_task_from_quota(task_id)
 
         complete = len(env.assigned_tasks) == env.num_tasks
@@ -151,10 +159,23 @@ class FeasibilityPreservingDecoder:
             assigned_tasks = list(env.assigned_tasks)
             validation_report = env.validate_assignments(assigned_tasks)
             if not validation_report.is_legal:
-                raise RuntimeError(
-                    "统一约束引擎拒绝了解码后的完整排程："
-                    f"{validation_report.violations}"
-                )
+                complete = False
+                assigned_tasks = []
+                failure_type = "illegal_schedule"
+                failure_details = {
+                    "violations": {
+                        key: int(value)
+                        for key, value in validation_report.violations.items()
+                        if int(value) > 0
+                    },
+                    "examples": {
+                        key: value
+                        for key, value in validation_report.examples.items()
+                        if value
+                    },
+                }
+
+        if complete:
             makespan = float(np.max(env.station_wall_clock)) if env.num_stations else 0.0
             balance_std = float(np.std(env.station_loads))
             fitness = makespan + self.balance_weight * balance_std
@@ -162,8 +183,10 @@ class FeasibilityPreservingDecoder:
             assigned_tasks = []
             makespan = float(env.ideal_makespan * 3.0)
             balance_std = float(env.ideal_station_load * 3.0)
-            fitness = makespan + self.balance_weight * balance_std
-            deadlock_count = max(1, deadlock_count)
+            # 任何未完成或非法候选都不得参与最优解竞争。
+            fitness = float("inf")
+            if failure_type is None:
+                failure_type = "step_limit"
 
         return FeasibilityDecodeResult(
             fitness=float(fitness),
@@ -172,8 +195,12 @@ class FeasibilityPreservingDecoder:
             assigned_tasks=assigned_tasks,
             complete=complete,
             deadlock_count=deadlock_count,
+            failure_type=failure_type,
             validation_report=validation_report,
             diagnostics={
+                "failure_type": failure_type,
+                "failure_details": failure_details,
+                "invalid_schedule_count": int(failure_type == "illegal_schedule"),
                 "preassignment_target": int(round(env.num_workers * self.preassignment_ratio)),
                 "preassigned_workers": int(preassigned_count),
                 "mobile_reserve_workers": int(np.sum(np.asarray(env.worker_locks) == 0)),

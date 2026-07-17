@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import math
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Iterable, Literal
 
@@ -102,6 +103,38 @@ class AdvancedSchedulerBase:
         self.num_tasks = env.num_tasks
         self.num_stations = env.num_stations
         self.num_workers = env.num_workers
+        self.decode_attempt_count = 0
+        self.decode_failure_counts: Counter[str] = Counter()
+
+    def _decode(self, solution: PrioritySolution, seed: int) -> DecodeResult:
+        """统一记录候选解码结果；非法候选受罚后返回，不中断搜索。"""
+        result = self.decoder.decode(solution, seed)
+        self.decode_attempt_count += 1
+        if not result.complete:
+            failure_type = result.failure_type or "unknown"
+            self.decode_failure_counts[failure_type] += 1
+            if self.decode_failure_counts[failure_type] == 1:
+                details = result.diagnostics.get("failure_details", {})
+                print(
+                    f"[候选已拒绝] type={failure_type}, seed={seed}, "
+                    f"details={details}；赋予无限大适应度并继续搜索。"
+                )
+        return result
+
+    def search_diagnostics(self) -> dict[str, int]:
+        """返回搜索级候选统计，区分死锁与完整但非法的排程。"""
+        return {
+            "decode_attempt_count": int(self.decode_attempt_count),
+            "rejected_candidate_count": int(sum(self.decode_failure_counts.values())),
+            "illegal_candidate_count": int(self.decode_failure_counts.get("illegal_schedule", 0)),
+            "candidate_deadlock_count": int(self.decode_failure_counts.get("deadlock", 0)),
+            "invalid_action_candidate_count": int(self.decode_failure_counts.get("invalid_action", 0)),
+            "step_limit_candidate_count": int(self.decode_failure_counts.get("step_limit", 0)),
+        }
+
+    def _print_failure_summary(self, method: str) -> None:
+        if self.decode_failure_counts:
+            print(f"[{method}] 候选拒绝汇总: {dict(self.decode_failure_counts)}")
 
     def _random_solution(self, rng: np.random.Generator) -> PrioritySolution:
         return PrioritySolution(
@@ -195,7 +228,7 @@ class BeamSearchScheduler(AdvancedSchedulerBase):
         stale_rounds = 0
 
         for idx, solution in enumerate(self._initial_pool(max(self.beam_width, 5))):
-            result = self.decoder.decode(solution, self.seed + idx)
+            result = self._decode(solution, self.seed + idx)
             beam.append((result.fitness, solution, result))
             if best_result is None or result.fitness < best_result.fitness:
                 best_result = result
@@ -217,7 +250,7 @@ class BeamSearchScheduler(AdvancedSchedulerBase):
                         station_rate=0.02,
                         worker_rate=0.015,
                     )
-                    result = self.decoder.decode(child, self.seed + 1_000 + level * self.branch_factor + branch_idx)
+                    result = self._decode(child, self.seed + 1_000 + level * self.branch_factor + branch_idx)
                     candidates.append((result.fitness, child, result))
                     if best_result is None or result.fitness < best_result.fitness:
                         best_result = result
@@ -230,6 +263,7 @@ class BeamSearchScheduler(AdvancedSchedulerBase):
                 break
 
         assert best_result is not None
+        self._print_failure_summary("Beam")
         print(f"--- Beam Search 结束，耗时 {time.time() - start_time:.1f}s，Best Mk={best_result.makespan:.2f} ---")
         return self._result_tuple(best_result)
 
@@ -270,13 +304,13 @@ class IteratedGreedyScheduler(AdvancedSchedulerBase):
         start_time = time.time()
         rng = _rng(self.seed)
         current = self._seed_solution("CPM", self.seed)
-        current_result = self.decoder.decode(current, self.seed)
+        current_result = self._decode(current, self.seed)
         best = current.clone()
         best_result = current_result
 
         for iteration in range(self.iterations):
             candidate = self._destroy_repair(current, rng)
-            result = self.decoder.decode(candidate, self.seed + 2_000 + iteration)
+            result = self._decode(candidate, self.seed + 2_000 + iteration)
             if result.fitness < current_result.fitness:
                 current = candidate
                 current_result = result
@@ -287,6 +321,7 @@ class IteratedGreedyScheduler(AdvancedSchedulerBase):
                 print(f"[IG {iteration + 1}/{self.iterations}] Best Fit={best_result.fitness:.2f}, Makespan={best_result.makespan:.2f}")
 
         _ = best
+        self._print_failure_summary("IG")
         print(f"--- IG 结束，耗时 {time.time() - start_time:.1f}s，Best Mk={best_result.makespan:.2f} ---")
         return self._result_tuple(best_result)
 
@@ -330,16 +365,21 @@ class SimulatedAnnealingScheduler(AdvancedSchedulerBase):
         start_time = time.time()
         rng = _rng(self.seed)
         current = self._seed_solution("CPM", self.seed)
-        current_result = self.decoder.decode(current, self.seed)
+        current_result = self._decode(current, self.seed)
         best = current.clone()
         best_result = current_result
         temp = self.initial_temp
 
         for iteration in range(self.iterations):
             candidate = self._neighbor(current, rng)
-            result = self.decoder.decode(candidate, self.seed + 3_000 + iteration)
-            delta_norm = (result.fitness - current_result.fitness) / max(1e-6, float(self.env.ideal_makespan))
-            accept = delta_norm < 0.0 or rng.random() < math.exp(-delta_norm / max(temp, 1e-12))
+            result = self._decode(candidate, self.seed + 3_000 + iteration)
+            if not current_result.complete:
+                accept = result.complete
+            elif not result.complete:
+                accept = False
+            else:
+                delta_norm = (result.fitness - current_result.fitness) / max(1e-6, float(self.env.ideal_makespan))
+                accept = delta_norm < 0.0 or rng.random() < math.exp(-delta_norm / max(temp, 1e-12))
             if accept:
                 current = candidate
                 current_result = result
@@ -351,6 +391,7 @@ class SimulatedAnnealingScheduler(AdvancedSchedulerBase):
                 print(f"[SA {iteration + 1}/{self.iterations}] T={temp:.5f}, Best Fit={best_result.fitness:.2f}, Makespan={best_result.makespan:.2f}")
 
         _ = best
+        self._print_failure_summary("SA")
         print(f"--- SA 结束，耗时 {time.time() - start_time:.1f}s，Best Mk={best_result.makespan:.2f} ---")
         return self._result_tuple(best_result)
 

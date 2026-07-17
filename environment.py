@@ -1035,11 +1035,13 @@ class AirLineEnv_Graph(gym.Env):
         for t in candidate_times:
             test_start = t
             test_end = t + duration
-            # 扫描在 [test_start, test_end) 期间与现有区间的重叠
+            # 严格采用半开区间 [start, end)；不得用时间容差吞掉真实重叠。
+            # 即使重叠只有数值误差量级，也应把新任务吸附到已有任务的结束时刻，
+            # 从而与最终统一约束校验器保持完全一致。
             endpoints = []
             for (st, ed) in intervals:
                 # 严格重叠条件
-                if max(st, test_start) < min(ed, test_end) - 1e-5:
+                if max(st, test_start) < min(ed, test_end):
                     endpoints.append((max(st, test_start), 1))
                     endpoints.append((min(ed, test_end), -1))
             

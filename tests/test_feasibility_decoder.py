@@ -5,11 +5,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from baselines.heuristic.advanced_schedulers import AdvancedSchedulerBase
+from baselines.heuristic.advanced_schedulers import (
+    AdvancedSchedulerBase,
+    IteratedGreedyScheduler,
+)
+from baselines.heuristic.feasibility_decoder import FeasibilityDecodeResult
 from baselines.heuristic.run_all_baselines import compute_cpm_times, select_heuristic_action
 from configs import configs
 from data_loader import load_data
 from environment import AirLineEnv_Graph
+from core.constraints import ScheduleValidationReport
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -73,3 +78,73 @@ def test_rule_decoder_handles_virtual_nodes_and_returns_legal_schedule(
     virtual_rows = [row for row in result.assigned_tasks if row[0] in virtual_ids]
     assert virtual_rows
     assert all(station == -1 and team == [] and start == end for _, station, team, start, end in virtual_rows)
+
+
+def test_decoder_penalizes_illegal_complete_candidate_without_raising(
+    real_env: AirLineEnv_Graph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = AdvancedSchedulerBase(real_env, seed=42)
+    solution = scheduler.build_rule_solution("SPT", 42)
+    forced_report = ScheduleValidationReport(
+        violations={"station_slot_violation_count": 1},
+        examples={
+            "station_slot_violation_count": [
+                {
+                    "station_id": 0,
+                    "time": 1.0,
+                    "active_count": 4,
+                    "capacity": 3,
+                    "active_task_ids": [1, 2, 3, 4],
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(real_env, "validate_assignments", lambda _assignments: forced_report)
+
+    result = scheduler.decoder.decode(solution, 42)
+
+    assert not result.complete
+    assert result.failure_type == "illegal_schedule"
+    assert np.isinf(result.fitness)
+    assert result.assigned_tasks == []
+    assert result.deadlock_count == 0
+    assert result.diagnostics["invalid_schedule_count"] == 1
+    assert result.diagnostics["failure_details"]["examples"] == forced_report.examples
+
+
+def test_iterated_greedy_rejects_illegal_candidate_and_keeps_legal_best(
+    real_env: AirLineEnv_Graph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduler = IteratedGreedyScheduler(real_env, iterations=1, seed=42)
+    legal_schedule = [(0, -1, [], 0.0, 0.0)]
+    legal = FeasibilityDecodeResult(
+        fitness=10.0,
+        makespan=10.0,
+        balance_std=0.0,
+        assigned_tasks=legal_schedule,
+        complete=True,
+        deadlock_count=0,
+    )
+    illegal = FeasibilityDecodeResult(
+        fitness=float("inf"),
+        makespan=30.0,
+        balance_std=3.0,
+        assigned_tasks=[],
+        complete=False,
+        deadlock_count=0,
+        failure_type="illegal_schedule",
+        diagnostics={
+            "failure_details": {"violations": {"station_slot_violation_count": 1}}
+        },
+    )
+    results = iter([legal, illegal])
+    monkeypatch.setattr(scheduler.decoder, "decode", lambda _solution, _seed: next(results))
+
+    makespan, balance_std, assigned_tasks = scheduler.run()
+
+    assert makespan == 10.0
+    assert balance_std == 0.0
+    assert assigned_tasks == legal_schedule
+    assert scheduler.search_diagnostics()["illegal_candidate_count"] == 1

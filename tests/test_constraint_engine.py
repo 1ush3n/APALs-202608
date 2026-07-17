@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from core.constraints import ConstraintEngine
+from environment import AirLineEnv_Graph
 
 
 def _engine(*, fixed: list[int] | None = None) -> ConstraintEngine:
@@ -77,3 +78,72 @@ def test_complete_schedule_report_accepts_legal_compressed_path() -> None:
     )
 
     assert report.is_legal
+
+
+def test_station_allocator_snaps_tiny_overlap_to_exact_finish_boundary() -> None:
+    class _StationState:
+        station_available_slots = np.asarray([3], dtype=int)
+        assigned_tasks = [
+            (0, 0, [0], 0.0, 10.0),
+            (1, 0, [1], 0.0, 10.0),
+            (2, 0, [2], 0.0, 10.0),
+        ]
+
+    state = _StationState()
+    proposed_start = 10.0 - 5.0e-6
+    accepted_start = AirLineEnv_Graph._get_station_earliest_available_time(
+        state,
+        0,
+        proposed_start,
+        1.0,
+    )
+
+    assert accepted_start == 10.0
+
+    engine = ConstraintEngine.build(
+        num_tasks=4,
+        num_stations=1,
+        edges=np.empty((2, 0), dtype=np.int64),
+        durations=[10.0, 10.0, 10.0, 1.0],
+        fixed_stations=[-1, -1, -1, -1],
+    )
+    report = engine.validate_schedule(
+        [*state.assigned_tasks, (3, 0, [3], accepted_start, accepted_start + 1.0)],
+        demands=[1, 1, 1, 1],
+        required_skills=[0, 0, 0, 0],
+        worker_skill_matrix=np.ones((4, 1), dtype=float),
+        max_slots_per_station=3,
+    )
+
+    assert report.is_legal
+
+
+def test_station_slot_violation_reports_station_time_and_active_tasks() -> None:
+    engine = ConstraintEngine.build(
+        num_tasks=4,
+        num_stations=1,
+        edges=np.empty((2, 0), dtype=np.int64),
+        durations=[10.0, 10.0, 10.0, 1.0],
+        fixed_stations=[-1, -1, -1, -1],
+    )
+    report = engine.validate_schedule(
+        [
+            (0, 0, [0], 0.0, 10.0),
+            (1, 0, [1], 0.0, 10.0),
+            (2, 0, [2], 0.0, 10.0),
+            (3, 0, [3], 9.0, 11.0),
+        ],
+        demands=[1, 1, 1, 1],
+        required_skills=[0, 0, 0, 0],
+        worker_skill_matrix=np.ones((4, 1), dtype=float),
+        max_slots_per_station=3,
+    )
+
+    example = report.examples["station_slot_violation_count"][0]
+    assert example == {
+        "station_id": 0,
+        "time": 9.0,
+        "active_count": 4,
+        "capacity": 3,
+        "active_task_ids": [0, 1, 2, 3],
+    }
