@@ -131,7 +131,7 @@ def test_rollout_checkpoint_saves_latest_and_best(tmp_path) -> None:
     )
     module = SimpleNamespace(
         last_completed_episode=2,
-        last_eval_metrics={"makespan": 10.0},
+        last_eval_metrics={"makespan": 10.0, "completion_rate": 1.0},
     )
     callback = RolloutCheckpoint(tmp_path)
 
@@ -151,7 +151,7 @@ def test_rollout_checkpoint_saves_latest_and_best(tmp_path) -> None:
 
     saved_paths.clear()
     module.last_completed_episode = 4
-    module.last_eval_metrics = {"makespan": 12.0}
+    module.last_eval_metrics = {"makespan": 12.0, "completion_rate": 1.0}
     callback.on_train_batch_end(trainer, module, None, None, 2)
     assert saved_paths == [str(tmp_path / "last.ckpt")]
 
@@ -217,6 +217,23 @@ def test_rollout_checkpoint_uses_reschedule_selection_score(tmp_path) -> None:
     assert callback.best_score == 0.7
 
 
+def test_rollout_checkpoint_rejects_incomplete_initial_schedule(tmp_path) -> None:
+    from train_lightning import RolloutCheckpoint
+
+    saved_paths = []
+    trainer = SimpleNamespace(save_checkpoint=lambda path: saved_paths.append(path))
+    module = SimpleNamespace(
+        last_completed_episode=1,
+        last_eval_metrics={"makespan": 1.0, "completion_rate": 0.0},
+    )
+    callback = RolloutCheckpoint(tmp_path)
+
+    callback.on_train_batch_end(trainer, module, None, None, 0)
+
+    assert saved_paths == [str(tmp_path / "last.ckpt")]
+    assert callback.best_score == float("inf")
+
+
 def test_reschedule_warm_start_rejects_legacy_raw_checkpoint(tmp_path) -> None:
     import torch
     from configs import configs
@@ -274,13 +291,13 @@ def test_standard_evaluation_restores_policy_and_config(monkeypatch, capsys) -> 
         config.enable_dynamic_events = False
         config.enable_station_breakdown = False
         config.enable_material_delay = False
-        return 10.0, 2.0, 3.0, [], 0.5, 0.6, 0.7
+        return 10.0, 2.0, 3.0, [(0, 0, [0], 0.0, 1.0)], 0.5, 0.6, 0.7
 
     monkeypatch.setattr("training.rollout_service.evaluate_model", fake_evaluate)
     service = APALRolloutService(
         agent=agent,
         vector_env=vector_env,
-        eval_env=object(),
+        eval_env=SimpleNamespace(num_tasks=1),
         config=config,
         device=torch.device("cpu"),
     )
@@ -292,6 +309,7 @@ def test_standard_evaluation_restores_policy_and_config(monkeypatch, capsys) -> 
     assert config.enable_station_breakdown is True
     assert config.enable_material_delay is True
     assert metrics["makespan"] == 10.0
+    assert metrics["completion_rate"] == 1.0
     output = capsys.readouterr().out
     assert "[Eval] ep=2 start" in output
     assert "Mk=10.00" in output

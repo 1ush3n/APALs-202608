@@ -1475,6 +1475,13 @@ class PPOAgent:
                     task_dist = Categorical(logits=task_logits.float())
                     task_lp = task_dist.log_prob(batch.y_task)
                     task_entropy = task_dist.entropy()
+                    action_scope = str(
+                        getattr(
+                            self.config,
+                            "policy_action_scope",
+                            "operation_station_worker",
+                        )
+                    )
                     
                     # B. Station LogProb
                     batch_indices = torch.arange(batch.y_task.size(0)).to(self.device)
@@ -1489,15 +1496,20 @@ class PPOAgent:
                     else:
                         curr_s_mask = ~s_p_mask
                     
-                    station_logits = self.policy.station_head(sel_task_emb, station_x, mask=curr_s_mask)
-                    if torch.isnan(station_logits).any(): station_logits = torch.nan_to_num(station_logits, nan=(torch.finfo(station_logits.dtype).min / 2.0))
-                    
-                    station_dist = Categorical(logits=station_logits.float())
-                    physical_action = batch.y_station >= 0
-                    station_lp = station_dist.log_prob(torch.clamp(batch.y_station, min=0))
-                    station_entropy = station_dist.entropy()
-                    station_lp = station_lp * physical_action.to(station_lp.dtype)
-                    station_entropy = station_entropy * physical_action.to(station_entropy.dtype)
+                    if action_scope == "operation":
+                        station_logits = torch.zeros_like(curr_s_mask, dtype=task_logits.dtype)
+                        station_lp = torch.zeros_like(task_lp)
+                        station_entropy = torch.zeros_like(task_entropy)
+                    else:
+                        station_logits = self.policy.station_head(sel_task_emb, station_x, mask=curr_s_mask)
+                        if torch.isnan(station_logits).any(): station_logits = torch.nan_to_num(station_logits, nan=(torch.finfo(station_logits.dtype).min / 2.0))
+
+                        station_dist = Categorical(logits=station_logits.float())
+                        physical_action = batch.y_station >= 0
+                        station_lp = station_dist.log_prob(torch.clamp(batch.y_station, min=0))
+                        station_entropy = station_dist.entropy()
+                        station_lp = station_lp * physical_action.to(station_lp.dtype)
+                        station_entropy = station_entropy * physical_action.to(station_entropy.dtype)
                     
                     # C. Worker Team LogProb
                     worker_x, w_p_mask = to_dense_batch(x_dict['worker'], batch['worker'].batch)
@@ -1523,7 +1535,12 @@ class PPOAgent:
                     team_emb_sum = torch.zeros(B_size, worker_x.size(-1)).to(self.device)
                     team_cnt = torch.zeros(B_size, 1).to(self.device)
                     
-                    for k in range(batch.y_team.size(1)):
+                    worker_steps = (
+                        range(batch.y_team.size(1))
+                        if action_scope == "operation_station_worker"
+                        else range(0)
+                    )
+                    for k in worker_steps:
                         target = batch.y_team[:, k] 
                         valid_step = (target != -1)
                         if not valid_step.any(): continue
@@ -1558,13 +1575,6 @@ class PPOAgent:
                         curr_mask = curr_mask.clone()
                         curr_mask[valid_b_indices, target[valid_step]] = True
                                 
-                    action_scope = str(
-                        getattr(
-                            self.config,
-                            "policy_action_scope",
-                            "operation_station_worker",
-                        )
-                    )
                     if action_scope == "operation":
                         total_lp = task_lp
                         entropy = task_entropy

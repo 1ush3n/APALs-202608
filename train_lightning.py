@@ -199,7 +199,7 @@ class RolloutCheckpoint(Callback):
                 metric_name = "multi_benchmark_normalized_makespan"
             else:
                 current_score = makespan
-                eligible = True
+                eligible = bool(eval_metrics.get("completion_rate", 0.0) >= 1.0 - 1e-9)
                 metric_name = "eval_makespan"
             if eligible and current_score < self.best_score:
                 self.best_score = current_score

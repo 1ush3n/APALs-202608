@@ -501,7 +501,7 @@ class APALRolloutService:
                 current_ep=episode,
                 scenario_names=tuple(self.config.eval_scenarios),
             )
-            makespan, balance, reward, _, duration, worker_util, station_util = result
+            makespan, balance, reward, schedule, duration, worker_util, station_util = result
         finally:
             for name, value in config_backups.items():
                 setattr(self.config, name, value)
@@ -514,10 +514,14 @@ class APALRolloutService:
             "duration_sec": float(duration),
             "worker_utilization": float(worker_util),
             "station_utilization": float(station_util),
+            "completion_rate": float(
+                len(schedule) == int(self.eval_env.num_tasks)
+            ),
         }
         print(
             f"[Eval] ep={episode} Mk={metrics['makespan']:.2f} "
             f"Bal={metrics['balance']:.2f} R={metrics['reward']:.2f} "
+            f"Done={metrics['completion_rate'] * 100:.1f}% "
             f"W={metrics['worker_utilization'] * 100:.1f}% "
             f"S={metrics['station_utilization'] * 100:.1f}% "
             f"T={metrics['duration_sec']:.2f}s",

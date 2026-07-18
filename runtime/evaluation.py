@@ -215,6 +215,12 @@ def evaluate_model(
                     sc_worker_utils.append(0.0)
                     sc_station_utils.append(0.0)
                 else:
+                    legality = env.validate_assignments(env.assigned_tasks)
+                    if not legality.is_legal:
+                        raise RuntimeError(
+                            "统一约束引擎拒绝评估排程："
+                            f"{legality.violations}；examples={legality.examples}"
+                        )
                     final_makespan = float(np.max(env.station_wall_clock))
                     sc_makespans.append(final_makespan)
                     sc_balances.append(float(np.std(env.station_loads)))

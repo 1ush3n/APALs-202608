@@ -436,6 +436,17 @@ class HBGATPN(nn.Module):
         self.task_head = TaskPointer(config)
         self.station_head = StationSelector(config)
         self.worker_head = WorkerPointer(config)
+
+        action_scope = str(
+            getattr(config, "policy_action_scope", "operation_station_worker")
+        )
+        if action_scope == "operation":
+            self.station_head.requires_grad_(False)
+            self.worker_head.requires_grad_(False)
+        elif action_scope == "operation_station":
+            self.worker_head.requires_grad_(False)
+        if str(getattr(config, "team_selection_mode", "autoregressive")) == "static_topq":
+            self.worker_head.ar_query_proj.requires_grad_(False)
         
         # 3. 价值网络 (Critic) 
         # 独立骨干网络维度
@@ -459,6 +470,9 @@ class HBGATPN(nn.Module):
             get_activation(),
             nn.Linear(32, 1)
         )
+        if str(getattr(config, "actor_context_mode", "attention")) != "attention":
+            self.actor_station_attn.requires_grad_(False)
+            self.actor_task_worker_attn.requires_grad_(False)
         
         self.critic_station_attn = nn.Sequential(
             nn.Linear(config.hidden_dim, 32),
