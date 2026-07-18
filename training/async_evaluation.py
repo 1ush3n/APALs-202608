@@ -273,24 +273,34 @@ class AsyncEvaluationManager:
             temporary.unlink(missing_ok=True)
         atomic_link_or_copy(candidate, self.latest_path)
 
+        if bool(getattr(self.config, "enable_reschedule_mode", False)):
+            evaluation_kind = "reschedule"
+        else:
+            evaluation_kind = "initial_standard"
+
         job = {
             "format_version": 1,
             "episode": int(episode),
             "candidate_path": str(candidate.resolve()),
             "best_path": str(self.best_path),
-            "instance_id": str(self.config.async_eval_instance_id),
-            "scenario_id": str(self.config.async_eval_scenario_id),
+            "evaluation_kind": evaluation_kind,
             "temperature": float(self.config.eval_temperature),
             "max_retries": int(self.config.async_eval_max_retries),
             "attempt": 0,
             "use_cached_observation": bool(self.config.async_eval_use_cached_observation),
             "submitted_at": time.time(),
         }
+        if evaluation_kind == "reschedule":
+            job["instance_id"] = str(self.config.async_eval_instance_id)
+            job["scenario_id"] = str(self.config.async_eval_scenario_id)
+        else:
+            job["instance_id"] = Path(str(self.config.async_eval_initial_data_path)).stem
+            job["scenario_id"] = "standard"
         job_path = self.paths.pending / job_name
         atomic_write_json(job_path, job)
         print(
             f"[AsyncEval] ep={episode} 已入队 "
-            f"scenario={job['instance_id']}/{job['scenario_id']} "
+            f"kind={evaluation_kind} target={job['instance_id']}/{job['scenario_id']} "
             f"active={self._active_job_count()}/{self.capacity}",
             flush=True,
         )

@@ -167,18 +167,23 @@ def validate_runtime_config(config: Config) -> None:
     if int(getattr(config, "eval_mask_mismatch_max_retries_per_time", 16)) < 1:
         raise ValueError("eval_mask_mismatch_max_retries_per_time 必须大于 0")
     if bool(getattr(config, "async_eval_enabled", False)):
-        if not bool(getattr(config, "enable_reschedule_mode", False)):
-            raise ValueError("async_eval_enabled 当前仅支持重调度训练")
         if str(getattr(config, "async_eval_device", "cpu")).lower() != "cpu":
             raise ValueError("async_eval_device 当前必须为 cpu，训练进程独占 GPU")
         if int(getattr(config, "async_eval_cpu_threads", 4)) < 1:
             raise ValueError("async_eval_cpu_threads 必须大于 0")
         if int(getattr(config, "async_eval_queue_capacity", 4)) < 1:
             raise ValueError("async_eval_queue_capacity 必须大于 0")
-        if not str(getattr(config, "async_eval_instance_id", "")).strip():
-            raise ValueError("async_eval_instance_id 不能为空")
-        if not str(getattr(config, "async_eval_scenario_id", "")).strip():
-            raise ValueError("async_eval_scenario_id 不能为空")
+        if bool(getattr(config, "enable_reschedule_mode", False)):
+            if not str(getattr(config, "async_eval_instance_id", "")).strip():
+                raise ValueError("重调度异步验证的 async_eval_instance_id 不能为空")
+            if not str(getattr(config, "async_eval_scenario_id", "")).strip():
+                raise ValueError("重调度异步验证的 async_eval_scenario_id 不能为空")
+        else:
+            scenarios = [str(item).lower() for item in getattr(config, "eval_scenarios", [])]
+            if scenarios != ["standard"]:
+                raise ValueError("初始调度单实例异步验证仅支持 eval_scenarios=[standard]")
+            if not str(getattr(config, "async_eval_initial_data_path", "")).strip():
+                raise ValueError("初始调度异步验证的 async_eval_initial_data_path 不能为空")
         if not math.isclose(float(getattr(config, "eval_temperature", 0.0)), 0.0, abs_tol=1e-12):
             raise ValueError("异步 best 选择要求 eval_temperature=0.0")
         if int(getattr(config, "eval_freq", 1)) != 1:
@@ -195,7 +200,14 @@ def validate_runtime_config(config: Config) -> None:
             value = float(getattr(config, field_name))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{field_name} 必须是大于 0 的有限数")
-    if bool(getattr(config, "enable_multi_benchmark_eval", False)):
+    uses_synchronous_multi_benchmark = bool(
+        getattr(config, "enable_multi_benchmark_eval", False)
+        and not (
+            bool(getattr(config, "async_eval_enabled", False))
+            and not bool(getattr(config, "enable_reschedule_mode", False))
+        )
+    )
+    if uses_synchronous_multi_benchmark:
         refs = getattr(config, "multi_benchmark_reference_makespans", {})
         if isinstance(refs, str):
             import json

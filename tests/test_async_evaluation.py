@@ -16,6 +16,7 @@ from runtime.configuration import validate_runtime_config
 from runtime.reschedule_eval import evaluate_reschedule_model
 from training.async_eval_worker import _restore_interrupted_jobs
 from training.async_evaluation import (
+    AsyncEvaluationManager,
     AsyncEvalPaths,
     atomic_link_or_copy,
     atomic_write_json,
@@ -36,11 +37,17 @@ def _assert_graph_equal(left, right) -> None:
         assert torch.equal(left[edge_type].edge_index, right[edge_type].edge_index), edge_type
 
 
-def test_async_eval_config_rejects_non_reschedule_and_gpu() -> None:
+def test_async_eval_config_accepts_initial_standard_and_rejects_unsupported_options() -> None:
     config = Config(async_eval_enabled=True)
-    with pytest.raises(ValueError, match="仅支持重调度"):
+    validate_runtime_config(config)
+    config.enable_multi_benchmark_eval = True
+    validate_runtime_config(config)
+
+    config.eval_scenarios = ["duration_noise"]
+    with pytest.raises(ValueError, match="仅支持 eval_scenarios=\[standard\]"):
         validate_runtime_config(config)
 
+    config.eval_scenarios = ["standard"]
     config.enable_reschedule_mode = True
     config.async_eval_device = "cuda"
     with pytest.raises(ValueError, match="必须为 cpu"):
@@ -50,6 +57,32 @@ def test_async_eval_config_rejects_non_reschedule_and_gpu() -> None:
     config.eval_freq = 2
     with pytest.raises(ValueError, match="eval_freq=1"):
         validate_runtime_config(config)
+
+
+def test_async_manager_records_initial_evaluation_kind(tmp_path: Path) -> None:
+    config = Config(async_eval_enabled=True)
+    config.data_file_path = "data/283.csv"
+    config.async_eval_initial_data_path = "data/680.csv"
+    config.enable_multi_benchmark_eval = True
+    manager = AsyncEvaluationManager(
+        config=config,
+        latest_path=tmp_path / "checkpoints" / "last.ckpt",
+        best_path=tmp_path / "checkpoints" / "best.ckpt",
+        project_root=PROJECT_ROOT,
+    )
+    manager._wait_for_slot = lambda: None  # type: ignore[method-assign]
+    trainer = SimpleNamespace(
+        save_checkpoint=lambda path: Path(path).write_bytes(b"checkpoint")
+    )
+
+    manager.submit(trainer, episode=3)
+
+    job = json.loads(
+        (manager.paths.pending / "episode_000003.json").read_text(encoding="utf-8-sig")
+    )
+    assert job["evaluation_kind"] == "initial_standard"
+    assert job["instance_id"] == "680"
+    assert job["scenario_id"] == "standard"
 
 
 def test_process_liveness_probe_is_side_effect_free() -> None:

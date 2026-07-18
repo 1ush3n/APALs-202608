@@ -144,11 +144,12 @@ class Config:
     reschedule_warm_start: bool = True
     reschedule_eval_num_scenarios: int = 4
 
-    # 训练期异步验证：默认关闭，开启后仅支持重调度 Lightning 训练。
+    # 训练期异步验证：默认关闭；支持初始调度与重调度 Lightning 训练。
     async_eval_enabled: bool = False
     async_eval_device: str = "cpu"
     async_eval_cpu_threads: int = 4
     async_eval_queue_capacity: int = 4
+    async_eval_initial_data_path: str = "data/680.csv"
     async_eval_instance_id: str = "real_680"
     async_eval_scenario_id: str = "medium_000"
     async_eval_wait_on_finish: bool = True

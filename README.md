@@ -63,6 +63,26 @@ python train.py experiment=initial_schedule_283 train.batch_size=24 parallel.num
 
 配置优先级为：代码默认值 `<` 实验 YAML `<` 平台硬件 YAML `<` Hydra 命令行 `key=value`。
 
+### 初始调度异步验证
+
+Lightning 初始调度可将逐 episode 验证与 GPU 训练分离。单实例模式固定在 `async_eval_initial_data_path` 的 Standard 场景上按 Makespan 选择 best，且只有完整排程可以覆盖 best：
+
+```bash
+python train.py \
+  experiment=initial_schedule_680 \
+  experiment_name=initial_680_async_seed42 \
+  async_eval_enabled=true \
+  async_eval_initial_data_path=data/680.csv \
+  async_eval_cpu_threads=4 \
+  async_eval_queue_capacity=4 \
+  async_eval_wait_on_finish=true \
+  eval_freq=1 \
+  eval_temperature=0.0 \
+  seed=42
+```
+
+初始调度异步模式始终只验证 `async_eval_initial_data_path` 指定的固定 680 数据及其固定工人池，不执行 283/2338/3182 多基准验证，即使训练 YAML 启用了 `enable_multi_benchmark_eval=true`。有界队列满后训练会等待，因此不会丢失应参与 best 选择的 episode。异步结果位于当前运行的 `checkpoints/async_eval/`，异步 TensorBoard 位于其 `tensorboard/` 子目录。
+
 ### 命令行配置参数
 
 可以通过以下命令查看当前版本支持的参数：
@@ -463,7 +483,7 @@ Lightning 每个 episode 输出一行精简 rollout 摘要：
 3. 图状态重建耗时。
 4. 环境 Step 耗时。
 
-自动验证默认每个 episode 执行一次，只运行 Standard 场景，并打印 Makespan、Balance、Reward、人员/站位利用率及耗时。详细指标同时写入 Lightning/TensorBoard。
+自动验证默认每个 episode 执行一次，只运行 Standard 场景，并打印 Makespan、Balance、Reward、人员/站位利用率及耗时。详细指标同时写入 Lightning/TensorBoard。开启初始调度异步验证后，训练进程只提交候选 checkpoint，CPU worker 按相同指标独立验证并原子更新 `best.ckpt`。
 
 重调度默认启用统一目标差分密集奖励 `reschedule_use_objective_delta_reward=true`。每个动作的奖励来自验证综合目标在动作前后的变化，分项包括归一化 makespan、负载均衡、takt 超期、开始时间偏差、工位变化率和班组变化率；终局不再重复扣除这些项。TensorBoard 会额外记录 `Reward/ObjectiveDelta`、`Reward/ObjectiveFinalScore`、`Reward/ObjectiveClipFraction` 和 `Reward/Delta/*`。该奖励与旧重调度 reward 不同，正式实验必须使用新的 `experiment_name` 从初始调度模型 warm start，不能将旧 checkpoint 的续训曲线与新奖励训练曲线合并。
 

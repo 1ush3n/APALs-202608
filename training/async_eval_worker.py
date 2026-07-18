@@ -104,6 +104,7 @@ def _write_summary_csv(paths: AsyncEvalPaths) -> None:
         return
     preferred = [
         "episode",
+        "evaluation_kind",
         "instance_id",
         "scenario_id",
         "scenario_index",
@@ -160,8 +161,6 @@ def _evaluate_job(job: dict[str, Any], project_root: Path) -> tuple[dict[str, An
         load_checkpoint,
         load_policy_weights,
     )
-    from runtime.reschedule_eval import evaluate_reschedule_model
-    from runtime.reschedule_manifest import load_reschedule_manifest
     from runtime.seed import set_seed
 
     checkpoint = load_checkpoint(job["candidate_path"], map_location="cpu")
@@ -170,19 +169,23 @@ def _evaluate_job(job: dict[str, Any], project_root: Path) -> tuple[dict[str, An
         raise ValueError("异步候选 checkpoint 缺少 apal_metadata.config")
     configs.update_from_dict(saved_config)
     apply_checkpoint_model_spec(configs, checkpoint.model_spec)
-    if not bool(configs.enable_reschedule_mode):
-        raise ValueError("异步验证候选不是重调度模型")
+    evaluation_kind = str(job.get("evaluation_kind", "reschedule"))
+    is_reschedule = bool(configs.enable_reschedule_mode)
+    if evaluation_kind == "reschedule" and not is_reschedule:
+        raise ValueError("异步重调度验证候选不是重调度模型")
+    if evaluation_kind != "reschedule" and is_reschedule:
+        raise ValueError(f"异步初始调度验证候选错误地启用了重调度模式: {evaluation_kind}")
+    if evaluation_kind not in {
+        "reschedule",
+        "initial_standard",
+    }:
+        raise ValueError(f"未知异步验证类型: {evaluation_kind}")
 
-    manifest = load_reschedule_manifest(configs.reschedule_manifest_path)
-    entry = manifest.get(str(job["instance_id"]))
-    if entry.scenario_path is None:
-        raise ValueError(f"manifest 实例缺少固定场景文件: {entry.instance_id}")
-    configs.data_file_path = str(entry.data_path)
-    configs.reschedule_baseline_schedule_path = str(entry.baseline_schedule_path)
-    configs.reschedule_eval_scenario_path = str(entry.scenario_path)
-    configs.reschedule_eval_instance_id = str(entry.instance_id)
-
-    seed = int(configs.reschedule_eval_scenario_seed)
+    seed = (
+        int(configs.reschedule_eval_scenario_seed)
+        if evaluation_kind == "reschedule"
+        else int(configs.seed)
+    )
     set_seed(seed)
     device = torch.device("cpu")
     model = HBGATPN(configs).to(device)
@@ -211,47 +214,94 @@ def _evaluate_job(job: dict[str, Any], project_root: Path) -> tuple[dict[str, An
         if isinstance(scaler_state, dict):
             agent.scaler.load_state_dict(scaler_state)
 
-    env = AirLineEnv_Graph(str(entry.data_path), seed=seed)
-    result = evaluate_reschedule_model(
-        env,
-        agent,
-        num_runs=None,
-        temperature=float(job["temperature"]),
-        current_ep=int(job["episode"]),
-        scenario_ids=[str(job["scenario_id"])],
-        use_cached_observation=bool(job["use_cached_observation"]),
-        skip_value_estimation=True,
-    )
-    makespan, balance, reward, schedule, duration, worker_util, station_util = result
-    score_metrics = dict(getattr(evaluate_reschedule_model, "last_metrics", {}) or {})
-    scenario_rows = list(getattr(evaluate_reschedule_model, "last_scenario_metrics", []) or [])
-    scenario_metrics = dict(scenario_rows[0]) if scenario_rows else {}
-    output = {
+    common = {
         "episode": int(job["episode"]),
+        "evaluation_kind": evaluation_kind,
         "instance_id": str(job["instance_id"]),
         "scenario_id": str(job["scenario_id"]),
+        "candidate_path": str(job["candidate_path"]),
+    }
+
+    if evaluation_kind == "reschedule":
+        from runtime.reschedule_eval import evaluate_reschedule_model
+        from runtime.reschedule_manifest import load_reschedule_manifest
+
+        manifest = load_reschedule_manifest(configs.reschedule_manifest_path)
+        entry = manifest.get(str(job["instance_id"]))
+        if entry.scenario_path is None:
+            raise ValueError(f"manifest 实例缺少固定场景文件: {entry.instance_id}")
+        configs.data_file_path = str(entry.data_path)
+        configs.reschedule_baseline_schedule_path = str(entry.baseline_schedule_path)
+        configs.reschedule_eval_scenario_path = str(entry.scenario_path)
+        configs.reschedule_eval_instance_id = str(entry.instance_id)
+        env = AirLineEnv_Graph(str(entry.data_path), seed=seed)
+        result = evaluate_reschedule_model(
+            env,
+            agent,
+            num_runs=None,
+            temperature=float(job["temperature"]),
+            current_ep=int(job["episode"]),
+            scenario_ids=[str(job["scenario_id"])],
+            use_cached_observation=bool(job["use_cached_observation"]),
+            skip_value_estimation=True,
+        )
+        makespan, balance, reward, schedule, duration, worker_util, station_util = result
+        score_metrics = dict(getattr(evaluate_reschedule_model, "last_metrics", {}) or {})
+        scenario_rows = list(getattr(evaluate_reschedule_model, "last_scenario_metrics", []) or [])
+        scenario_metrics = dict(scenario_rows[0]) if scenario_rows else {}
+        output = {
+            **common,
+            "makespan": float(makespan),
+            "balance": float(balance),
+            "reward": float(reward),
+            "duration_sec": float(duration),
+            "worker_utilization": float(worker_util),
+            "station_utilization": float(station_util),
+            **{
+                str(key): float(value)
+                for key, value in score_metrics.items()
+                if isinstance(value, (int, float))
+            },
+            **{
+                str(key): float(value)
+                for key, value in scenario_metrics.items()
+                if isinstance(value, (int, float))
+            },
+        }
+        output["eligible"] = float(output.get("eligible", output.get("eligible_rate", 0.0)))
+        output["selection_score"] = float(
+            output.get("selection_score", output.get("composite_score", float("inf")))
+        )
+        return output, schedule
+
+    from runtime.evaluation import evaluate_model
+    from runtime.paths import resolve_workspace_path
+
+    data_path = resolve_workspace_path(configs.async_eval_initial_data_path)
+    env = AirLineEnv_Graph(str(data_path), seed=seed)
+    result = evaluate_model(
+        env,
+        agent,
+        num_runs=1,
+        temperature=float(job["temperature"]),
+        current_ep=int(job["episode"]),
+        scenario_names=("standard",),
+    )
+    makespan, balance, reward, schedule, duration, worker_util, station_util = result
+    complete = len(schedule) == int(env.num_tasks)
+    output = {
+        **common,
         "makespan": float(makespan),
         "balance": float(balance),
         "reward": float(reward),
         "duration_sec": float(duration),
         "worker_utilization": float(worker_util),
         "station_utilization": float(station_util),
-        "candidate_path": str(job["candidate_path"]),
-        **{
-            str(key): float(value)
-            for key, value in score_metrics.items()
-            if isinstance(value, (int, float))
-        },
-        **{
-            str(key): float(value)
-            for key, value in scenario_metrics.items()
-            if isinstance(value, (int, float))
-        },
+        "complete": float(complete),
+        "eligible": float(complete),
+        "composite_score": float(makespan),
+        "selection_score": float(makespan) if complete else float("inf"),
     }
-    output["eligible"] = float(output.get("eligible", output.get("eligible_rate", 0.0)))
-    output["selection_score"] = float(
-        output.get("selection_score", output.get("composite_score", float("inf")))
-    )
     return output, schedule
 
 
@@ -280,9 +330,11 @@ def _record_result(
     score = float(result["selection_score"])
     if eligible and score < float(best_state.get("selection_score", float("inf"))):
         atomic_link_or_copy(Path(job["candidate_path"]), Path(job["best_path"]))
-        _write_schedule(paths.results / "best_schedule.csv", schedule)
+        if schedule:
+            _write_schedule(paths.results / "best_schedule.csv", schedule)
         best_state = {
             "episode": episode,
+            "evaluation_kind": str(job.get("evaluation_kind", "reschedule")),
             "selection_score": score,
             "composite_score": float(result.get("composite_score", score)),
             "makespan": float(result["makespan"]),
@@ -373,7 +425,7 @@ def run_worker(queue_root: Path, project_root: Path, *, heartbeat_interval: floa
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="APAL Lightning 异步重调度验证 worker")
+    parser = argparse.ArgumentParser(description="APAL Lightning 异步验证 worker")
     parser.add_argument("--queue-root", type=Path, required=True)
     parser.add_argument("--project-root", type=Path, required=True)
     parser.add_argument("--heartbeat-interval", type=float, default=30.0)

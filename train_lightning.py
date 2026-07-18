@@ -93,9 +93,19 @@ def _maybe_load_reschedule_warm_start(model: torch.nn.Module, device: torch.devi
 
 
 def _validate_async_eval_target() -> None:
-    """在启动训练环境前验证异步 best 选择的实例和固定场景。"""
+    """在启动训练环境前验证异步 best 选择所需的固定评估目标。"""
     if not bool(getattr(configs, "async_eval_enabled", False)):
         return
+    if not bool(getattr(configs, "enable_reschedule_mode", False)):
+        data_path = resolve_workspace_path(configs.async_eval_initial_data_path)
+        if not data_path.is_file():
+            raise FileNotFoundError(f"初始调度异步验证数据不存在: {data_path}")
+        print(
+            f"[AsyncEval] target=initial_standard data={data_path} seed={int(configs.seed)}",
+            flush=True,
+        )
+        return
+
     manifest_path = str(getattr(configs, "reschedule_manifest_path", "") or "").strip()
     if not manifest_path:
         raise ValueError("开启异步验证时必须配置 reschedule_manifest_path")
@@ -212,10 +222,13 @@ class RolloutCheckpoint(Callback):
                 else:
                     mk_str = f"Mk={makespan:.2f}"
 
+                marker = "N" * 20
                 print(
-                    f"[Checkpoint] ep={episode} 保存最佳模型: "
-                    f"metric={metric_name} "
-                    f"score={current_score:.6f} {mk_str} path={self.best_path}",
+                    f"\n{marker} [发现新的最佳模型] {marker}\n"
+                    f"[Checkpoint] ep={episode} metric={metric_name} "
+                    f"score={current_score:.6f} {mk_str}\n"
+                    f"[Checkpoint] best_path={self.best_path}\n"
+                    f"{marker} [最佳模型已保存] {marker}\n",
                     flush=True,
                 )
 
