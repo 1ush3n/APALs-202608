@@ -42,15 +42,15 @@ from runtime.seed import set_seed
 from utils.device_utils import clear_torch_cache, get_available_device
 
 
-METHOD_NAME = "L2D-PPO-APAL"
+METHOD_NAME = "Simple-HeteroGAT-PPO"
 ENTRYPOINT = "baselines/literature_ppo/train_l2d_ppo_apal.py"
 EXTRA_ARGS = {
     "output_dir": ExtraArgument(default=None, help="可选输出目录；缺省写入 runs artifacts"),
 }
 
 
-class L2DPPOAPAL(GraphBaselineActorCritic):
-    """参考 learned dispatching rule 的 APAL 图 PPO baseline。"""
+class SimpleHeteroGATPPO(GraphBaselineActorCritic):
+    """历史联合动作异构图 PPO；不再将其错误标记为 L2D。"""
 
 
 def _save_checkpoint(path: Path, agent: PPOAgent, best_makespan: float, args: Any, *, episode: int) -> None:
@@ -63,7 +63,7 @@ def _save_checkpoint(path: Path, agent: PPOAgent, best_makespan: float, args: An
         args=args,
         extra={
             "optimizer": "PPO",
-            "model_type": "L2DPPOAPAL",
+            "model_type": "SimpleHeteroGATPPO",
             "batch_size": int(agent.batch_size),
             "k_epochs": int(agent.k_epochs),
             "eps_clip": float(agent.eps_clip),
@@ -97,7 +97,7 @@ def train(args: Any) -> None:
 
     train_env = make_training_env(args, seed=seed)
     eval_env = make_eval_env(args, seed=seed)
-    model = L2DPPOAPAL(configs).to(device)
+    model = SimpleHeteroGATPPO(configs).to(device)
     max_episodes = int(getattr(configs, "max_episodes", 300))
     batch_size = int(getattr(configs, "batch_size", 64))
     agent = PPOAgent(
@@ -112,9 +112,9 @@ def train(args: Any) -> None:
         config=configs,
     )
 
-    latest_path = output_dir / "l2d_ppo_apal_latest.pth"
-    best_path = output_dir / "l2d_ppo_apal_best.pth"
-    final_path = output_dir / "l2d_ppo_apal_final.pth"
+    latest_path = output_dir / "simple_heterogat_ppo_latest.pth"
+    best_path = output_dir / "simple_heterogat_ppo_best.pth"
+    final_path = output_dir / "simple_heterogat_ppo_final.pth"
     start_episode = 1
     rows: list[dict[str, Any]] = []
     best_makespan = float("inf")
@@ -185,7 +185,7 @@ def train(args: Any) -> None:
                 best_makespan = float(eval_metrics["makespan"])
                 best_eval_schedule = list(eval_schedule)
                 _save_checkpoint(best_path, agent, best_makespan, args, episode=episode)
-                export_best_schedule(output_dir, best_eval_schedule, title="l2d_ppo_apal_best")
+                export_best_schedule(output_dir, best_eval_schedule, title="simple_heterogat_ppo_best")
                 print(
                     f"[{METHOD_NAME}][Checkpoint] ep={episode} 保存最优模型 "
                     f"Mk={best_makespan:.2f} path={best_path}",

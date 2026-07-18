@@ -24,9 +24,15 @@ reference_makespans:
   "3182": 3622.06
 
 methods:
-  - full
-  - no_gat
-  - no_attention
+  - full_joint
+  - operation_station
+  - operation_only
+  - fixed_preallocation
+  - static_topq
+  - homogeneous_graphsage
+  - no_message_passing
+  - mean_max_pooling
+  - local_only
   - L2D-PPO-APAL
   - Graph-DDQN-APAL
   - SPT
@@ -40,7 +46,7 @@ methods:
   - SA
   - GA
 
-reference_method: full
+reference_method: full_joint
 seeds: [0, 1, 2, 3, 4]
 bootstrap_samples: 2000
 permutation_samples: 5000
@@ -48,23 +54,54 @@ station_count: 5
 worker_count: 80
 
 ablations:
-  full:
+  full_joint:
     experiment: scale_400_800_schedule
     overrides: []
-  no_gat:
+  operation_station:
     experiment: scale_400_800_schedule
     overrides:
-      - ablation_no_gat=true
-  no_attention:
+      - policy_action_scope=operation_station
+  operation_only:
     experiment: scale_400_800_schedule
     overrides:
-      - use_attention_critic=false
+      - policy_action_scope=operation
+  fixed_preallocation:
+    experiment: scale_400_800_schedule
+    overrides:
+      - workforce_binding_mode=preallocated
+      - workforce_preallocation_ratio=1.0
+  static_topq:
+    experiment: scale_400_800_schedule
+    overrides:
+      - team_selection_mode=static_topq
+  homogeneous_graphsage:
+    experiment: scale_400_800_schedule
+    overrides:
+      - graph_encoder_mode=homogeneous_graphsage
+  no_message_passing:
+    experiment: scale_400_800_schedule
+    overrides:
+      - graph_encoder_mode=none
+  mean_max_pooling:
+    experiment: scale_400_800_schedule
+    overrides:
+      - actor_context_mode=mean_max
+  local_only:
+    experiment: scale_400_800_schedule
+    overrides:
+      - actor_context_mode=local_only
 
 checkpoints:
-  full:
+  full_joint:
     "680": checkpoints/initial_schedule/best_680.ckpt
-  no_gat: {}
-  no_attention: {}
+  operation_station: {}
+  operation_only: {}
+  fixed_preallocation: {}
+  static_topq: {}
+  homogeneous_graphsage: {}
+  no_message_passing: {}
+  mean_max_pooling: {}
+  local_only: {}
 
 # 非活动项目（不进入 commands plan，也不应被一键训练）：
 # - no_mask：当前解码器没有 mask 时不可运行。

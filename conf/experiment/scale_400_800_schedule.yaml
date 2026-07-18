@@ -20,13 +20,10 @@ experiment:
   multiscale_sampling_exponent: 0.5
   multiscale_min_updates: 600
   multiscale_max_updates: 3300
-  enable_multi_benchmark_eval: true
-  multi_benchmark_data_paths:
-    - data/283.csv
-    - data/680.csv
-    - data/2338.csv
-    - data/3182.csv
-  multi_benchmark_reference_makespans: '{"283": 131, "680": 316, "2338": 885, "3182": 1235}'
+  # 680 是唯一 checkpoint 选择实例；其余真实规模仅在锁定 checkpoint 后评价。
+  enable_multi_benchmark_eval: false
+  multi_benchmark_data_paths: []
+  multi_benchmark_reference_makespans: '{}'
 
 train:
   batch_size: 256

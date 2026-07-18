@@ -38,7 +38,19 @@ STRUCTURAL_FIELDS = {
     "skill_hub_bidirectional", "num_skill_types", "skill_feat_dim",
     "worker_skill_feature_slots",
     "use_input_layer_norm", "use_gat_layer_norm", "use_head_layer_norm",
-    "use_shared_trunk", "use_attention_critic", "use_autoregressive_worker",
+    "use_shared_trunk", "policy_action_scope", "workforce_binding_mode",
+    "workforce_preallocation_ratio", "team_selection_mode",
+    "graph_encoder_mode", "actor_context_mode",
+}
+
+_VALID_EXPERIMENT_MODES = {
+    "policy_action_scope": {
+        "operation", "operation_station", "operation_station_worker",
+    },
+    "workforce_binding_mode": {"endogenous", "preallocated"},
+    "team_selection_mode": {"autoregressive", "static_topq"},
+    "graph_encoder_mode": {"hetero_gat", "homogeneous_graphsage", "none"},
+    "actor_context_mode": {"attention", "mean_max", "local_only"},
 }
 
 
@@ -152,6 +164,22 @@ def parse_runtime_args(
 
 
 def validate_runtime_config(config: Config) -> None:
+    for field_name, choices in _VALID_EXPERIMENT_MODES.items():
+        value = str(getattr(config, field_name)).lower()
+        if value not in choices:
+            raise ValueError(
+                f"{field_name} 无效: {value!r}；允许值={sorted(choices)}"
+            )
+        setattr(config, field_name, value)
+    ratio = float(getattr(config, "workforce_preallocation_ratio", 1.0))
+    if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
+        raise ValueError("workforce_preallocation_ratio 必须是 [0, 1] 内的有限数")
+    if config.workforce_binding_mode == "preallocated" and ratio <= 0.0:
+        raise ValueError("preallocated 模式要求 workforce_preallocation_ratio > 0")
+    if bool(getattr(config, "ablation_no_gat", False)):
+        raise ValueError("ablation_no_gat 已移除；请使用 graph_encoder_mode=none")
+    if bool(getattr(config, "ablation_no_pointer", False)):
+        raise ValueError("ablation_no_pointer 已移除；请使用 team_selection_mode=static_topq")
     if config.float32_matmul_precision not in {"highest", "high", "medium"}:
         raise ValueError(f"float32_matmul_precision 无效: {config.float32_matmul_precision}")
     if str(getattr(config, "artifact_layout", "runs")).lower() not in {"runs", "legacy"}:

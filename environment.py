@@ -763,6 +763,9 @@ class AirLineEnv_Graph(gym.Env):
         self.task_status.fill(0) 
         self.worker_free_time = np.zeros(self.num_workers, dtype=float)
         self.worker_locks = np.zeros(self.num_workers, dtype=int)
+        self.workforce_preallocation_diagnostics: dict[str, Any] = {}
+        if str(getattr(configs, "workforce_binding_mode", "endogenous")) == "preallocated":
+            self.workforce_preallocation_diagnostics = self._preallocate_workforce()
         self.station_loads.fill(0.0)
         self.station_wall_clock.fill(0.0)
         self.event_queue = EventQueue(max_size=10000)
@@ -907,6 +910,117 @@ class AirLineEnv_Graph(gym.Env):
         if getattr(self, 'skip_obs_building', False):
             return None
         return self._get_observation()
+
+    def _preallocate_workforce(self) -> dict[str, Any]:
+        """按工位—技能最低配额在排程开始前确定性绑定工人。"""
+        ratio = float(getattr(configs, "workforce_preallocation_ratio", 1.0))
+        if not 0.0 < ratio <= 1.0:
+            raise ValueError("preallocated 模式要求 workforce_preallocation_ratio 位于 (0, 1]")
+        target = int(round(self.num_workers * ratio))
+        num_skills = int(configs.num_skill_types)
+        physical = np.asarray(self.constraint_engine.physical_mask, dtype=bool)
+        plan = np.full(self.num_tasks, -1, dtype=np.int64)
+        projected_load = np.zeros(self.num_stations, dtype=float)
+
+        for task_id in self._topological_sort():
+            task_id = int(task_id)
+            if not physical[task_id]:
+                continue
+            predecessor_stations = [
+                int(plan[pred])
+                for pred in self.constraint_engine.physical_predecessors[task_id]
+                if int(plan[pred]) >= 0
+            ]
+            minimum = max(predecessor_stations, default=0)
+            maximum = min(
+                self.num_stations - 1,
+                int(self.max_allowed_stations[task_id]),
+            )
+            fixed = int(self.fixed_stations[task_id])
+            candidates = [fixed] if fixed >= 0 else list(range(minimum, maximum + 1))
+            candidates = [sid for sid in candidates if minimum <= sid <= maximum]
+            if not candidates:
+                raise RuntimeError(
+                    "workforce_preallocation_infeasible: "
+                    f"task={task_id} 没有合法临时工位"
+                )
+            station_id = min(
+                candidates,
+                key=lambda sid: (float(projected_load[sid]), int(sid)),
+            )
+            plan[task_id] = station_id
+            duration = float(self.task_static_feat[task_id, 0].item())
+            demand = max(1, int(self.task_static_feat[task_id, 2].item()))
+            projected_load[station_id] += duration * demand
+
+        quota = np.zeros((self.num_stations, num_skills), dtype=np.int64)
+        for task_id in np.where(physical)[0]:
+            station_id = int(plan[task_id])
+            skill = int(self.task_static_feat[task_id, 1].item())
+            demand = max(1, int(self.task_static_feat[task_id, 2].item()))
+            quota[station_id, skill] = max(quota[station_id, skill], demand)
+
+        locks = np.zeros(self.num_workers, dtype=np.int64)
+        coverage = np.zeros_like(quota)
+        unassigned = set(range(self.num_workers))
+        station_counts = np.zeros(self.num_stations, dtype=np.int64)
+
+        while bool(np.any(coverage < quota)):
+            deficits = quota - coverage
+            best: tuple[tuple[int, int, int, int], int, int, np.ndarray] | None = None
+            for worker_id in sorted(unassigned):
+                skills = np.asarray(self.worker_skill_matrix[worker_id, :num_skills] > 0.5)
+                for station_id in range(self.num_stations):
+                    covered = skills & (deficits[station_id] > 0)
+                    gain = int(np.sum(covered))
+                    if gain <= 0:
+                        continue
+                    remaining = int(np.sum(deficits[station_id][covered]))
+                    key = (-gain, -remaining, int(station_counts[station_id]), worker_id)
+                    if best is None or key < best[0]:
+                        best = (key, worker_id, station_id, covered)
+            if best is None or (target > 0 and int(np.sum(station_counts)) >= target):
+                raise RuntimeError(
+                    "workforce_preallocation_infeasible: "
+                    f"target={target}, assigned={int(np.sum(station_counts))}, "
+                    f"remaining_deficit={np.maximum(quota - coverage, 0).tolist()}"
+                )
+            _, worker_id, station_id, covered = best
+            locks[worker_id] = station_id + 1
+            station_counts[station_id] += 1
+            coverage[station_id, covered] += 1
+            unassigned.remove(worker_id)
+
+        while int(np.sum(station_counts)) < target:
+            if not unassigned:
+                raise RuntimeError(
+                    "workforce_preallocation_infeasible: 无法达到目标绑定人数"
+                )
+            worker_id = min(unassigned)
+            station_id = min(
+                range(self.num_stations),
+                key=lambda sid: (
+                    float(station_counts[sid]) / max(1.0, projected_load[sid]),
+                    int(station_counts[sid]),
+                    int(sid),
+                ),
+            )
+            locks[worker_id] = station_id + 1
+            station_counts[station_id] += 1
+            unassigned.remove(worker_id)
+
+        if int(np.count_nonzero(locks)) != target or bool(np.any(coverage < quota)):
+            raise RuntimeError("workforce_preallocation_infeasible: 结果未达到严格验收条件")
+        self.worker_locks = locks
+        return {
+            "target": target,
+            "assigned": int(np.count_nonzero(locks)),
+            "ratio": ratio,
+            "station_counts": station_counts.tolist(),
+            "station_skill_quota": quota.tolist(),
+            "station_skill_coverage": coverage.tolist(),
+            "mobile_workers": int(np.sum(locks == 0)),
+        }
 
     def _topological_sort(self):
         """返回任务的拓扑排序列表"""

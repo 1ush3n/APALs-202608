@@ -168,4 +168,14 @@ def test_current_paper_suite_excludes_unavailable_and_replaced_methods() -> None
     forbidden = {"no_mask", "no_pointer", "no_skill_hub", "BasicPPO", "DQN", "GraphPPO"}
     assert not (active_methods & forbidden)
     assert not (active_ablations & forbidden)
-    assert {"full", "no_gat", "no_attention"} <= active_ablations
+    assert {
+        "full_joint",
+        "operation_station",
+        "operation_only",
+        "fixed_preallocation",
+        "static_topq",
+        "homogeneous_graphsage",
+        "no_message_passing",
+        "mean_max_pooling",
+        "local_only",
+    } <= active_ablations

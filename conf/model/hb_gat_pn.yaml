@@ -18,3 +18,9 @@ model:
   use_shared_trunk: false
   use_attention_critic: true
   use_autoregressive_worker: true
+  policy_action_scope: operation_station_worker
+  workforce_binding_mode: endogenous
+  workforce_preallocation_ratio: 1.0
+  team_selection_mode: autoregressive
+  graph_encoder_mode: hetero_gat
+  actor_context_mode: attention

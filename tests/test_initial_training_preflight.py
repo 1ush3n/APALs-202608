@@ -16,7 +16,7 @@ import torch
 from baselines.graph_baseline import select_graph_action
 from baselines.literature.common import rollout_step_limit, save_literature_checkpoint
 from baselines.literature_dqn.train_graph_ddqn_apal import GraphDDQNAPAL
-from baselines.literature_ppo.train_l2d_ppo_apal import L2DPPOAPAL
+from baselines.literature_ppo.train_l2d_ppo_apal import SimpleHeteroGATPPO
 from configs import configs
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
@@ -116,8 +116,8 @@ def _assert_action_is_legal(env: AirLineEnv_Graph, action: tuple[int, int, list[
     task_idx, station_idx, team = action
     task_skill = int(env.task_static_feat[task_idx, 1].item())
     demand = int(env.task_static_feat[task_idx, 2].item())
-    assert 0 <= station_idx < env.num_stations
     if task_skill >= 0:
+        assert 0 <= station_idx < env.num_stations
         assert task_skill in range(int(configs.num_skill_types))
         assert len(team) == demand
         assert len(team) == len(set(team))
@@ -125,6 +125,8 @@ def _assert_action_is_legal(env: AirLineEnv_Graph, action: tuple[int, int, list[
     else:
         # 层级虚拟节点是零工时工艺推进节点，不适用物理工序的技能/人数约束。
         assert demand == 0
+        assert station_idx == -1
+        assert team == []
     _, reward, _, info = env.step(action)
     assert np.isfinite(float(reward))
     assert not bool(info.get("invalid_action", False)), info
@@ -135,8 +137,8 @@ def _assert_action_is_legal(env: AirLineEnv_Graph, action: tuple[int, int, list[
     ("variant", "overrides"),
     (
         ("full", {}),
-        ("no_gat", {"ablation_no_gat": True}),
-        ("no_attention", {"use_attention_critic": False}),
+        ("no_message_passing", {"graph_encoder_mode": "none"}),
+        ("local_only", {"actor_context_mode": "local_only"}),
     ),
 )
 def test_main_method_and_active_ablations_complete_a_legal_first_step(
@@ -180,7 +182,7 @@ def test_main_method_and_active_ablations_complete_a_legal_first_step(
         _assert_action_is_legal(env, action)
 
 
-@pytest.mark.parametrize("model_type", (L2DPPOAPAL, GraphDDQNAPAL))
+@pytest.mark.parametrize("model_type", (SimpleHeteroGATPPO, GraphDDQNAPAL))
 def test_literature_graph_baselines_accept_current_five_skill_graph(model_type: type) -> None:
     seed_everything(42)
     with temporary_config(configs, _base_overrides()):
@@ -243,7 +245,7 @@ def test_literature_checkpoint_records_current_five_skill_layout(tmp_path: Path)
         assert payload["worker_feature_layout_version"] == "five_skill_v2"
 
 
-def test_reschedule_warm_start_rejects_historical_22_dim_worker_input(tmp_path: Path) -> None:
+def test_reschedule_warm_start_rejects_legacy_checkpoint_format(tmp_path: Path) -> None:
     with temporary_config(configs, _base_overrides()):
         target_model = HBGATPN(configs)
         historical_state = target_model.state_dict()
@@ -254,7 +256,7 @@ def test_reschedule_warm_start_rejects_historical_22_dim_worker_input(tmp_path: 
         )
         checkpoint_path = tmp_path / "historical_22_dim.pth"
         torch.save({"model_state_dict": historical_state}, checkpoint_path)
-        with pytest.raises(ValueError, match="工人特征布局不兼容"):
+        with pytest.raises(ValueError, match="checkpoint 格式不兼容"):
             load_warm_start_weights_with_input_expansion(
                 target_model,
                 checkpoint_path,

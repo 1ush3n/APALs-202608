@@ -10,13 +10,19 @@ from configs import Config
 from worker_feature_layout import resolve_worker_feature_layout
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 WORKER_FEATURE_LAYOUT_VERSION = "five_skill_v2"
 
 
 @dataclass(frozen=True)
 class ModelSpec:
     resource_graph_mode: str
+    policy_action_scope: str = "operation_station_worker"
+    workforce_binding_mode: str = "endogenous"
+    workforce_preallocation_ratio: float = 1.0
+    team_selection_mode: str = "autoregressive"
+    graph_encoder_mode: str = "hetero_gat"
+    actor_context_mode: str = "attention"
     hidden_dim: int | None = None
     num_gat_layers: int | None = None
     task_feat_dim: int | None = None
@@ -53,6 +59,12 @@ def build_model_spec(config: Config) -> ModelSpec:
     worker_layout = resolve_worker_feature_layout(config)
     return ModelSpec(
         resource_graph_mode=mode,
+        policy_action_scope=str(config.policy_action_scope),
+        workforce_binding_mode=str(config.workforce_binding_mode),
+        workforce_preallocation_ratio=float(config.workforce_preallocation_ratio),
+        team_selection_mode=str(config.team_selection_mode),
+        graph_encoder_mode=str(config.graph_encoder_mode),
+        actor_context_mode=str(config.actor_context_mode),
         hidden_dim=int(config.hidden_dim),
         num_gat_layers=int(config.num_gat_layers),
         task_feat_dim=int(config.task_feat_dim),
@@ -150,6 +162,11 @@ def load_checkpoint(path: str | Path, map_location: Any = "cpu") -> LoadedCheckp
     payload = torch.load(Path(path), map_location=map_location, weights_only=False)
     state_dict, format_name = extract_state_dict(payload)
     metadata = dict(payload.get("apal_metadata", {})) if isinstance(payload, Mapping) else {}
+    if int(metadata.get("format_version", 0)) != FORMAT_VERSION:
+        raise ValueError(
+            "checkpoint 格式不兼容：当前实验架构仅接受 format_version=2；"
+            "旧模型必须按新的动作范围、编码器和池化配置重新训练。"
+        )
     saved_spec = metadata.get("model_spec")
     spec = ModelSpec(**saved_spec) if isinstance(saved_spec, Mapping) else infer_model_spec(state_dict)
     return LoadedCheckpoint(payload, state_dict, spec, metadata, format_name)
@@ -185,6 +202,12 @@ def apply_checkpoint_model_spec(
     inferred = {
         "use_skill_hub": spec.use_skill_hub,
         "skill_hub_bidirectional": spec.skill_hub_bidirectional,
+        "policy_action_scope": spec.policy_action_scope,
+        "workforce_binding_mode": spec.workforce_binding_mode,
+        "workforce_preallocation_ratio": spec.workforce_preallocation_ratio,
+        "team_selection_mode": spec.team_selection_mode,
+        "graph_encoder_mode": spec.graph_encoder_mode,
+        "actor_context_mode": spec.actor_context_mode,
     }
     for key in (
         "hidden_dim",

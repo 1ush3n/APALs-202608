@@ -44,12 +44,12 @@ VARIANTS: dict[str, RescheduleAblationVariant] = {
     "no_gat": RescheduleAblationVariant(
         "no_gat",
         "no_gat_model_path",
-        ("ablation_no_gat=true",),
+        ("graph_encoder_mode=none",),
     ),
     "no_attention": RescheduleAblationVariant(
         "no_attention",
         "no_attention_model_path",
-        ("use_attention_critic=false",),
+        ("actor_context_mode=mean_max",),
     ),
 }
 

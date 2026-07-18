@@ -34,6 +34,16 @@ class Config:
     heuristic_enable_mobile_skill_reserve: bool = True  # 新绑定不得破坏剩余工位—技能配额的启发式可满足性
     heuristic_team_candidate_pool: int = 10             # 每次组队参与组合搜索的移动工人候选上限
     heuristic_team_search_limit: int = 32               # 单个工序最多校验的候选团队数量
+
+    # ------------------
+    # 联合决策与消融实验语义（checkpoint 结构字段）
+    # ------------------
+    policy_action_scope: str = "operation_station_worker"
+    workforce_binding_mode: str = "endogenous"
+    workforce_preallocation_ratio: float = 1.0
+    team_selection_mode: str = "autoregressive"
+    graph_encoder_mode: str = "hetero_gat"
+    actor_context_mode: str = "attention"
     
     # ------------------
     # 模型超参数 (Model Hyperparameters)
@@ -258,8 +268,9 @@ class Config:
     
     kl_early_stop: float = 0.02            
     
-    use_autoregressive_worker: bool = True  
-    use_attention_critic: bool = True       
+    # 旧消融开关仅保留为字段级迁移诊断；新训练入口会拒绝启用它们。
+    use_autoregressive_worker: bool = True
+    use_attention_critic: bool = True
     
     ablation_no_mask: bool = False          
     ablation_no_gat: bool = False           

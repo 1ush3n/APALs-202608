@@ -88,9 +88,9 @@ def test_reschedule_ablation_variant_overrides_and_warm_starts(tmp_path: Path) -
 
     assert rows["full"].overrides == ""
     assert rows["no_gat"].warm_start_path == str(tmp_path / "no_gat.ckpt")
-    assert "ablation_no_gat=true" in rows["no_gat"].command
+    assert "graph_encoder_mode=none" in rows["no_gat"].command
     assert rows["no_attention"].warm_start_path == str(tmp_path / "no_attention.ckpt")
-    assert "use_attention_critic=false" in rows["no_attention"].command
+    assert "actor_context_mode=mean_max" in rows["no_attention"].command
 
 
 @pytest.mark.parametrize("variant", ["no_mask", "no_pointer", "no_skill_hub", "no_attention_pooling"])

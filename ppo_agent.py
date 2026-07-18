@@ -14,6 +14,7 @@ from contextlib import nullcontext
 from typing import Tuple, List, Dict, Optional, Any
 from torch_geometric.data import HeteroData
 from configs import configs
+from core.action_completion import EarliestFinishActionCompleter
 from worker_feature_layout import resolve_worker_feature_layout
 try:
     from schedulefree import AdamWScheduleFree
@@ -27,6 +28,7 @@ class PPOAgent:
     """
     def __init__(self, model, lr, gamma, k_epochs, eps_clip, device, batch_size=4, total_timesteps=0, config=None):
         self.config = config if config is not None else configs
+        self.action_completer = EarliestFinishActionCompleter(self.config)
         self.policy = model.to(device)
         
         from utils.gpu_graph_manager import GPUBatchGraphManager
@@ -46,7 +48,7 @@ class PPOAgent:
         for name, param in self.policy.named_parameters():
             if not param.requires_grad:
                 continue
-            if 'critic' in name or 'attn' in name:
+            if name.startswith("critic") or ".critic" in name:
                 critic_params.append(param)
             else:
                 actor_params.append(param)
@@ -494,6 +496,54 @@ class PPOAgent:
             
             # 鑾峰彇浠诲姟鐨勪汉鏁伴渶姹?
             demand = self.get_task_demand(obs['task'].x, t_idx)
+            action_scope = str(
+                getattr(self.config, "policy_action_scope", "operation_station_worker")
+            )
+            is_virtual_task = not bool(
+                (obs['task'].x[t_idx, 5 : 5 + int(self.config.num_skill_types)] > 0.5).any()
+            )
+            if is_virtual_task:
+                if compute_value:
+                    with self.autocast_context():
+                        state_value = active_policy.get_value(obs, actor_x_dict_encoded=x_dict)
+                else:
+                    state_value = torch.zeros((), device=self.device)
+                return (
+                    (t_idx, -1, []),
+                    float(task_logprob.item()),
+                    float(state_value.item()),
+                    None,
+                    False,
+                )
+
+            if action_scope == "operation":
+                task_station_mask = (
+                    mask_station_matrix[t_idx]
+                    if mask_station_matrix is not None
+                    else None
+                )
+                completed = self.action_completer.complete(
+                    obs,
+                    task_id=t_idx,
+                    station_mask=task_station_mask,
+                    worker_mask=mask_worker,
+                )
+                if completed is None:
+                    return None, 0.0, 0.0, None, True
+                if compute_value:
+                    with self.autocast_context():
+                        state_value = active_policy.get_value(
+                            obs, actor_x_dict_encoded=x_dict
+                        )
+                else:
+                    state_value = torch.zeros((), device=self.device)
+                return (
+                    (t_idx, completed.station_id, list(completed.team)),
+                    float(task_logprob.item()),
+                    float(state_value.item()),
+                    None,
+                    False,
+                )
             
             # ------------------
             # 2. 閫夋嫨绔欎綅 (Select Station)
@@ -529,6 +579,35 @@ class PPOAgent:
                     station_dist = Categorical(logits=station_logits.float())
                     station_action = station_dist.sample()
                     station_logprob = station_dist.log_prob(station_action)
+
+            if action_scope == "operation_station":
+                completed = self.action_completer.complete(
+                    obs,
+                    task_id=t_idx,
+                    station_mask=(
+                        specific_station_mask.reshape(-1)
+                        if specific_station_mask is not None
+                        else None
+                    ),
+                    worker_mask=mask_worker,
+                    selected_station=int(station_action.item()),
+                )
+                if completed is None:
+                    return None, 0.0, 0.0, None, True
+                if compute_value:
+                    with self.autocast_context():
+                        state_value = active_policy.get_value(
+                            obs, actor_x_dict_encoded=x_dict
+                        )
+                else:
+                    state_value = torch.zeros((), device=self.device)
+                return (
+                    (t_idx, completed.station_id, list(completed.team)),
+                    float((task_logprob + station_logprob).item()),
+                    float(state_value.item()),
+                    specific_station_mask,
+                    False,
+                )
                 
             # ------------------
             # 3. 閫夋嫨宸ヤ汉 (Select Workers) - 鑷洖褰?
@@ -805,6 +884,59 @@ class PPOAgent:
                 # 鑾峰彇璇ヤ换鍔＄殑宸ヤ汉浜烘暟闇€姹?
                 source_task_x = obs_list[i]['task'].x
                 demand = self.get_task_demand(source_task_x, t_idx)
+                action_scope = str(
+                    getattr(self.config, "policy_action_scope", "operation_station_worker")
+                )
+                is_virtual_task = not bool(
+                    (
+                        source_task_x[
+                            t_idx,
+                            5 : 5 + int(self.config.num_skill_types),
+                        ]
+                        > 0.5
+                    ).any()
+                )
+                if is_virtual_task:
+                    state_value_tensors.append(state_values_batch[i])
+                    decoded_actions.append((t_idx, 0, [], task_logprob, None))
+                    task_mask_refs.append(m_task)
+                    worker_mask_refs.append(None)
+                    eval_fail_flags.append(False)
+                    continue
+
+                if action_scope == "operation":
+                    raw_station_mask = mask_station_matrix_list[i]
+                    completed = self.action_completer.complete(
+                        obs_list[i],
+                        task_id=t_idx,
+                        station_mask=(
+                            raw_station_mask[t_idx]
+                            if raw_station_mask is not None
+                            else None
+                        ),
+                        worker_mask=mask_worker_list[i],
+                    )
+                    if completed is None:
+                        state_value_tensors.append(torch.tensor(0.0, device=self.device))
+                        decoded_actions.append((0, 1, [], torch.tensor(0.0, device=self.device), None))
+                        task_mask_refs.append(None)
+                        worker_mask_refs.append(None)
+                        eval_fail_flags.append(True)
+                        continue
+                    state_value_tensors.append(state_values_batch[i])
+                    decoded_actions.append(
+                        (
+                            t_idx,
+                            completed.station_id + 1,
+                            list(completed.team),
+                            task_logprob,
+                            None,
+                        )
+                    )
+                    task_mask_refs.append(m_task)
+                    worker_mask_refs.append(mask_worker_list[i])
+                    eval_fail_flags.append(False)
+                    continue
                 
                 # ------------------
                 # 2.2 閫夋嫨绔欎綅 (Select Station)
@@ -840,6 +972,40 @@ class PPOAgent:
                         station_dist = Categorical(logits=station_logits.float())
                         station_action = station_dist.sample()
                         station_logprob = station_dist.log_prob(station_action)
+
+                if action_scope == "operation_station":
+                    completed = self.action_completer.complete(
+                        obs_list[i],
+                        task_id=t_idx,
+                        station_mask=(
+                            specific_station_mask.reshape(-1)
+                            if specific_station_mask is not None
+                            else None
+                        ),
+                        worker_mask=mask_worker_list[i],
+                        selected_station=int(station_action.item()),
+                    )
+                    if completed is None:
+                        state_value_tensors.append(torch.tensor(0.0, device=self.device))
+                        decoded_actions.append((0, 1, [], torch.tensor(0.0, device=self.device), None))
+                        task_mask_refs.append(None)
+                        worker_mask_refs.append(None)
+                        eval_fail_flags.append(True)
+                        continue
+                    state_value_tensors.append(state_values_batch[i])
+                    decoded_actions.append(
+                        (
+                            t_idx,
+                            completed.station_id + 1,
+                            list(completed.team),
+                            task_logprob + station_logprob,
+                            specific_station_mask,
+                        )
+                    )
+                    task_mask_refs.append(m_task)
+                    worker_mask_refs.append(mask_worker_list[i])
+                    eval_fail_flags.append(False)
+                    continue
                 
                 # ------------------
                 # 2.3 閫夋嫨宸ヤ汉 (Select Workers) - 鑷洖褰?
@@ -1325,8 +1491,11 @@ class PPOAgent:
                     if torch.isnan(station_logits).any(): station_logits = torch.nan_to_num(station_logits, nan=(torch.finfo(station_logits.dtype).min / 2.0))
                     
                     station_dist = Categorical(logits=station_logits.float())
-                    station_lp = station_dist.log_prob(batch.y_station)
+                    physical_action = batch.y_station >= 0
+                    station_lp = station_dist.log_prob(torch.clamp(batch.y_station, min=0))
                     station_entropy = station_dist.entropy()
+                    station_lp = station_lp * physical_action.to(station_lp.dtype)
+                    station_entropy = station_entropy * physical_action.to(station_entropy.dtype)
                     
                     # C. Worker Team LogProb
                     worker_x, w_p_mask = to_dense_batch(x_dict['worker'], batch['worker'].batch)
@@ -1387,8 +1556,22 @@ class PPOAgent:
                         curr_mask = curr_mask.clone()
                         curr_mask[valid_b_indices, target[valid_step]] = True
                                 
-                    total_lp = task_lp + station_lp + team_lp
-                    entropy = task_entropy + station_entropy + team_entropy
+                    action_scope = str(
+                        getattr(
+                            self.config,
+                            "policy_action_scope",
+                            "operation_station_worker",
+                        )
+                    )
+                    if action_scope == "operation":
+                        total_lp = task_lp
+                        entropy = task_entropy
+                    elif action_scope == "operation_station":
+                        total_lp = task_lp + station_lp
+                        entropy = task_entropy + station_entropy
+                    else:
+                        total_lp = task_lp + station_lp + team_lp
+                        entropy = task_entropy + station_entropy + team_entropy
                     old_lp = batch.y_logprob.view(-1)
                     log_ratio, safe_log_ratio, ratios = self.compute_stable_log_ratio_and_ratio(total_lp, old_lp)
                     

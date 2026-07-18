@@ -217,7 +217,7 @@ def test_rollout_checkpoint_uses_reschedule_selection_score(tmp_path) -> None:
     assert callback.best_score == 0.7
 
 
-def test_reschedule_warm_start_loads_configured_initial_model(tmp_path) -> None:
+def test_reschedule_warm_start_rejects_legacy_raw_checkpoint(tmp_path) -> None:
     import torch
     from configs import configs
     from tests.runtime_safety import temporary_config
@@ -239,10 +239,8 @@ def test_reschedule_warm_start_loads_configured_initial_model(tmp_path) -> None:
         "reschedule_baseline_model_path": str(checkpoint_path),
     }
     with temporary_config(configs, overrides):
-        _maybe_load_reschedule_warm_start(target, torch.device("cpu"), resume=False)
-
-    assert torch.equal(target.weight, source.weight)
-    assert torch.equal(target.bias, source.bias)
+        with pytest.raises(ValueError, match="checkpoint 格式不兼容"):
+            _maybe_load_reschedule_warm_start(target, torch.device("cpu"), resume=False)
 
 
 def test_rollout_metrics_expose_expected_log_keys() -> None:

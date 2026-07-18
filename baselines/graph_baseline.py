@@ -34,6 +34,21 @@ def task_demand_from_obs(obs: HeteroData, task_idx: int) -> int:
     return task_demand_from_features(obs["task"].x, task_idx)
 
 
+def is_virtual_task_from_features(
+    task_x: torch.Tensor,
+    task_idx: int,
+    *,
+    config: Any = configs,
+) -> bool:
+    """虚拟层级节点没有工种独热编码，必须使用规范的空资源动作推进。"""
+    skill_start = 5
+    skill_end = skill_start + int(config.num_skill_types)
+    if task_x.size(1) < skill_end:
+        raise ValueError(f"任务特征维度不足: {task_x.size(1)} < {skill_end}")
+    skill_vector = task_x[int(task_idx), skill_start:skill_end]
+    return bool(torch.count_nonzero(skill_vector).item() == 0)
+
+
 def worker_static_mask_from_obs(
     obs: HeteroData,
     *,
@@ -336,6 +351,9 @@ def _decode_graph_action_from_encoded(
         deterministic=deterministic,
         temperature=temperature,
     )
+
+    if is_virtual_task_from_features(raw_task_x, task_idx, config=model.config):
+        return GraphActionResult((task_idx, -1, []), task_lp, value)
 
     station_mask = station_mask_matrix[task_idx].unsqueeze(0)
     selected_task_emb = task_embs[task_idx].unsqueeze(0)
