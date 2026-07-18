@@ -37,5 +37,7 @@ def test_input_layer_norm_independent_from_gat_layer_norm() -> None:
     assert isinstance(first_norms["worker"], nn.Identity)
     assert isinstance(first_norms["station"], nn.Identity)
 
-    assert isinstance(model.station_attn[1], nn.Identity)
-    assert isinstance(model.task_worker_attn[1], nn.Identity)
+    assert isinstance(model.actor_station_attn[1], nn.Identity)
+    assert isinstance(model.actor_task_worker_attn[1], nn.Identity)
+    assert isinstance(model.critic_station_attn[1], nn.Identity)
+    assert isinstance(model.critic_task_worker_attn[1], nn.Identity)

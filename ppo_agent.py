@@ -52,6 +52,8 @@ class PPOAgent:
                 critic_params.append(param)
             else:
                 actor_params.append(param)
+        self.actor_parameters = tuple(actor_params)
+        self.critic_parameters = tuple(critic_params)
         optimizer_params = [
             {'params': actor_params, 'lr': lr * actor_lr_multiplier, 'name': 'actor'},
             {'params': critic_params, 'lr': lr * critic_lr_multiplier, 'name': 'critic'},
@@ -1677,12 +1679,9 @@ class PPOAgent:
                     self.scaler.unscale_(self.optimizer)
                     
                     # 鐙珛鍙傛暟姊害瑁佸壀
-                    actor_params = [p for n, p in self.policy.named_parameters() if 'critic' not in n and 'attn' not in n]
-                    critic_params = [p for n, p in self.policy.named_parameters() if 'critic' in n or 'attn' in n]
-                    
-                    torch.nn.utils.clip_grad_norm_(actor_params, max_norm=0.5)
+                    torch.nn.utils.clip_grad_norm_(self.actor_parameters, max_norm=0.5)
                     # 缁?Critic 鎸傝杩滄瘮 Actor 鏇磋杽寮辩殑瑁呯敳锛岄槻姝㈠眬閮ㄨ剦鍐插甫宕╁叏鐩?
-                    torch.nn.utils.clip_grad_norm_(critic_params, max_norm=self.config.clip_v_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(self.critic_parameters, max_norm=self.config.clip_v_grad_norm)
                     
                     self.scaler.step(self.optimizer)
                     self.scaler.update()

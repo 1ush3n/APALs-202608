@@ -170,7 +170,11 @@ def test_ppo_select_action_single_env_low_memory() -> None:
         assert isinstance(action[2], list)
         assert isinstance(logprob, float)
         assert isinstance(value, float)
-        assert specific_station_mask is not None
+        if action[1] == -1:
+            assert action[2] == []
+            assert specific_station_mask is None
+        else:
+            assert specific_station_mask is not None
         assert not is_invalid
 
 
@@ -196,7 +200,11 @@ def test_ppo_select_actions_batch_two_envs_low_memory() -> None:
             assert action is not None
             assert isinstance(logprob, float)
             assert isinstance(value, float)
-            assert station_mask is not None
+            if action[1] == -1:
+                assert action[2] == []
+                assert station_mask is None
+            else:
+                assert station_mask is not None
             assert not is_invalid
 
 

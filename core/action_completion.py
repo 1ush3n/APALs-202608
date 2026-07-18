@@ -68,6 +68,14 @@ class EarliestFinishActionCompleter:
         skills = worker_x[:, self.worker_layout.skill_slice]
         locks = torch.argmax(worker_x[:, self.worker_layout.lock_slice], dim=1)
 
+        task_duration = float(task_x[int(task_id), 0].item())
+        worker_wait = torch.expm1(worker_x[:, self.worker_layout.wait_idx]).clamp_min(0.0)
+        station_wait = torch.expm1(station_x[:, 4]).clamp_min(0.0)
+        worker_capacity = (
+            worker_x[:, self.worker_layout.efficiency_idx]
+            * worker_x[:, self.worker_layout.fatigue_idx]
+        ).clamp_min(1.0e-6)
+
         best: tuple[tuple[float, float, int, tuple[int, ...]], CompletedResources] | None = None
         for station_id in station_candidates:
             if station_mask is not None and bool(station_mask.reshape(-1)[station_id].item()):
@@ -78,14 +86,31 @@ class EarliestFinishActionCompleter:
             worker_ids = torch.nonzero(legal, as_tuple=False).reshape(-1).tolist()
             if len(worker_ids) < demand:
                 continue
-            # worker_x[:, 0] 是基础效率；当前可用性已经由 worker_mask 保证。
-            worker_ids.sort(
-                key=lambda wid: (-float(worker_x[int(wid), 0].item()), int(wid))
+            team_list: list[int] = []
+            for _ in range(demand):
+                remaining = [wid for wid in worker_ids if wid not in team_list]
+
+                def candidate_finish(worker_id: int) -> tuple[float, int]:
+                    candidate_team = team_list + [int(worker_id)]
+                    ready = max(float(worker_wait[wid].item()) for wid in candidate_team)
+                    capacity = sum(float(worker_capacity[wid].item()) for wid in candidate_team)
+                    synergy = 0.95 ** (len(candidate_team) - 1)
+                    finish = max(ready, float(station_wait[station_id].item()))
+                    finish += task_duration * demand / max(capacity * synergy, 1.0e-6)
+                    return finish, int(worker_id)
+
+                team_list.append(min(remaining, key=candidate_finish))
+            team = tuple(team_list)
+            team_ready = max(float(worker_wait[wid].item()) for wid in team)
+            capacity_sum = sum(float(worker_capacity[wid].item()) for wid in team)
+            synergy = 0.95 ** (len(team) - 1)
+            estimated_finish = max(team_ready, float(station_wait[station_id].item()))
+            estimated_finish += task_duration * demand / max(
+                capacity_sum * synergy,
+                1.0e-6,
             )
-            team = tuple(int(wid) for wid in worker_ids[:demand])
-            efficiency_sum = sum(float(worker_x[wid, 0].item()) for wid in team)
             station_load = float(station_x[station_id, 0].item())
-            score = (station_load - efficiency_sum, station_load, station_id, team)
+            score = (estimated_finish, station_load, station_id, team)
             result = CompletedResources(station_id=station_id, team=team)
             if best is None or score < best[0]:
                 best = (score, result)
