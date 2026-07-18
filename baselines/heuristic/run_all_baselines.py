@@ -121,43 +121,39 @@ def select_heuristic_action(env, rule, es, ls):
         
     sorted_tasks = ready_tasks[sorted_idx]
     
-    selected_task = None
-    selected_station = None
-    
+    # 不能只检查优先级最高的一个任务：它可能暂时缺少技能工人，
+    # 但同一时刻的其他就绪任务仍然可行。直接返回 None 会把正常的
+    # 资源等待误判成死锁，尤其容易出现在 EDD/LPT 等规则中。
     for tid in sorted_tasks:
-        valid_stations = np.where(~station_mask[tid].numpy())[0] if hasattr(station_mask, 'numpy') else np.where(~station_mask[tid])[0]
-        if len(valid_stations) > 0:
-            selected_task = tid
-            if rule == "MSL":
-                # Min Station Load: 优先指派到当前负载最低的站位
-                loads = [env.station_loads[s] for s in valid_stations]
-                selected_station = int(valid_stations[np.argmin(loads)])
-            else:
-                # 默认：均指派到合法站位中负载最低的站位，以最大化平抑工位拥堵
-                loads = [env.station_loads[s] for s in valid_stations]
-                selected_station = int(valid_stations[np.argmin(loads)])
-            break
-            
-    if selected_task is None:
-        return None
-        
-    # 指派满足技能且站位锁兼容的可用工人
-    task_skill = int(env.task_static_feat[selected_task, 1].item())
-    num_workers_req = int(env.task_static_feat[selected_task, 2].item())
-    
-    skilled_available = []
-    for w in range(env.num_workers):
-        if env.worker_skill_matrix[w, task_skill] > 0.5:
-            if env.worker_locks[w] == 0 or env.worker_locks[w] == (selected_station + 1):
-                skilled_available.append(w)
-                
-    if len(skilled_available) < num_workers_req:
-        return None
-        
-    # 从可用工人中随机选择 (此处亦支持添加其他启发式策略)
-    selected_workers = np.random.choice(skilled_available, size=num_workers_req, replace=False).tolist()
-    
-    return (selected_task, selected_station, selected_workers)
+        valid_stations = np.where(~station_mask[tid].numpy())[0] if hasattr(station_mask[tid], 'numpy') else np.where(~station_mask[tid])[0]
+        if len(valid_stations) == 0:
+            continue
+
+        # 先按站位负荷尝试；若最低负荷站位没有足够技能工人，继续尝试
+        # 其他合法站位，而不是立即放弃当前任务。
+        ordered_stations = sorted(
+            (int(station_id) for station_id in valid_stations),
+            key=lambda station_id: (float(env.station_loads[station_id]), station_id),
+        )
+        task_skill = int(env.task_static_feat[tid, 1].item())
+        num_workers_req = int(env.task_static_feat[tid, 2].item())
+
+        for selected_station in ordered_stations:
+            skilled_available = []
+            for worker_id in range(env.num_workers):
+                if env.worker_skill_matrix[worker_id, task_skill] > 0.5:
+                    if env.worker_locks[worker_id] == 0 or env.worker_locks[worker_id] == (selected_station + 1):
+                        skilled_available.append(worker_id)
+
+            if len(skilled_available) < num_workers_req:
+                continue
+
+            # 从可用工人中随机选择 (此处亦支持添加其他启发式策略)
+            selected_workers = np.random.choice(skilled_available, size=num_workers_req, replace=False).tolist()
+            return (int(tid), selected_station, selected_workers)
+
+    # 所有就绪任务都暂时没有可行的站位/技能工人组合，才报告资源死锁。
+    return None
 
 def run_heuristic_eval(env, rule, num_runs=1, seed=42):
     """
@@ -176,7 +172,10 @@ def run_heuristic_eval(env, rule, num_runs=1, seed=42):
     deadlock_count = 0
     
     rule = str(rule).upper()
-    safe_decoder_rules = {"SPT", "CPM", "MSL"}
+    # EDD 也必须使用统一可行性解码器；直接逐步贪心会在技能工人
+    # 暂时不可用时误报死锁。解码器会保留 EDD 的 ES 优先级，同时
+    # 处理资源等待和硬约束。
+    safe_decoder_rules = {"SPT", "EDD", "CPM", "MSL"}
 
     for run in range(num_runs):
         run_seed = seed + run

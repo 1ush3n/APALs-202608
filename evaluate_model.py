@@ -43,6 +43,7 @@ from runtime.hydra_config import (
     should_show_help,
 )
 from runtime.evaluation import evaluate_model as run_evaluation
+from runtime.seed import set_seed
 from utils.visualization import plot_gantt
 
 
@@ -75,6 +76,8 @@ def _resolve_scenarios(args: Any) -> list[str] | tuple[str, ...]:
 
 def main(args: Any) -> dict[str, object]:
     explicit_fields = set(getattr(args, "explicit_config_fields", set()))
+    # 评估温度大于 0 时仍会进行动作采样；必须在加载模型和创建环境前锁定全局随机流。
+    set_seed(int(getattr(configs, "seed", 42)))
     context = None
     if uses_runs_layout(configs):
         context = create_run_context(configs, PROJECT_ROOT, create_dirs=True)

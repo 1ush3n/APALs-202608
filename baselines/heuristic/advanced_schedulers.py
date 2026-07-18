@@ -16,7 +16,7 @@ from baselines.heuristic.feasibility_decoder import (
 )
 
 
-SeedRule = Literal["SPT", "LPT", "CPM", "MSL", "Random"]
+SeedRule = Literal["SPT", "LPT", "EDD", "CPM", "MSL", "Random"]
 
 
 @dataclass
@@ -153,6 +153,10 @@ class AdvancedSchedulerBase:
             solution.task_priority = 1.0 - _normalize(durations)
         elif rule == "LPT":
             solution.task_priority = _normalize(durations)
+        elif rule == "EDD":
+            # EDD 以最早可开工时间 ES 为优先级；交给统一可行性解码器
+            # 处理技能、站位、工人锁和事件等待，避免直接贪心造成死锁。
+            solution.task_priority = 1.0 - _normalize(es)
         elif rule == "CPM":
             solution.task_priority = 1.0 - _normalize(ls)
         elif rule == "MSL":
