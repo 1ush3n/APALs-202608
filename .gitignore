@@ -6,6 +6,10 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Large historical archives stay outside the Git repository.
+/archive/*.7z
+/archive/*.zip
+
 # ============================================================
 # Python 打包 & 分发
 # ============================================================

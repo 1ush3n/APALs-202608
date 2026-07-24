@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from configs import configs, load_training_config
 from data_loader import load_data
 from environment import AirLineEnv_Graph
+from runtime.initial_worker_mapping import apply_initial_worker_mapping
 
 
 def _resolve_path(path_like: str | Path) -> Path:
@@ -27,14 +28,16 @@ def _resolve_path(path_like: str | Path) -> Path:
 def _load_optional_config(config_path: str | None, data_path: Path) -> None:
     if config_path:
         load_training_config([str(_resolve_path(config_path))], target=configs)
-        return
-    bucket = PROJECT_ROOT / "conf" / "env" / f"initial_bucket_{data_path.stem}.yaml"
-    default = PROJECT_ROOT / "conf" / "env" / "apal_default.yaml"
-    paths = [str(default)] if default.exists() else []
-    if bucket.exists():
-        paths.append(str(bucket))
-    if paths:
-        load_training_config(paths, target=configs)
+    else:
+        bucket = PROJECT_ROOT / "conf" / "env" / f"initial_bucket_{data_path.stem}.yaml"
+        default = PROJECT_ROOT / "conf" / "env" / "apal_default.yaml"
+        paths = [str(default)] if default.exists() else []
+        if bucket.exists():
+            paths.append(str(bucket))
+        if paths:
+            load_training_config(paths, target=configs)
+    # 与 evaluate_model.py / train_lightning.py 的真实数据集工人数口径一致。
+    apply_initial_worker_mapping(configs, data_path, explicit_fields=set())
 
 
 def _parse_team(raw: Any) -> list[int]:

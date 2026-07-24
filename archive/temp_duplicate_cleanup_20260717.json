@@ -1,0 +1,88 @@
+{
+  "cleanup_date": "2026-07-17",
+  "scope": "临时结果与未完成本地诊断目录清理",
+  "verification_policy": "先完成内容/哈希核验，再删除；不删除唯一结果证据",
+  "cleanup_items": [
+    {
+      "source": "results/Beam",
+      "classification": "temporary_duplicate",
+      "deletion_status": "deleted",
+      "source_file_count": 8,
+      "archived_target": "results/02_initial_baselines/initial_search_high_budget_fiveskill_seed42_20260717_111936/Beam",
+      "hash_verified": true,
+      "notes": "源目录包含 resolved_config.yaml、run_manifest.json，以及 283/680 的 Beam metrics、schedule、run.log；剥离外层 Beam 包装目录后与正式归档文件逐个 SHA-256 一致。"
+    },
+    {
+      "source": "results/tmp_sa_run_2338",
+      "classification": "incomplete_temporary_diagnostics",
+      "deletion_status": "deleted",
+      "source_file_count": 8,
+      "archived_target": "results/02_initial_baselines/initial_search_high_budget_fiveskill_seed42_20260717_111936/SA/2338",
+      "hash_verified": false,
+      "result_artifacts_present": false,
+      "notes": "仅有启动日志、resolved_config、run_manifest 与测试日志；没有 metrics.json、schedule.csv、baselines_summary.csv 或 checkpoint，启动停在 SA Running 阶段。正式 2338 结果已由 SA 归档目录保存。"
+    },
+    {
+      "source": "results/tmp_sa_run_3182",
+      "classification": "incomplete_temporary_diagnostics",
+      "deletion_status": "deleted",
+      "source_file_count": 3,
+      "archived_target": "results/02_initial_baselines/initial_search_high_budget_fiveskill_seed42_20260717_111949/SA/3182",
+      "hash_verified": false,
+      "result_artifacts_present": false,
+      "notes": "仅有启动日志、resolved_config、run_manifest；没有 metrics.json、schedule.csv、baselines_summary.csv 或 checkpoint，启动停在数据集开始阶段。正式 3182 结果已由 SA 归档目录保存。"
+    },
+    {
+      "source": "runs/sa_pending_2338",
+      "classification": "empty_temporary_directory",
+      "deletion_status": "deleted",
+      "source_file_count": 0,
+      "archived_target": null,
+      "hash_verified": true,
+      "notes": "空目录，无实验文件。"
+    },
+    {
+      "source": "results/02_initial_baselines/eval_logs_rules_and_flat_rl",
+      "classification": "empty_legacy_scaffold",
+      "deletion_status": "deleted",
+      "source_file_count": 0,
+      "archived_target": "archive/experiments_pre_20260717_buggy_version/results/02_initial_baselines/eval_logs_rules_and_flat_rl",
+      "hash_verified": true,
+      "notes": "该目录及其 12 个方法子目录均为空；旧版本文件已在 archive/experiments_pre_20260717_buggy_version 中保留。"
+    },
+    {
+      "source": "pytest_tmp",
+      "classification": "test_fixture_temporary",
+      "deletion_status": "blocked_acl",
+      "source_file_count": 1,
+      "archived_target": null,
+      "hash_verified": true,
+      "notes": "pytest 失败测试生成的 dangling.csv，不属于实验结果；删除操作被 OneDrive ACL 拒绝。"
+    },
+    {
+      "source": "tests/.pytest_tmp_checkpoint",
+      "classification": "test_fixture_temporary",
+      "deletion_status": "blocked_acl",
+      "source_file_count": 2,
+      "archived_target": null,
+      "hash_verified": true,
+      "notes": "测试用 model.ckpt/model.pth，不属于训练实验 checkpoint；删除操作被 OneDrive ACL 拒绝。"
+    },
+    {
+      "source": ".pytest_cache",
+      "classification": "test_cache_temporary",
+      "deletion_status": "blocked_acl",
+      "source_file_count": 0,
+      "archived_target": null,
+      "hash_verified": true,
+      "notes": "pytest 缓存目录，无实验结果；删除操作被 OneDrive ACL 拒绝。"
+    }
+  ],
+  "cleanup_complete": false,
+  "acl_blocked_items": ["pytest_tmp", "tests/.pytest_tmp_checkpoint", ".pytest_cache"],
+  "unique_result_files_deleted": false,
+  "formal_archives_preserved": [
+    "results/02_initial_baselines/initial_search_high_budget_fiveskill_seed42_20260717_111936/Beam",
+    "results/02_initial_baselines/initial_search_high_budget_fiveskill_seed42_20260717_111949/SA"
+  ]
+}

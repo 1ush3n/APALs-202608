@@ -8,6 +8,7 @@ import platform
 import random
 import sys
 import time
+import traceback
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -97,9 +98,12 @@ class GraphDDQNAgent:
         seed = int(getattr(configs, "seed", 42))
         self.action_np_rng = np.random.default_rng(seed + 1701)
         self.action_py_rng = random.Random(seed + 1703)
-        self.model = GraphDDQNAPAL(configs).to(device)
-        self.target_model = GraphDDQNAPAL(configs).to(device)
+        # DDQN 保持 FP32 主权重，训练/推理由 autocast 临时使用 FP16；
+        # 这样不会因服务器 checkpoint 或全局 AMP 设置把 Linear 权重永久留在 Half。
+        self.model = GraphDDQNAPAL(configs).to(device).float()
+        self.target_model = GraphDDQNAPAL(configs).to(device).float()
         self.target_model.load_state_dict(self.model.state_dict())
+        self.target_model.float()
         self.target_model.eval()
         self.optimizer = optim.AdamW(
             self.model.parameters(),
@@ -167,7 +171,9 @@ class GraphDDQNAgent:
     def select_action(self, obs: HeteroData, masks: tuple[torch.Tensor, torch.Tensor, torch.Tensor], *, deterministic: bool = False) -> tuple[int, int, list[int]] | None:
         if (not deterministic) and self.action_np_rng.random() <= self.epsilon:
             return self.random_action(obs, masks)
-        with torch.inference_mode():
+        # 动作选择也必须与 replay/update 使用同一 AMP 上下文；否则服务器
+        # 半精度模型权重会接收到 float32 图特征，在线性层处触发 Half/Float 错误。
+        with torch.inference_mode(), self._autocast():
             result = select_graph_action(
                 self.model,
                 obs,
@@ -201,7 +207,9 @@ class GraphDDQNAgent:
             else:
                 exploit_indices.append(index)
         if exploit_indices:
-            with torch.inference_mode():
+            # 向量 rollout 的批量 GNN 前向同样置于 autocast，保证输入/权重
+            # dtype 由 PyTorch AMP 统一协调。
+            with torch.inference_mode(), self._autocast():
                 results = select_graph_actions_batch(
                     self.model,
                     [observations[index] for index in exploit_indices],
@@ -513,7 +521,9 @@ class GraphDDQNAgent:
                     ]
             profile["next_action_sec"] = stage_end(started)
 
-            target_q = torch.zeros_like(current_q)
+            # current_q 在 AMP 下可能是 Half；target_q 用 FP32 保存，避免后续
+            # 对索引位置写入 FP32 target_q_valid 时触发 Half/Float 冲突。
+            target_q = torch.zeros_like(current_q, dtype=torch.float32)
             valid_indices = [idx for idx, action in enumerate(next_actions) if action is not None]
             if valid_indices:
                 valid_actions = [next_actions[idx] for idx in valid_indices]
@@ -544,7 +554,9 @@ class GraphDDQNAgent:
                         valid_masks,
                         sample_indices=valid_indices,
                     )
-                target_q[torch.tensor(valid_indices, dtype=torch.long, device=self.device)] = target_q_valid
+                target_q[torch.tensor(valid_indices, dtype=torch.long, device=self.device)] = (
+                    target_q_valid.float()
+                )
                 profile["target_q_sec"] = stage_end(started)
             else:
                 profile["target_q_sec"] = 0.0
@@ -776,6 +788,15 @@ def _dataset_index_for_episode(dataset_count: int, episode: int, seed: int) -> i
     return int(episode) % int(dataset_count)
 
 
+def _training_randomization_flags(episode: int) -> tuple[bool, bool]:
+    """复用主方法训练阶段的随机化开关，不改变评估逻辑。"""
+    enabled = bool(
+        getattr(configs, "randomize_durations", True)
+        and int(episode) > int(getattr(configs, "curriculum_episodes", 0))
+    )
+    return enabled, enabled
+
+
 def _realized_utd(agent: GraphDDQNAgent, scheduler: DatasetUTDScheduler) -> float:
     if scheduler.transitions_after_warmup <= 0:
         return 0.0
@@ -818,6 +839,7 @@ def _train_vectorized(
         init_timeout_sec=float(getattr(configs, "vector_env_init_timeout_sec", 120.0)),
         command_timeout_sec=float(getattr(configs, "vector_env_command_timeout_sec", 120.0)),
     )
+    use_ipc_fusion = bool(getattr(configs, "ddqn_enable_ipc_fusion", True))
     eval_freq = max(1, int(getattr(configs, "eval_freq", 1)))
     vector_round = 0
     episode_cursor = int(start_episode)
@@ -833,26 +855,37 @@ def _train_vectorized(
             )
             active_indices = list(range(len(wave_episodes)))
             episode_by_index = dict(zip(active_indices, wave_episodes))
+            # 与主方法保持公平：一次向量 wave 共享一个训练数据集，不能让不同
+            # worker 各自抽样导致每轮有效训练分布不一致。
+            shared_dataset_idx = _dataset_index_for_episode(
+                int(train_env.dataset_count),
+                wave_episodes[0],
+                seed,
+            )
             dataset_by_index = {
-                index: _dataset_index_for_episode(
-                    int(train_env.dataset_count),
-                    episode,
-                    seed,
-                )
-                for index, episode in episode_by_index.items()
+                index: shared_dataset_idx for index in active_indices
             }
-            vector_env.switch_dataset_indices(dataset_by_index)
+            vector_env.switch_dataset_all(shared_dataset_idx)
             states = vector_env.reset_indices(
                 {
                     index: {
-                        "randomize_duration": False,
-                        "randomize_workers": False,
+                        "randomize_duration": _training_randomization_flags(
+                            episode_by_index[index]
+                        )[0],
+                        "randomize_workers": _training_randomization_flags(
+                            episode_by_index[index]
+                        )[1],
                         "seed": seed + episode_by_index[index],
                     }
                     for index in active_indices
                 }
             )
             dones = {index: False for index in active_indices}
+            rollout_states = vector_env.get_rollout_state_indices(active_indices)
+            for index in active_indices:
+                states[index] = vector_env.envs[index].rebuild_state_from_snapshot(
+                    rollout_states[index][1]
+                )
             rewards_sum = {index: 0.0 for index in active_indices}
             invalid_counts = {index: 0 for index in active_indices}
             step_counts = {index: 0 for index in active_indices}
@@ -867,7 +900,6 @@ def _train_vectorized(
                 running = [index for index in active_indices if not dones[index]]
                 if not running:
                     break
-                rollout_states = vector_env.get_rollout_state_indices(running)
 
                 while True:
                     waiting = [
@@ -877,16 +909,31 @@ def _train_vectorized(
                     ]
                     if not waiting:
                         break
-                    wait_results = vector_env.try_wait_for_resources_indices(waiting)
+                    if use_ipc_fusion:
+                        fused_wait = vector_env.wait_rollout_indices(waiting)
+                        wait_results = {
+                            index: fused_wait[index][0] for index in waiting
+                        }
+                    else:
+                        fused_wait = {}
+                        wait_results = vector_env.try_wait_for_resources_indices(waiting)
                     failed = [index for index in waiting if not wait_results[index]]
                     for index in failed:
                         invalid_counts[index] += 1
                         dones[index] = True
                     refreshed = [index for index in waiting if wait_results[index]]
                     if refreshed:
-                        rollout_states.update(
-                            vector_env.get_rollout_state_indices(refreshed)
-                        )
+                        if use_ipc_fusion:
+                            rollout_states.update(
+                                {
+                                    index: (fused_wait[index][1], fused_wait[index][2])
+                                    for index in refreshed
+                                }
+                            )
+                        else:
+                            rollout_states.update(
+                                vector_env.get_rollout_state_indices(refreshed)
+                            )
                         for index in refreshed:
                             states[index] = vector_env.envs[index].rebuild_state_from_snapshot(
                                 rollout_states[index][1]
@@ -927,10 +974,26 @@ def _train_vectorized(
                 if not actions:
                     continue
 
-                step_results = vector_env.step_snapshot_indices(actions)
-                next_rollout_states = vector_env.get_rollout_state_indices(
-                    sorted(actions)
-                )
+                if use_ipc_fusion:
+                    fused_steps = vector_env.step_rollout_indices(actions)
+                    step_results = {
+                        index: (
+                            fused_steps[index][1],
+                            fused_steps[index][2],
+                            fused_steps[index][3],
+                            fused_steps[index][4],
+                        )
+                        for index in sorted(actions)
+                    }
+                    next_rollout_states = {
+                        index: (fused_steps[index][0], fused_steps[index][1])
+                        for index in sorted(actions)
+                    }
+                else:
+                    step_results = vector_env.step_snapshot_indices(actions)
+                    next_rollout_states = vector_env.get_rollout_state_indices(
+                        sorted(actions)
+                    )
                 for index in sorted(actions):
                     next_snapshot, reward, step_done, info = step_results[index]
                     next_masks, authoritative_next_snapshot = next_rollout_states[index]
@@ -977,6 +1040,10 @@ def _train_vectorized(
                         states[index] = vector_env.envs[index].rebuild_state_from_snapshot(
                             authoritative_next_snapshot
                         )
+                        rollout_states[index] = (
+                            next_masks,
+                            authoritative_next_snapshot,
+                        )
 
                 if (
                     progress_interval_steps > 0
@@ -1021,6 +1088,7 @@ def _train_vectorized(
                         "updates_per_transition": float(scheduler.updates_per_transition),
                         "effective_utd": float(_realized_utd(agent, scheduler)),
                         "vector_num_envs": float(num_envs),
+                        "ipc_fusion": float(use_ipc_fusion),
                     }
                 )
 
@@ -1208,7 +1276,12 @@ def train(args: Any) -> None:
     for episode in range(start_episode, max_episodes + 1):
         dataset_idx = select_episode_dataset(train_env, episode, seed)
         episode_seed = seed + episode
-        state = train_env.reset(randomize_duration=False, randomize_workers=False, seed=episode_seed)
+        randomize_duration, randomize_workers = _training_randomization_flags(episode)
+        state = train_env.reset(
+            randomize_duration=randomize_duration,
+            randomize_workers=randomize_workers,
+            seed=episode_seed,
+        )
         done = False
         total_reward = 0.0
         total_loss = 0.0
@@ -1402,6 +1475,8 @@ def main(argv: list[str] | None = None) -> int:
         train(args)
     except (HydraCliError, KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
         print(f"[CLI] {exc}", file=sys.stderr)
+        # 训练服务器上保留完整 traceback，避免 GPU dtype/IPC 错误只剩一句摘要。
+        traceback.print_exc(file=sys.stderr)
         return 2
     return 0
 

@@ -1,0 +1,33 @@
+{
+  "archive_date": "2026-07-18",
+  "purpose": "两组有限步数初始调度训练结果归档与临时目录清理",
+  "verification": {
+    "copy_integrity": true,
+    "target_manifest_rechecked": true,
+    "unique_result_files_deleted": false,
+    "generated_pycache_removed": true
+  },
+  "items": [
+    {
+      "source_temporary_dir": "results/initial_hbgatppo_async_680_seed42_260717-164542",
+      "archive_dir": "results/01_initial_main/initial_hbgatppo_async_680_seed42_260717-164542",
+      "source_file_count": 166,
+      "source_to_archive_sha256_match": true,
+      "status": "partial_training",
+      "scope": "real_680, seed42, 77/300 episodes"
+    },
+    {
+      "source_temporary_dir": "results/l2d_ppo_apal_initial_scale400_800_fiveskill_seed42_260717-224236",
+      "archive_dir": "results/02_initial_baselines/l2d_ppo_apal_initial_scale400_800_fiveskill_seed42_260717-224236",
+      "source_file_count": 9,
+      "source_to_archive_sha256_match": true,
+      "status": "partial_training",
+      "scope": "real_680, seed42, 200/4800 train metric rows"
+    }
+  ],
+  "master_table": {
+    "path": "results/experiment_master_results.csv",
+    "rows_added": 2,
+    "strict_main_table_eligible": false
+  }
+}

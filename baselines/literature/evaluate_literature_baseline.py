@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from baselines.literature.common import LITERATURE_FEATURE_MODE, evaluate_graph_policy, resolve_project_path
 from baselines.literature_dqn.train_graph_ddqn_apal import GraphDDQNAPAL
-from baselines.literature_ppo.train_l2d_ppo_apal import L2DPPOAPAL
+from baselines.literature_ppo.train_l2d_ppo_apal import SimpleHeteroGATPPO
 from configs import configs, load_config_files
 from environment import AirLineEnv_Graph
 from runtime.artifacts import resolve_run_output_dir, write_run_context_files, write_run_manifest
@@ -64,8 +64,13 @@ def _apply_model_config(checkpoint: dict[str, Any]) -> None:
 def _build_model(checkpoint: dict[str, Any], device: torch.device) -> torch.nn.Module:
     _apply_model_config(checkpoint)
     model_type = str(checkpoint.get("model_type", ""))
-    if model_type == "L2DPPOAPAL" or checkpoint.get("algorithm") == "L2D-PPO-APAL":
-        model = L2DPPOAPAL(configs)
+    if (
+        model_type in {"L2DPPOAPAL", "SimpleHeteroGATPPO"}
+        or checkpoint.get("algorithm") in {"L2D-PPO-APAL", "Simple-HeteroGAT-PPO"}
+    ):
+        # 新版训练代码将原 L2D 适配器重命名为 Simple-HeteroGAT-PPO；
+        # 保留旧 checkpoint 标识的兼容映射，确保历史与新版 checkpoint 均可验证。
+        model = SimpleHeteroGATPPO(configs)
     elif model_type == "GraphDDQNAPAL" or checkpoint.get("algorithm") == "Graph-DDQN-APAL":
         model = GraphDDQNAPAL(configs)
     else:

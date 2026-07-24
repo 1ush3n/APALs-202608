@@ -1,0 +1,14 @@
+{
+  "cleanup_date": "2026-07-17",
+  "source": "results/SA_pending",
+  "target": "results/02_initial_baselines/initial_search_high_budget_fiveskill_seed42_20260717_111949/SA",
+  "source_file_count": 14,
+  "copy_sha256_verified": true,
+  "independent_schedule_audit": {
+    "datasets": ["real_2338", "real_3182"],
+    "strict_legal": 2,
+    "hard_constraint_violations": 0
+  },
+  "source_removed": true,
+  "notes": "SA 2338/3182 已与既有 283/680 合并为四数据集单种子结果；保留逐运行 provenance、原始日志和复制校验。"
+}

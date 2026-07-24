@@ -22,6 +22,7 @@ from runtime.artifacts import (
     write_run_manifest,
 )
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint, load_policy_weights
+from runtime.initial_worker_mapping import apply_initial_worker_mapping
 from runtime.hydra_config import (
     ExtraArgument,
     HydraCliError,
@@ -52,6 +53,11 @@ def generate_schedule(
         configs, checkpoint.model_spec, explicit_fields=explicit_fields,
     )
     resolved_data_path = resolve_path(data_path or configs.data_file_path, PROJECT_ROOT)
+    apply_initial_worker_mapping(
+        configs,
+        resolved_data_path,
+        explicit_fields=explicit_fields,
+    )
     context = create_run_context(configs, PROJECT_ROOT, create_dirs=True) if write_context and uses_runs_layout(configs) else None
     default_output = (context.eval_dir / "final_schedule.csv") if context is not None else Path(configs.result_dir) / "final_schedule.csv"
     target = resolve_path(output_path or default_output, PROJECT_ROOT)

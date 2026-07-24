@@ -35,6 +35,7 @@ from runtime.checkpoints import (
     load_checkpoint,
     load_policy_weights,
 )
+from runtime.initial_worker_mapping import apply_initial_worker_mapping
 from runtime.hydra_config import (
     ExtraArgument,
     HydraCliError,
@@ -93,6 +94,17 @@ def main(args: Any) -> dict[str, object]:
     if args.test_data:
         configs.data_file_path = args.test_data
     data_path = resolve_path(configs.data_file_path, PROJECT_ROOT)
+    mapped_workers = apply_initial_worker_mapping(
+        configs,
+        data_path,
+        explicit_fields=explicit_fields,
+    )
+    if mapped_workers is not None:
+        print(
+            f"[InitialEnv] dataset={data_path.name} legacy_worker_count={mapped_workers} "
+            f"max_slots_per_station={int(configs.max_slots_per_station)}",
+            flush=True,
+        )
     if args.output_dir:
         output_dir = resolve_path(args.output_dir, PROJECT_ROOT)
     elif context is not None and "result_dir" not in explicit_fields:

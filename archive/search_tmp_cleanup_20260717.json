@@ -1,0 +1,16 @@
+{
+  "cleanup_date": "2026-07-17",
+  "sources": [
+    "results/tmp/Beam",
+    "results/tmp/SA"
+  ],
+  "targets": [
+    "results/02_initial_baselines/initial_search_high_budget_fiveskill_seed42_20260717_111936/Beam",
+    "results/02_initial_baselines/initial_search_high_budget_fiveskill_seed42_20260717_111949/SA"
+  ],
+  "pre_delete_source_file_count_each": 8,
+  "copy_sha256_verified": true,
+  "source_removed": true,
+  "temporary_parent_removed": true,
+  "notes": "仅删除已完成复制、逐文件 SHA-256 校验和主表登记后的临时下载目录；2338/3182 未完成证据不在源目录中，因此不能据此推断实验已完成。"
+}

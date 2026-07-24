@@ -192,8 +192,10 @@ class Config:
     ppo_batch_size_cap: int = 0             # 0 表示不限制；平台配置可设置显存安全上限
     ddqn_updates_per_transition: float = 0.125  # DDQN 固定 update-to-data ratio
     ddqn_enable_batched_replay: bool = True     # 批量执行 next-action 图前向
-    ddqn_enable_vector_env: bool = False        # 通过等价性与性能门槛后再默认开启
+    ddqn_enable_vector_env: bool = True         # 使用平台配置的多进程环境并行采样
     ddqn_num_envs: int = 1                     # DDQN rollout 环境数；平台配置覆盖
+    ddqn_enable_ipc_fusion: bool = True        # 仅 DDQN 向量 rollout 使用融合 IPC
+    literature_ppo_enable_vector_env: bool = True  # 文献 PPO 复用主方法向量 rollout
     ddqn_enable_gpu_batch_rebuild: bool = False # DDQN current/next 双模板 GPU 重建
     ddqn_enable_profiler: bool = True           # 低频记录 replay 分阶段耗时
     ddqn_profile_interval_updates: int = 20
