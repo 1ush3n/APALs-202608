@@ -14,6 +14,7 @@ from runtime.checkpoints import build_model_spec, infer_model_spec
 from runtime.configuration import validate_runtime_config
 from tests.runtime_safety import temporary_config
 from training.memory import Memory
+from utils.gpu_graph_manager import GPUBatchGraphManager
 from worker_feature_layout import resolve_worker_feature_layout
 
 
@@ -230,6 +231,26 @@ def test_snapshot_rebuild_preserves_each_vector_env_duration_perturbation() -> N
             rebuilt["task"].x[:, 0],
             secondary_obs["task"].x[:, 0],
         )
+
+
+def test_gpu_batch_rebuild_preserves_each_snapshot_duration_perturbation() -> None:
+    """GPU 批量重建必须保留每个 APAL 环境各自的任务工时底座。"""
+    with temporary_config(configs, _small_overrides(randomize_durations=True)):
+        first_env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        second_env = AirLineEnv_Graph(DATA_PATH, seed=43)
+        first_env.reset(randomize_duration=True, seed=42)
+        second_env.reset(randomize_duration=True, seed=43)
+        snapshots = [first_env.get_state_snapshot(), second_env.get_state_snapshot()]
+        manager = GPUBatchGraphManager(torch.device("cpu"), config=configs)
+        batch = manager.batched_rebuild_on_gpu(snapshots, first_env)
+        task_count = first_env.num_tasks
+        for batch_index, snapshot in enumerate(snapshots):
+            start = batch_index * task_count
+            end = start + task_count
+            torch.testing.assert_close(
+                batch["task"].x[start:end, 0].cpu(),
+                snapshot["base_task_x"][:, 0].cpu(),
+            )
 
 
 def test_gated_team_action_is_legal_in_single_batch_and_ppo_update() -> None:

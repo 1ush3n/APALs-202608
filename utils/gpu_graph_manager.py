@@ -99,6 +99,7 @@ class GPUBatchGraphManager:
             raise ValueError("GPU Batch 重建收到空 snapshots")
         required_keys = (
             'worker_free_time',
+            'base_task_x',
             'base_worker_x',
             'current_time',
             'task_status',
@@ -128,7 +129,17 @@ class GPUBatchGraphManager:
         
         # 2. 覆盖静态特征以防污染
         # ① Task 静态特征
-        batch_template['task'].x = ctx['base_task_x'].to(t_device).repeat(batch_size, 1)
+        base_task_x_batch = torch.cat(
+            [torch.as_tensor(snap['base_task_x']) for snap in snapshots],
+            dim=0,
+        ).to(t_device)
+        expected_task_shape = (batch_size * num_tasks, ctx['base_task_x'].size(1))
+        if tuple(base_task_x_batch.shape) != expected_task_shape:
+            raise ValueError(
+                "GPU Batch 快照任务特征形状不一致: "
+                f"actual={tuple(base_task_x_batch.shape)}, expected={expected_task_shape}"
+            )
+        batch_template['task'].x = base_task_x_batch
         # ② Worker 静态特征 (需根据每个 snapshot 实际被选中的工人 base_worker_x 拼接)
         base_worker_x_batch = torch.cat(
             [torch.as_tensor(snap['base_worker_x']) for snap in snapshots],
