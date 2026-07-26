@@ -280,6 +280,43 @@ def test_vector_env_fused_rollout_matches_legacy_state_queries() -> None:
                 vec_env.close()
 
 
+def test_vector_env_snapshot_rebuild_preserves_per_worker_duration_noise() -> None:
+    """代理端重建必须使用各子进程快照中的扰动工时，而非共享静态上下文。"""
+    seed_everything(461)
+    overrides = {
+        "n_w": 40,
+        "n_m": 5,
+        "randomize_durations": True,
+        "enable_dynamic_events": False,
+        "enable_station_breakdown": False,
+        "enable_material_delay": False,
+    }
+
+    vec_env = None
+    with temporary_config(configs, overrides):
+        make_env = EnvCreator(str(PROJECT_ROOT / "data" / "283.csv"), seed_offset=461)
+        vec_env = VectorEnv(make_env, num_envs=2)
+        try:
+            _masks, snapshots = vec_env.reset_rollout_all(
+                randomize_duration=True,
+                randomize_workers=False,
+            )
+            assert all("base_task_x" in snapshot for snapshot in snapshots)
+            assert not np.array_equal(
+                np.asarray(snapshots[0]["base_task_x"])[:, 0],
+                np.asarray(snapshots[1]["base_task_x"])[:, 0],
+            )
+            for proxy, snapshot in zip(vec_env.envs, snapshots, strict=True):
+                rebuilt = proxy.rebuild_state_from_snapshot(snapshot)
+                np.testing.assert_allclose(
+                    rebuilt["task"].x[:, 0].detach().cpu().numpy(),
+                    np.asarray(snapshot["base_task_x"])[:, 0],
+                )
+        finally:
+            if vec_env is not None:
+                vec_env.close()
+
+
 def test_vector_env_fused_wait_preserves_event_driven_queue_semantics() -> None:
     """融合等待必须先推进到未来事件，不能把暂时无资源误报为死锁。"""
     seed_everything(47)

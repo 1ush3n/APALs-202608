@@ -39,9 +39,10 @@ class VectorEnvWorkerError(RuntimeError):
 def _snapshot_to_ipc(snapshot: dict) -> dict:
     """只转换 snapshot 中可能触发 Torch 共享内存传输的张量。"""
     result = dict(snapshot)
-    base_worker_x = result.get("base_worker_x")
-    if torch.is_tensor(base_worker_x):
-        result["base_worker_x"] = base_worker_x.detach().cpu().numpy()
+    for key in ("base_task_x", "base_worker_x"):
+        value = result.get(key)
+        if torch.is_tensor(value):
+            result[key] = value.detach().cpu().numpy().copy()
     return result
 
 
@@ -422,7 +423,17 @@ class EnvProxy:
         data = ctx['base_data'].clone()
         
         # 1. 重建任务节点特征
-        task_x = ctx['base_task_x'].clone()
+        snapshot_task_x = snapshot.get('base_task_x')
+        task_x = (
+            torch.as_tensor(snapshot_task_x).clone()
+            if snapshot_task_x is not None
+            else ctx['base_task_x'].clone()
+        )
+        if task_x.shape != ctx['base_task_x'].shape:
+            raise ValueError(
+                "向量环境快照任务特征形状与数据集上下文不一致: "
+                f"snapshot={tuple(task_x.shape)}, context={tuple(ctx['base_task_x'].shape)}"
+            )
         task_x[:, 1:5] = 0.0
         task_x[torch.arange(ctx['num_tasks']), snapshot['task_status'] + 1] = 1.0
         
