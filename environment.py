@@ -1876,6 +1876,8 @@ class AirLineEnv_Graph(gym.Env):
             'station_wall_clock': self.station_wall_clock.copy(),
             'current_time': self.current_time,
             'assigned_tasks': list(self.assigned_tasks),
+            # 每个向量环境可具有独立的工时扰动；PPO 重建时必须保留该副本。
+            'base_task_x': self.base_task_x.clone(),
             'base_worker_x': self.base_worker_x.clone(),
             'dataset_idx': getattr(self, 'active_dataset_idx', 0),
             'worker_topology_key': self._active_worker_topology_key,
@@ -1983,7 +1985,17 @@ class AirLineEnv_Graph(gym.Env):
         else:
             data = ctx['base_data'].clone()
         
-        task_x = ctx['base_task_x'].clone()
+        snapshot_task_x = snapshot.get('base_task_x')
+        task_x = (
+            torch.as_tensor(snapshot_task_x).clone()
+            if snapshot_task_x is not None
+            else ctx['base_task_x'].clone()
+        )
+        if task_x.shape != ctx['base_task_x'].shape:
+            raise ValueError(
+                "快照 task 特征形状与数据集上下文不一致: "
+                f"snapshot={tuple(task_x.shape)}, context={tuple(ctx['base_task_x'].shape)}"
+            )
         task_x[:, 1:5] = 0.0
         task_x[torch.arange(ctx['num_tasks']), snapshot['task_status'] + 1] = 1.0
         

@@ -218,6 +218,20 @@ def test_gated_team_batch_decoding_preserves_apal_legality() -> None:
             assert not info.get("invalid_action", False)
 
 
+def test_snapshot_rebuild_preserves_each_vector_env_duration_perturbation() -> None:
+    with temporary_config(configs, _small_overrides(randomize_durations=True)):
+        primary_env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        secondary_env = AirLineEnv_Graph(DATA_PATH, seed=43)
+        primary_env.reset(randomize_duration=True, seed=42)
+        secondary_obs = secondary_env.reset(randomize_duration=True, seed=43)
+        snapshot = secondary_env.get_state_snapshot()
+        rebuilt = primary_env.rebuild_state_from_snapshot(snapshot)
+        torch.testing.assert_close(
+            rebuilt["task"].x[:, 0],
+            secondary_obs["task"].x[:, 0],
+        )
+
+
 def test_gated_team_action_is_legal_in_single_batch_and_ppo_update() -> None:
     with temporary_config(configs, _small_overrides()):
         env = AirLineEnv_Graph(DATA_PATH, seed=42)
