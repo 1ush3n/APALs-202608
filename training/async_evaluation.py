@@ -11,9 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from runtime.initial_checkpoint_selection import (
+    InitialCheckpointSelectionManifest,
+    load_initial_checkpoint_selection_manifest,
+    sha256_file,
+)
+
 
 class AsyncEvaluationError(RuntimeError):
-    """异步验证进程或队列进入不可恢复状态。"""
+    """异步验证进程、队列或最优模型发布进入不可恢复状态。"""
 
 
 @dataclass(frozen=True)
@@ -27,7 +33,11 @@ class AsyncEvalPaths:
     results: Path
     state: Path
     heartbeat: Path
+    heartbeats: Path
     worker_lock: Path
+    worker_locks: Path
+    result_lock: Path
+    selection_lock: Path
     stop_when_idle: Path
 
     @classmethod
@@ -42,8 +52,13 @@ class AsyncEvalPaths:
             failed=root / "queue" / "failed",
             results=root / "results",
             state=root / "state",
+            # 保留旧字段路径，仅用于兼容历史目录；新 worker 使用 worker_locks。
             heartbeat=root / "state" / "worker_heartbeat.json",
+            heartbeats=root / "state" / "heartbeats",
             worker_lock=root / "state" / "worker.lock",
+            worker_locks=root / "state" / "workers",
+            result_lock=root / "state" / "results.lock",
+            selection_lock=root / "state" / "selection.lock",
             stop_when_idle=root / "state" / "stop_when_idle",
         )
         for directory in (
@@ -54,6 +69,8 @@ class AsyncEvalPaths:
             paths.failed,
             paths.results,
             paths.state,
+            paths.heartbeats,
+            paths.worker_locks,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         return paths
@@ -64,15 +81,12 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
 
 
 def atomic_link_or_copy(source: Path, destination: Path) -> None:
-    """优先硬链接，跨设备或权限不允许时退化为原子复制。"""
+    """优先硬链接，跨设备时退化为原子复制。"""
     source = Path(source)
     destination = Path(destination)
     if not source.is_file():
@@ -84,6 +98,21 @@ def atomic_link_or_copy(source: Path, destination: Path) -> None:
             os.link(source, temporary)
         except OSError:
             shutil.copy2(source, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def atomic_copy_file(source: Path, destination: Path) -> None:
+    """原子复制文件，确保目标与源文件绝不共享 inode。"""
+    source = Path(source)
+    destination = Path(destination)
+    if not source.is_file():
+        raise FileNotFoundError(f"checkpoint 源文件不存在: {source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        shutil.copy2(source, temporary)
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
@@ -119,8 +148,17 @@ def process_is_alive(pid: int) -> bool:
     return True
 
 
+def restore_interrupted_jobs(paths: AsyncEvalPaths) -> None:
+    """仅在确认不存在存活 worker 后，将中断任务放回 pending。"""
+    for running_path in sorted(paths.running.glob("*.json")):
+        pending_path = paths.pending / running_path.name
+        if pending_path.exists():
+            raise AsyncEvaluationError(f"恢复任务冲突: {pending_path}")
+        running_path.replace(pending_path)
+
+
 class AsyncEvaluationManager:
-    """在训练进程中管理有界异步验证队列和独立 CPU worker。"""
+    """管理可恢复、有界、可并行的 CPU 异步验证队列。"""
 
     def __init__(
         self,
@@ -136,76 +174,114 @@ class AsyncEvaluationManager:
         self.project_root = Path(project_root).resolve()
         self.paths = AsyncEvalPaths.create(self.latest_path.parent / "async_eval")
         self.capacity = int(config.async_eval_queue_capacity)
+        self.worker_count = int(getattr(config, "async_eval_worker_count", 1))
         self.poll_interval = float(config.async_eval_poll_interval_sec)
         self.heartbeat_interval = float(config.async_eval_heartbeat_interval_sec)
         self.stale_timeout = float(config.async_eval_stale_timeout_sec)
-        self._process: subprocess.Popen[str] | None = None
-        self._started_at = 0.0
+        self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._started_at = time.monotonic()
         self._last_wait_log = 0.0
+        self.selection_manifest = self._load_selection_manifest()
         self.paths.stop_when_idle.unlink(missing_ok=True)
+        self._remove_stale_worker_locks()
+        active_pids = self._active_worker_pids()
+        if active_pids:
+            raise AsyncEvaluationError(
+                "异步验证目录已有存活 worker，拒绝与另一训练进程共享队列: "
+                f"pids={sorted(active_pids)}"
+            )
+        restore_interrupted_jobs(self.paths)
         if self._failed_jobs():
             self._check_health()
         if self._active_job_count() > 0:
-            self._start_worker()
+            self._start_workers()
+
+    def _load_selection_manifest(self) -> InitialCheckpointSelectionManifest | None:
+        if bool(getattr(self.config, "enable_reschedule_mode", False)):
+            return None
+        protocol = str(
+            getattr(self.config, "checkpoint_selection_protocol", "single_standard")
+        ).strip().lower()
+        if protocol != "multiscale_manifest":
+            return None
+        return load_initial_checkpoint_selection_manifest(
+            self.config.checkpoint_selection_manifest_path
+        )
 
     def _active_job_count(self) -> int:
-        return len(tuple(self.paths.pending.glob("*.json"))) + len(
-            tuple(self.paths.running.glob("*.json"))
-        )
+        return len(tuple(self.paths.pending.glob("*.json"))) + len(tuple(self.paths.running.glob("*.json")))
 
     def _failed_jobs(self) -> list[Path]:
         return sorted(self.paths.failed.glob("*.json"))
 
-    def _start_worker(self) -> None:
-        if self._process is not None and self._process.poll() is None:
-            return
-        if self.paths.worker_lock.exists():
+    def _remove_stale_worker_locks(self) -> None:
+        self.paths.worker_lock.unlink(missing_ok=True)
+        for lock_path in self.paths.worker_locks.glob("*.lock"):
             try:
-                lock_pid = int(self.paths.worker_lock.read_text(encoding="ascii").strip())
+                pid = int(lock_path.read_text(encoding="ascii").strip())
             except (OSError, ValueError):
-                lock_pid = -1
-            if process_is_alive(lock_pid):
-                raise AsyncEvaluationError(
-                    f"异步验证队列已有活动 worker: pid={lock_pid} "
-                    f"lock={self.paths.worker_lock}"
-                )
-            self.paths.worker_lock.unlink(missing_ok=True)
-        self.paths.heartbeat.unlink(missing_ok=True)
-        env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = ""
-        thread_count = str(int(self.config.async_eval_cpu_threads))
-        for name in (
-            "OMP_NUM_THREADS",
-            "MKL_NUM_THREADS",
-            "OPENBLAS_NUM_THREADS",
-            "NUMEXPR_NUM_THREADS",
-            "VECLIB_MAXIMUM_THREADS",
-        ):
-            env[name] = thread_count
-        env["APAL_ASYNC_EVAL_CPU_THREADS"] = thread_count
-        command = [
-            sys.executable,
-            "-m",
-            "training.async_eval_worker",
-            "--queue-root",
-            str(self.paths.root),
-            "--project-root",
-            str(self.project_root),
-            "--heartbeat-interval",
-            str(self.heartbeat_interval),
-        ]
-        self._process = subprocess.Popen(
-            command,
-            cwd=str(self.project_root),
-            env=env,
-            text=True,
-        )
+                pid = -1
+            if not process_is_alive(pid):
+                lock_path.unlink(missing_ok=True)
+
+    def _active_worker_pids(self) -> set[int]:
+        pids: set[int] = set()
+        for lock_path in self.paths.worker_locks.glob("*.lock"):
+            try:
+                pid = int(lock_path.read_text(encoding="ascii").strip())
+            except (OSError, ValueError):
+                continue
+            if process_is_alive(pid):
+                pids.add(pid)
+        return pids
+
+    def _start_workers(self) -> None:
+        self._remove_stale_worker_locks()
+        self._processes = {
+            worker_id: process
+            for worker_id, process in self._processes.items()
+            if process.poll() is None
+        }
+        external_pids = self._active_worker_pids() - {process.pid for process in self._processes.values()}
+        if external_pids:
+            raise AsyncEvaluationError(
+                f"异步验证队列已有外部 worker: pids={sorted(external_pids)}"
+            )
+        for _ in range(self.worker_count - len(self._processes)):
+            worker_id = f"worker_{uuid.uuid4().hex}"
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = ""
+            thread_count = str(int(self.config.async_eval_cpu_threads))
+            for name in (
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "OPENBLAS_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS",
+            ):
+                env[name] = thread_count
+            env["APAL_ASYNC_EVAL_CPU_THREADS"] = thread_count
+            command = [
+                sys.executable,
+                "-m",
+                "training.async_eval_worker",
+                "--queue-root",
+                str(self.paths.root),
+                "--project-root",
+                str(self.project_root),
+                "--heartbeat-interval",
+                str(self.heartbeat_interval),
+                "--worker-id",
+                worker_id,
+            ]
+            process = subprocess.Popen(command, cwd=str(self.project_root), env=env, text=True)
+            self._processes[worker_id] = process
+            print(
+                f"[AsyncEval] worker_id={worker_id} pid={process.pid} device=cpu "
+                f"threads={thread_count} workers={self.worker_count} capacity={self.capacity}",
+                flush=True,
+            )
         self._started_at = time.monotonic()
-        print(
-            f"[AsyncEval] worker_pid={self._process.pid} device=cpu "
-            f"threads={thread_count} capacity={self.capacity}",
-            flush=True,
-        )
 
     def _check_health(self) -> None:
         failed = self._failed_jobs()
@@ -214,25 +290,27 @@ class AsyncEvaluationManager:
             raise AsyncEvaluationError(
                 f"异步验证失败: job={failed[0].name} error={payload.get('error', 'unknown')}"
             )
-        if self._process is not None:
-            return_code = self._process.poll()
+        for worker_id, process in self._processes.items():
+            return_code = process.poll()
             if return_code not in (None, 0):
-                raise AsyncEvaluationError(f"异步验证 worker 异常退出: returncode={return_code}")
-            if return_code == 0 and self._active_job_count() > 0:
-                raise AsyncEvaluationError("异步验证 worker 已退出，但队列仍有未完成任务")
+                raise AsyncEvaluationError(
+                    f"异步验证 worker 异常退出: worker={worker_id} returncode={return_code}"
+                )
         if self._active_job_count() <= 0:
             return
-        if self.paths.heartbeat.exists():
-            age = time.time() - self.paths.heartbeat.stat().st_mtime
-        else:
-            age = time.monotonic() - self._started_at
+        live_processes = [process for process in self._processes.values() if process.poll() is None]
+        if not live_processes:
+            raise AsyncEvaluationError("异步验证队列仍有任务，但没有存活 worker")
+        heartbeat_files = list(self.paths.heartbeats.glob("*.json"))
+        latest_heartbeat = max((path.stat().st_mtime for path in heartbeat_files), default=0.0)
+        age = time.time() - latest_heartbeat if latest_heartbeat else time.monotonic() - self._started_at
         if age > self.stale_timeout:
             raise AsyncEvaluationError(
                 f"异步验证 worker 心跳超时: age={age:.1f}s limit={self.stale_timeout:.1f}s"
             )
 
     def _wait_for_slot(self) -> None:
-        self._start_worker()
+        self._start_workers()
         while self._active_job_count() >= self.capacity:
             self._check_health()
             now = time.monotonic()
@@ -252,12 +330,7 @@ class AsyncEvaluationManager:
         job_name = f"episode_{int(episode):06d}.json"
         collisions = [
             directory / job_name
-            for directory in (
-                self.paths.pending,
-                self.paths.running,
-                self.paths.done,
-                self.paths.failed,
-            )
+            for directory in (self.paths.pending, self.paths.running, self.paths.done, self.paths.failed)
             if (directory / job_name).exists()
         ]
         if collisions:
@@ -271,18 +344,24 @@ class AsyncEvaluationManager:
             temporary.replace(candidate)
         finally:
             temporary.unlink(missing_ok=True)
-        atomic_link_or_copy(candidate, self.latest_path)
+        candidate_sha256 = sha256_file(candidate)
+        # latest 是训练进程后续会持续覆写的可变 checkpoint，绝不能与候选文件共享 inode。
+        atomic_copy_file(candidate, self.latest_path)
 
         if bool(getattr(self.config, "enable_reschedule_mode", False)):
             evaluation_kind = "reschedule"
+        elif self.selection_manifest is not None:
+            evaluation_kind = "initial_multi_benchmark"
         else:
             evaluation_kind = "initial_standard"
 
-        job = {
-            "format_version": 1,
+        job: dict[str, Any] = {
+            "format_version": 2,
             "episode": int(episode),
             "candidate_path": str(candidate.resolve()),
+            "candidate_sha256": candidate_sha256,
             "best_path": str(self.best_path),
+            "result_dir": str((self.paths.results / f"episode_{int(episode):06d}").resolve()),
             "evaluation_kind": evaluation_kind,
             "temperature": float(self.config.eval_temperature),
             "max_retries": int(self.config.async_eval_max_retries),
@@ -293,48 +372,57 @@ class AsyncEvaluationManager:
         if evaluation_kind == "reschedule":
             job["instance_id"] = str(self.config.async_eval_instance_id)
             job["scenario_id"] = str(self.config.async_eval_scenario_id)
+        elif evaluation_kind == "initial_multi_benchmark":
+            assert self.selection_manifest is not None
+            job["instance_id"] = "real_283_680_2338_3182"
+            job["scenario_id"] = "standard"
+            job["selection_manifest"] = self.selection_manifest.as_job_payload()
         else:
             job["instance_id"] = Path(str(self.config.async_eval_initial_data_path)).stem
             job["scenario_id"] = "standard"
         job_path = self.paths.pending / job_name
         atomic_write_json(job_path, job)
         print(
-            f"[AsyncEval] ep={episode} 已入队 "
-            f"kind={evaluation_kind} target={job['instance_id']}/{job['scenario_id']} "
+            f"[AsyncEval] ep={episode} 已入队 kind={evaluation_kind} "
+            f"target={job['instance_id']}/{job['scenario_id']} "
             f"active={self._active_job_count()}/{self.capacity}",
             flush=True,
         )
         return candidate
 
     def finalize(self, *, wait: bool) -> None:
-        if self._process is None:
-            return
-        if not wait:
+        if not self._processes or not wait:
             return
         self.paths.stop_when_idle.touch(exist_ok=True)
-        while self._process.poll() is None:
+        while any(process.poll() is None for process in self._processes.values()):
             self._check_health()
             time.sleep(self.poll_interval)
         self._check_health()
-        print("[AsyncEval] 队列已清空，worker 正常退出。", flush=True)
+        print("[AsyncEval] 队列已清空，所有 worker 正常退出。", flush=True)
 
     def terminate_for_exception(self) -> None:
         """异常退出时保留 pending/running/candidate，供下次启动恢复。"""
-        if self._process is None or self._process.poll() is not None:
-            return
-        self._process.terminate()
-        try:
-            self._process.wait(timeout=10.0)
-        except subprocess.TimeoutExpired:
-            self._process.kill()
-            self._process.wait(timeout=10.0)
+        for process in self._processes.values():
+            if process.poll() is not None:
+                continue
+            process.terminate()
+        for process in self._processes.values():
+            if process.poll() is not None:
+                continue
+            try:
+                process.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10.0)
 
 
 __all__ = [
     "AsyncEvalPaths",
     "AsyncEvaluationError",
     "AsyncEvaluationManager",
+    "atomic_copy_file",
     "atomic_link_or_copy",
     "atomic_write_json",
     "process_is_alive",
+    "restore_interrupted_jobs",
 ]

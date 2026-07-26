@@ -159,7 +159,11 @@ class Config:
     async_eval_device: str = "cpu"
     async_eval_cpu_threads: int = 4
     async_eval_queue_capacity: int = 4
+    async_eval_worker_count: int = 1
+    async_eval_submit_every_episodes: int = 1
     async_eval_initial_data_path: str = "data/680.csv"
+    checkpoint_selection_protocol: str = "single_standard"
+    checkpoint_selection_manifest_path: str = ""
     async_eval_instance_id: str = "real_680"
     async_eval_scenario_id: str = "medium_000"
     async_eval_wait_on_finish: bool = True

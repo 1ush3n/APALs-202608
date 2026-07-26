@@ -10,6 +10,7 @@ import torch
 from configs import Config, configs, load_training_config
 from runtime.artifacts import run_context as create_run_context
 from runtime.artifacts import uses_runs_layout
+from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
 from runtime.paths import PROJECT_ROOT
 
 
@@ -195,13 +196,26 @@ def validate_runtime_config(config: Config) -> None:
     if int(getattr(config, "eval_mask_mismatch_max_retries_per_time", 16)) < 1:
         raise ValueError("eval_mask_mismatch_max_retries_per_time 必须大于 0")
     if bool(getattr(config, "async_eval_enabled", False)):
+        selection_protocol = str(
+            getattr(config, "checkpoint_selection_protocol", "single_standard")
+        ).strip().lower()
+        if selection_protocol not in {"single_standard", "multiscale_manifest"}:
+            raise ValueError(
+                "checkpoint_selection_protocol 仅支持 single_standard 或 multiscale_manifest"
+            )
         if str(getattr(config, "async_eval_device", "cpu")).lower() != "cpu":
             raise ValueError("async_eval_device 当前必须为 cpu，训练进程独占 GPU")
         if int(getattr(config, "async_eval_cpu_threads", 4)) < 1:
             raise ValueError("async_eval_cpu_threads 必须大于 0")
         if int(getattr(config, "async_eval_queue_capacity", 4)) < 1:
             raise ValueError("async_eval_queue_capacity 必须大于 0")
+        if int(getattr(config, "async_eval_worker_count", 1)) < 1:
+            raise ValueError("async_eval_worker_count 必须大于 0")
+        if int(getattr(config, "async_eval_submit_every_episodes", 1)) < 1:
+            raise ValueError("async_eval_submit_every_episodes 必须大于 0")
         if bool(getattr(config, "enable_reschedule_mode", False)):
+            if selection_protocol != "single_standard":
+                raise ValueError("重调度异步验证不支持 multiscale_manifest checkpoint 选择")
             if not str(getattr(config, "async_eval_instance_id", "")).strip():
                 raise ValueError("重调度异步验证的 async_eval_instance_id 不能为空")
             if not str(getattr(config, "async_eval_scenario_id", "")).strip():
@@ -210,7 +224,16 @@ def validate_runtime_config(config: Config) -> None:
             scenarios = [str(item).lower() for item in getattr(config, "eval_scenarios", [])]
             if scenarios != ["standard"]:
                 raise ValueError("初始调度单实例异步验证仅支持 eval_scenarios=[standard]")
-            if not str(getattr(config, "async_eval_initial_data_path", "")).strip():
+            if selection_protocol == "multiscale_manifest":
+                manifest_path = str(
+                    getattr(config, "checkpoint_selection_manifest_path", "")
+                ).strip()
+                if not manifest_path:
+                    raise ValueError(
+                        "multiscale_manifest checkpoint 选择必须配置 checkpoint_selection_manifest_path"
+                    )
+                load_initial_checkpoint_selection_manifest(manifest_path)
+            elif not str(getattr(config, "async_eval_initial_data_path", "")).strip():
                 raise ValueError("初始调度异步验证的 async_eval_initial_data_path 不能为空")
         if not math.isclose(float(getattr(config, "eval_temperature", 0.0)), 0.0, abs_tol=1e-12):
             raise ValueError("异步 best 选择要求 eval_temperature=0.0")

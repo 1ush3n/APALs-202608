@@ -1,0 +1,44 @@
+{
+  "format_version": 1,
+  "protocol_id": "initial_real4_temperature0_cross_scale_selection_v1",
+  "role": "cross_scale_selection_screening",
+  "method_scope": "HB-GAT-PPO main method only; not a final test protocol",
+  "evaluation": {
+    "temperature": 0.0,
+    "seed": 42,
+    "scenario": "standard",
+    "randomize_durations": false,
+    "randomize_workers": false,
+    "dynamic_events": false
+  },
+  "normalization": {
+    "name": "fixed_environment_ideal_makespan_lower_bound",
+    "description": "仅用于平衡四个 APAL 规模在 checkpoint 选择中的权重；不是任一算法的比较基线。"
+  },
+  "instances": [
+    {
+      "instance_id": "real_283",
+      "data_path": "data/283.csv",
+      "sha256": "4059f36706bef9539278bd035b8fa8056611bf5af1eefda0625c78b9c64244e1",
+      "reference_makespan": 136.29200439453126
+    },
+    {
+      "instance_id": "real_680",
+      "data_path": "data/680.csv",
+      "sha256": "5171c1c1bfcc532b469f351f8482b2c2d7deb83baf3f1aab44ee8783c909125d",
+      "reference_makespan": 620.29794921875
+    },
+    {
+      "instance_id": "real_2338",
+      "data_path": "data/2338.csv",
+      "sha256": "fd9186d7760b96cd7e4bbe1b7a674f9985225d7cf53404568edfff78fc3e7b20",
+      "reference_makespan": 1626.851953125
+    },
+    {
+      "instance_id": "real_3182",
+      "data_path": "data/3182.csv",
+      "sha256": "c28f16f6ead443e56db9a2fecd3a599fe6ef137806586224b45f544e08248a45",
+      "reference_makespan": 2167.4619140625
+    }
+  ]
+}

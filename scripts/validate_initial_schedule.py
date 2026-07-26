@@ -25,7 +25,10 @@ def _resolve_path(path_like: str | Path) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
-def _load_optional_config(config_path: str | None, data_path: Path) -> None:
+def _load_optional_config(config_path: str | None, data_path: Path, *, config_obj: Any | None = None) -> None:
+    if config_obj is not None:
+        apply_initial_worker_mapping(config_obj, data_path, explicit_fields=set())
+        return
     if config_path:
         load_training_config([str(_resolve_path(config_path))], target=configs)
     else:
@@ -98,10 +101,11 @@ def validate_schedule(
     data_path: Path,
     schedule_path: Path,
     config_path: str | None = None,
+    config_obj: Any | None = None,
     task_id_mode: str = "auto",
     tolerance: float = 1e-5,
 ) -> dict[str, Any]:
-    _load_optional_config(config_path, data_path)
+    _load_optional_config(config_path, data_path, config_obj=config_obj)
     raw = load_data(data_path)
     task_df = raw["task_df"].copy().sort_values("internal_id").reset_index(drop=True)
     schedule = pd.read_csv(schedule_path)

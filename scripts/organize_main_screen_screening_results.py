@@ -25,6 +25,8 @@ RESULTS_ROOT = PROJECT_ROOT / "results"
 M0_SOURCE = RESULTS_ROOT / "initial_main_screen_m0_full_joint_warmstart_seed42_20260723_135559"
 M0_DOWNLOAD_SNAPSHOT = RESULTS_ROOT / "screen_m0_full_joint_warmstart_seed42_20260723_135559"
 M1_SOURCE = RESULTS_ROOT / "screen_m1_stableppo_warmstart_seed42_20260723_163837"
+M2_SOURCE = RESULTS_ROOT / "screen_m2_scg_context_warmstart_seed42_20260724_111651"
+M2_FAILED_LAUNCH = RESULTS_ROOT / "screen_m2_scg_context_warmstart_seed42_20260724_111016"
 ARCHIVE_ROOT = RESULTS_ROOT / "90_legacy_and_smoke"
 
 
@@ -319,10 +321,72 @@ def archive_m1(remove_sources: bool) -> Path:
     return target
 
 
+def write_readme_m2(root: Path, metrics: dict[str, Any], best_sha256: str, last_sha256: str) -> None:
+    """写入 M2 的训练筛查说明，避免训练期指标被误作正式验证。"""
+    eval_metric = metrics["Eval/makespan"]
+    lines = [
+        "# M2：SCG 尺度门控上下文快速筛查",
+        "",
+        "- 实验身份：`screening_only`；仅测试 actor 全局上下文读出，不进入正式主表性能比较。",
+        "- 初始化：从 `joint100_full_joint_seed42_20260719` 的 best checkpoint 加载共享权重；10 个 SCG 专属参数按筛查模块初始化，未恢复优化器状态。",
+        "- 训练：14 个 rollout/update 点、13 个训练期自动评估点；最优 Eval/makespan=`483.337860 h`，最后=`492.940491 h`。",
+        "- 结论：训练期最优值劣于 M0 full warm-start 的 `449.596467 h`，故为负向筛查证据；不建议合并到正式主方法。",
+        "- 独立验证：本次下载包不含 `eval/`、`schedule.csv` 或 `legality_audit.json`，尚无四实例独立合法性验证。",
+        f"- checkpoint：best SHA-256=`{best_sha256}`；last SHA-256=`{last_sha256}`。二者不同，均保留。",
+        "- 可复核文件：`training_metrics.csv`、`training_metric_summary.json`、`integrity_check.json`、`copy_integrity_check.json`、`file_manifest.json`。",
+    ]
+    (root / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def archive_m2(remove_sources: bool) -> Path:
+    """归档 M2 训练结果和此前导入失败的最小证据。"""
+    target = ARCHIVE_ROOT / "initial_main_screen_m2_scg_context_warmstart_seed42_20260724_111651"
+    copy_and_verify(M2_SOURCE, target)
+    failed_target = target / "provenance" / "failed_launch_20260724_111016"
+    assert M2_FAILED_LAUNCH.is_dir(), f"M2 失败启动记录不存在：{M2_FAILED_LAUNCH}"
+    shutil.copytree(M2_FAILED_LAUNCH, failed_target)
+    failed_before = source_manifest(M2_FAILED_LAUNCH)
+    failed_after = source_manifest(failed_target)
+    assert failed_before == failed_after, "M2 失败启动证据复制哈希不一致"
+
+    metrics = scalar_rows(target)
+    summary = metric_summary(metrics)
+    assert "Eval/makespan" in summary, "M2 缺少训练期 Eval/makespan"
+    best = target / "checkpoints" / "best.ckpt"
+    last = target / "checkpoints" / "last.ckpt"
+    assert best.is_file() and last.is_file(), "M2 缺少 best 或 last checkpoint"
+    best_sha256 = sha256(best)
+    last_sha256 = sha256(last)
+    integrity = {
+        "training_only": True,
+        "screen_model": "scg",
+        "training_update_points": len({int(row["step"]) for row in metrics if row["tag"] == "Rollout/AverageReward"}),
+        "training_eval_points": int(summary["Eval/makespan"]["count"]),
+        "training_best_eval_makespan": float(summary["Eval/makespan"]["min"]),
+        "training_last_eval_makespan": float(summary["Eval/makespan"]["last"]),
+        "independent_schedule_validation_present": False,
+        "best_checkpoint_sha256": best_sha256,
+        "last_checkpoint_sha256": last_sha256,
+        "checkpoints_identical": best_sha256 == last_sha256,
+        "strict_main_table_eligible": False,
+        "reason": "SCG 快速筛查且未下载独立四实例排程与合法性审计；训练期自动评估不能替代正式验证。",
+        "failed_launch_evidence": "provenance/failed_launch_20260724_111016",
+    }
+    write_csv(target / "training_metrics.csv", metrics)
+    write_json(target / "training_metric_summary.json", summary)
+    write_json(target / "integrity_check.json", integrity)
+    write_readme_m2(target, summary, best_sha256, last_sha256)
+    write_file_manifest(target)
+    if remove_sources:
+        shutil.rmtree(M2_SOURCE)
+        shutil.rmtree(M2_FAILED_LAUNCH)
+    return target
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--remove-sources", action="store_true", help="仅在复制与哈希校验成功后删除三个 results 根目录临时来源")
-    parser.add_argument("--only", choices=("m0", "m1"), help="只归档指定筛查批次；用于中断后的安全续作")
+    parser.add_argument("--only", choices=("m0", "m1", "m2"), help="只归档指定筛查批次；用于中断后的安全续作")
     args = parser.parse_args()
     ARCHIVE_ROOT.mkdir(parents=True, exist_ok=True)
     targets: list[Path] = []
@@ -330,6 +394,8 @@ def main() -> None:
         targets.append(archive_m0(args.remove_sources))
     if args.only in (None, "m1"):
         targets.append(archive_m1(args.remove_sources))
+    if args.only in (None, "m2"):
+        targets.append(archive_m2(args.remove_sources))
     print(json.dumps({"archived": [str(path) for path in targets], "removed_sources": args.remove_sources}, ensure_ascii=False))
 
 

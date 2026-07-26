@@ -89,6 +89,33 @@ def test_lightning_module_uses_manual_optimization_contract() -> None:
     assert module.last_eval_metrics == {"makespan": 1.0}
 
 
+def test_rollout_data_module_uses_absolute_episode_range_after_resume() -> None:
+    service = _RolloutService()
+    data = APALDataModule(service, max_episodes=10, start_episode=7)
+
+    updates = list(data.train_dataloader())
+
+    assert [update.episode for update in updates] == [7, 8, 9, 10]
+    assert len(data) == 4
+
+
+def test_resume_start_episode_rejects_misaligned_checkpoint() -> None:
+    from train_lightning import _resume_start_episode
+
+    valid = {
+        "apal_metadata": {"episode": 33},
+        "loops": {"fit_loop": {"epoch_loop.batch_progress": {"total": {"completed": 32}}}},
+    }
+    assert _resume_start_episode(valid) == 34
+
+    corrupted = {
+        "apal_metadata": {"episode": 4},
+        "loops": {"fit_loop": {"epoch_loop.batch_progress": {"total": {"completed": 36}}}},
+    }
+    with pytest.raises(ValueError, match="不一致"):
+        _resume_start_episode(corrupted)
+
+
 def test_lightning_module_skips_logging_and_eval_on_oom_update() -> None:
     agent = _OOMAgent()
     service = _RolloutService()

@@ -39,9 +39,41 @@ from training.async_evaluation import AsyncEvaluationManager
 from utils.vector_env import EnvCreator, VectorEnv
 from runtime.artifacts import run_context as create_run_context, uses_runs_layout, write_run_context_files, write_run_manifest
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
+from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _resume_start_episode(checkpoint_payload: object) -> int:
+    """校验已保存 PPO episode 与 Lightning 循环进度，并返回下一轮绝对 episode。"""
+    if not isinstance(checkpoint_payload, dict):
+        raise TypeError("续训 checkpoint payload 必须为字典")
+    metadata = checkpoint_payload.get("apal_metadata", {})
+    if not isinstance(metadata, dict):
+        raise ValueError("续训 checkpoint 缺少 apal_metadata")
+    completed_episode = int(metadata.get("episode", 0))
+    if completed_episode < 0:
+        raise ValueError(f"续训 checkpoint 的 episode 非法: {completed_episode}")
+
+    loops = checkpoint_payload.get("loops", {})
+    fit_loop = loops.get("fit_loop", {}) if isinstance(loops, dict) else {}
+    progress = (
+        fit_loop.get("epoch_loop.batch_progress", {})
+        if isinstance(fit_loop, dict)
+        else {}
+    )
+    total_progress = progress.get("total", {}) if isinstance(progress, dict) else {}
+    batch_completed = total_progress.get("completed") if isinstance(total_progress, dict) else None
+    if batch_completed is not None:
+        expected_episode = int(batch_completed) + 1
+        if completed_episode != expected_episode:
+            raise ValueError(
+                "续训 checkpoint 的 APAL episode 与 Lightning batch 进度不一致；"
+                f"apal_episode={completed_episode}, lightning_expected={expected_episode}。"
+                "该 checkpoint 可能来自旧版错误续训，拒绝继续以避免训练、异步评估和 checkpoint 标签错位。"
+            )
+    return completed_episode + 1
 
 
 def _apply_reschedule_eval_manifest_override() -> None:
@@ -97,6 +129,23 @@ def _validate_async_eval_target() -> None:
     if not bool(getattr(configs, "async_eval_enabled", False)):
         return
     if not bool(getattr(configs, "enable_reschedule_mode", False)):
+        protocol = str(
+            getattr(configs, "checkpoint_selection_protocol", "single_standard")
+        ).strip().lower()
+        if protocol == "multiscale_manifest":
+            manifest = load_initial_checkpoint_selection_manifest(
+                configs.checkpoint_selection_manifest_path
+            )
+            targets = ", ".join(
+                f"{entry.instance_id}:{entry.data_path.name}" for entry in manifest.entries
+            )
+            print(
+                f"[AsyncEval] target=initial_multi_benchmark "
+                f"protocol={manifest.protocol_id} role={manifest.role} "
+                f"instances=[{targets}] seed={manifest.seed}",
+                flush=True,
+            )
+            return
         data_path = resolve_workspace_path(configs.async_eval_initial_data_path)
         if not data_path.is_file():
             raise FileNotFoundError(f"初始调度异步验证数据不存在: {data_path}")
@@ -179,7 +228,11 @@ class RolloutCheckpoint(Callback):
         eval_metrics = pl_module.last_eval_metrics
 
         if self.async_manager is not None:
-            if episode % max(1, int(pl_module.eval_freq)) == 0:
+            submit_every = max(
+                1,
+                int(getattr(configs, "async_eval_submit_every_episodes", 1)),
+            )
+            if episode % submit_every == 0:
                 self.async_manager.submit(trainer, episode=episode)
             else:
                 trainer.save_checkpoint(str(self.latest_path))
@@ -263,6 +316,7 @@ def run(args, *, config_initialized: bool = False) -> None:
 
     checkpoint_paths = resolve_checkpoint_paths(configs)
     checkpoint_dir = checkpoint_paths["lightning_dir"]
+    start_episode = 1
     if args.resume:
         resume_path = checkpoint_paths["lightning_latest"]
         if not resume_path.exists():
@@ -272,6 +326,16 @@ def run(args, *, config_initialized: bool = False) -> None:
             configs,
             resume_checkpoint.model_spec,
             explicit_fields=getattr(args, "explicit_config_fields", set()),
+        )
+        start_episode = _resume_start_episode(resume_checkpoint.payload)
+        if start_episode > int(configs.max_episodes):
+            raise ValueError(
+                f"续训 checkpoint 已完成 episode={start_episode - 1}，"
+                f"不小于 train.max_episodes={int(configs.max_episodes)}；无需继续训练。"
+            )
+        print(
+            f"[Resume] 已验证 checkpoint 连续性，将从 absolute_episode={start_episode} 继续训练。",
+            flush=True,
         )
     if uses_runs_layout(configs) and str(getattr(configs, "run_dir", "") or "").strip():
         context = create_run_context(configs, PROJECT_ROOT, create_dirs=True)
@@ -339,7 +403,11 @@ def run(args, *, config_initialized: bool = False) -> None:
         device=device,
     )
     module = APALLightningModule(agent, service, eval_freq=int(configs.eval_freq))
-    data_module = APALDataModule(service, max_episodes=total_updates)
+    data_module = APALDataModule(
+        service,
+        max_episodes=total_updates,
+        start_episode=start_episode,
+    )
     callbacks = [
         RolloutCheckpoint(
             latest_path=checkpoint_paths["lightning_latest"],
