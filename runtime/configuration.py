@@ -39,7 +39,8 @@ STRUCTURAL_FIELDS = {
     "skill_hub_bidirectional", "num_skill_types", "skill_feat_dim",
     "worker_skill_feature_slots",
     "use_input_layer_norm", "use_gat_layer_norm", "use_head_layer_norm",
-    "use_shared_trunk", "policy_action_scope", "workforce_binding_mode",
+    "use_shared_trunk", "policy_action_scope", "conditional_team_max_candidates",
+    "conditional_team_gate_bias", "conditional_team_nonbaseline_logit", "workforce_binding_mode",
     "workforce_preallocation_ratio", "team_selection_mode",
     "graph_encoder_mode", "actor_context_mode",
 }
@@ -47,6 +48,7 @@ STRUCTURAL_FIELDS = {
 _VALID_EXPERIMENT_MODES = {
     "policy_action_scope": {
         "operation", "operation_station", "operation_station_worker",
+        "operation_station_gated_team",
     },
     "workforce_binding_mode": {"endogenous", "preallocated"},
     "team_selection_mode": {"autoregressive", "static_topq"},
@@ -177,6 +179,20 @@ def validate_runtime_config(config: Config) -> None:
         raise ValueError("workforce_preallocation_ratio 必须是 [0, 1] 内的有限数")
     if config.workforce_binding_mode == "preallocated" and ratio <= 0.0:
         raise ValueError("preallocated 模式要求 workforce_preallocation_ratio > 0")
+    candidate_limit = int(getattr(config, "conditional_team_max_candidates", 4))
+    if candidate_limit < 1:
+        raise ValueError("conditional_team_max_candidates 必须大于等于 1")
+    config.conditional_team_max_candidates = candidate_limit
+    for field_name in (
+        "conditional_team_gate_bias",
+        "conditional_team_nonbaseline_logit",
+    ):
+        value = float(getattr(config, field_name))
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} 必须是有限数")
+        setattr(config, field_name, value)
+    if config.conditional_team_nonbaseline_logit >= 0.0:
+        raise ValueError("conditional_team_nonbaseline_logit 必须严格为负数")
     if bool(getattr(config, "ablation_no_gat", False)):
         raise ValueError("ablation_no_gat 已移除；请使用 graph_encoder_mode=none")
     if bool(getattr(config, "ablation_no_pointer", False)):

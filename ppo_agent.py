@@ -14,7 +14,7 @@ from contextlib import nullcontext
 from typing import Tuple, List, Dict, Optional, Any
 from torch_geometric.data import HeteroData
 from configs import configs
-from core.action_completion import EarliestFinishActionCompleter
+from core.action_completion import EarliestFinishActionCompleter, TeamCandidates
 from worker_feature_layout import resolve_worker_feature_layout
 try:
     from schedulefree import AdamWScheduleFree
@@ -148,6 +148,187 @@ class PPOAgent:
         assert task_x.dim() == 2 and task_x.size(1) > 16, f"task_x 形状异常: {tuple(task_x.shape)}"
         demand = int(task_x[task_idx, 16].item())
         return max(1, demand)
+
+    def _gated_team_logits(
+        self,
+        policy: Any,
+        *,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        worker_embs: torch.Tensor,
+        candidates: TeamCandidates,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """对一个状态的合法团队候选计算条件式门控 logits。"""
+        if policy.conditional_team_head is None:
+            raise RuntimeError("operation_station_gated_team 缺少 conditional_team_head")
+        assert task_emb.shape == station_emb.shape
+        assert task_emb.ndim == 2 and task_emb.size(0) == 1
+        assert worker_embs.ndim == 2
+        team_embeddings = []
+        for team in candidates.teams:
+            if not team:
+                raise RuntimeError("物理工序的门控团队候选不能为空")
+            member_ids = torch.tensor(team, dtype=torch.long, device=worker_embs.device)
+            # [团队人数, H] -> [H]
+            team_embeddings.append(worker_embs.index_select(0, member_ids).mean(dim=0))
+        candidate_team_emb = torch.stack(team_embeddings, dim=0).unsqueeze(0)
+        gate_features = candidates.gate_features.to(
+            device=worker_embs.device, dtype=worker_embs.dtype
+        ).unsqueeze(0)
+        return policy.conditional_team_head(
+            task_emb,
+            station_emb,
+            candidate_team_emb,
+            gate_features,
+        )
+
+    def _select_gated_team(
+        self,
+        policy: Any,
+        *,
+        obs: HeteroData,
+        task_id: int,
+        station_id: int,
+        worker_mask: torch.Tensor | None,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        worker_embs: torch.Tensor,
+        deterministic: bool,
+        temperature: float,
+    ) -> tuple[list[int], torch.Tensor] | None:
+        """从同一确定性候选生成器中采样团队，供单环境和批量路径共用。"""
+        candidates = self.action_completer.enumerate_team_candidates(
+            obs,
+            task_id=int(task_id),
+            station_id=int(station_id),
+            worker_mask=worker_mask,
+        )
+        if candidates is None:
+            return None
+        logits, _gate = self._gated_team_logits(
+            policy,
+            task_emb=task_emb,
+            station_emb=station_emb,
+            worker_embs=worker_embs,
+            candidates=candidates,
+        )
+        if torch.isnan(logits).any():
+            logits = torch.nan_to_num(logits, nan=-1.0e4)
+        if deterministic or temperature <= 0.0:
+            selected_index = int(torch.argmax(logits, dim=1).item())
+            team_logprob = torch.zeros((), device=logits.device)
+        else:
+            dist = Categorical(logits=(logits / max(float(temperature), 1.0e-5)).float())
+            sampled = dist.sample()
+            selected_index = int(sampled.item())
+            team_logprob = dist.log_prob(sampled)
+        return list(candidates.teams[selected_index]), team_logprob
+
+    def _recompute_gated_team_logprobs(
+        self,
+        *,
+        batch: HeteroData,
+        task_embeddings: torch.Tensor,
+        station_embeddings: torch.Tensor,
+        worker_embeddings: torch.Tensor,
+        raw_task_x: torch.Tensor,
+        raw_station_x: torch.Tensor,
+        raw_worker_x: torch.Tensor,
+        worker_masks: torch.Tensor,
+        selected_task: torch.Tensor,
+        selected_station: torch.Tensor,
+        selected_teams: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """按采样时完全相同的候选规则重算团队动作的 PPO 对数概率。"""
+        batch_size = int(selected_task.numel())
+        candidate_rows: list[TeamCandidates] = []
+        chosen_indices: list[int] = []
+        for batch_idx in range(batch_size):
+            station_id = int(selected_station[batch_idx].item())
+            if station_id < 0:
+                candidate_rows.append(
+                    TeamCandidates(
+                        station_id=-1,
+                        teams=((0,),),
+                        gate_features=torch.zeros(5, device=raw_task_x.device),
+                    )
+                )
+                chosen_indices.append(0)
+                continue
+            candidates = self.action_completer.enumerate_team_candidates_from_features(
+                task_x=raw_task_x[batch_idx],
+                worker_x=raw_worker_x[batch_idx],
+                station_x=raw_station_x[batch_idx],
+                task_id=int(selected_task[batch_idx].item()),
+                station_id=station_id,
+                worker_mask=worker_masks[batch_idx],
+            )
+            if candidates is None:
+                raise RuntimeError("PPO 重算时无法重建采样阶段的合法团队候选")
+            selected_team = tuple(
+                int(worker_id)
+                for worker_id in selected_teams[batch_idx].tolist()
+                if int(worker_id) >= 0
+            )
+            try:
+                selected_index = candidates.teams.index(selected_team)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "PPO 重算候选与采样动作不一致；拒绝使用错误的对数概率更新"
+                ) from exc
+            candidate_rows.append(candidates)
+            chosen_indices.append(selected_index)
+
+        max_candidates = max(len(item.teams) for item in candidate_rows)
+        hidden_dim = int(worker_embeddings.size(-1))
+        candidate_emb_rows = []
+        candidate_mask_rows = []
+        feature_rows = []
+        for batch_idx, candidates in enumerate(candidate_rows):
+            row_embeddings = []
+            for team in candidates.teams:
+                member_ids = torch.tensor(team, dtype=torch.long, device=worker_embeddings.device)
+                # [团队人数, H] -> [H]
+                row_embeddings.append(
+                    worker_embeddings[batch_idx].index_select(0, member_ids).mean(dim=0)
+                )
+            padding = max_candidates - len(row_embeddings)
+            if padding:
+                row_embeddings.extend(
+                    [worker_embeddings.new_zeros(hidden_dim) for _ in range(padding)]
+                )
+            candidate_emb_rows.append(torch.stack(row_embeddings, dim=0))
+            candidate_mask_rows.append(
+                [False] * len(candidates.teams) + [True] * padding
+            )
+            feature_rows.append(
+                candidates.gate_features.to(
+                    device=worker_embeddings.device, dtype=worker_embeddings.dtype
+                )
+            )
+
+        if self.policy.conditional_team_head is None:
+            raise RuntimeError("operation_station_gated_team 缺少 conditional_team_head")
+        candidate_team_emb = torch.stack(candidate_emb_rows, dim=0)
+        candidate_mask = torch.tensor(
+            candidate_mask_rows, dtype=torch.bool, device=worker_embeddings.device
+        )
+        gate_features = torch.stack(feature_rows, dim=0)
+        logits, _gate = self.policy.conditional_team_head(
+            task_embeddings,
+            station_embeddings,
+            candidate_team_emb,
+            gate_features,
+            candidate_mask,
+        )
+        dist = Categorical(logits=logits.float())
+        selected_indices = torch.tensor(
+            chosen_indices, dtype=torch.long, device=worker_embeddings.device
+        )
+        active = selected_station >= 0
+        team_lp = dist.log_prob(selected_indices) * active.to(logits.dtype)
+        team_entropy = dist.entropy() * active.to(logits.dtype)
+        return team_lp, team_entropy
 
     def get_memory_snapshot(self) -> Dict[str, float]:
         """返回当前设备显存快照，单位为 GB；CPU 环境返回 0。"""
@@ -582,20 +763,42 @@ class PPOAgent:
                     station_action = station_dist.sample()
                     station_logprob = station_dist.log_prob(station_action)
 
-            if action_scope == "operation_station":
-                completed = self.action_completer.complete(
-                    obs,
-                    task_id=t_idx,
-                    station_mask=(
-                        specific_station_mask.reshape(-1)
-                        if specific_station_mask is not None
-                        else None
-                    ),
-                    worker_mask=mask_worker,
-                    selected_station=int(station_action.item()),
-                )
-                if completed is None:
-                    return None, 0.0, 0.0, None, True
+            if action_scope in {"operation_station", "operation_station_gated_team"}:
+                selected_station_id = int(station_action.item())
+                team_logprob = torch.zeros((), device=self.device)
+                if action_scope == "operation_station_gated_team":
+                    gated_team = self._select_gated_team(
+                        active_policy,
+                        obs=obs,
+                        task_id=t_idx,
+                        station_id=selected_station_id,
+                        worker_mask=mask_worker,
+                        task_emb=selected_task_emb,
+                        station_emb=x_dict["station"][selected_station_id].unsqueeze(0),
+                        worker_embs=x_dict["worker"],
+                        deterministic=deterministic,
+                        temperature=temperature,
+                    )
+                    if gated_team is None:
+                        return None, 0.0, 0.0, None, True
+                    selected_team, team_logprob = gated_team
+                    action_station_id = selected_station_id
+                else:
+                    completed = self.action_completer.complete(
+                        obs,
+                        task_id=t_idx,
+                        station_mask=(
+                            specific_station_mask.reshape(-1)
+                            if specific_station_mask is not None
+                            else None
+                        ),
+                        worker_mask=mask_worker,
+                        selected_station=selected_station_id,
+                    )
+                    if completed is None:
+                        return None, 0.0, 0.0, None, True
+                    selected_team = list(completed.team)
+                    action_station_id = completed.station_id
                 if compute_value:
                     with self.autocast_context():
                         state_value = active_policy.get_value(
@@ -604,8 +807,8 @@ class PPOAgent:
                 else:
                     state_value = torch.zeros((), device=self.device)
                 return (
-                    (t_idx, completed.station_id, list(completed.team)),
-                    float((task_logprob + station_logprob).item()),
+                    (t_idx, action_station_id, selected_team),
+                    float((task_logprob + station_logprob + team_logprob).item()),
                     float(state_value.item()),
                     specific_station_mask,
                     False,
@@ -975,32 +1178,59 @@ class PPOAgent:
                         station_action = station_dist.sample()
                         station_logprob = station_dist.log_prob(station_action)
 
-                if action_scope == "operation_station":
-                    completed = self.action_completer.complete(
-                        obs_list[i],
-                        task_id=t_idx,
-                        station_mask=(
-                            specific_station_mask.reshape(-1)
-                            if specific_station_mask is not None
-                            else None
-                        ),
-                        worker_mask=mask_worker_list[i],
-                        selected_station=int(station_action.item()),
-                    )
-                    if completed is None:
-                        state_value_tensors.append(torch.tensor(0.0, device=self.device))
-                        decoded_actions.append((0, 1, [], torch.tensor(0.0, device=self.device), None))
-                        task_mask_refs.append(None)
-                        worker_mask_refs.append(None)
-                        eval_fail_flags.append(True)
-                        continue
+                if action_scope in {"operation_station", "operation_station_gated_team"}:
+                    selected_station_id = int(station_action.item())
+                    team_logprob = torch.zeros((), device=self.device)
+                    if action_scope == "operation_station_gated_team":
+                        gated_team = self._select_gated_team(
+                            active_policy,
+                            obs=obs_list[i],
+                            task_id=t_idx,
+                            station_id=selected_station_id,
+                            worker_mask=mask_worker_list[i],
+                            task_emb=selected_task_emb,
+                            station_emb=station_embs[selected_station_id].unsqueeze(0),
+                            worker_embs=worker_embs,
+                            deterministic=deterministic,
+                            temperature=temperature,
+                        )
+                        if gated_team is None:
+                            state_value_tensors.append(torch.tensor(0.0, device=self.device))
+                            decoded_actions.append((0, 1, [], torch.tensor(0.0, device=self.device), None))
+                            task_mask_refs.append(None)
+                            worker_mask_refs.append(None)
+                            eval_fail_flags.append(True)
+                            continue
+                        selected_team, team_logprob = gated_team
+                        action_station_id = selected_station_id
+                    else:
+                        completed = self.action_completer.complete(
+                            obs_list[i],
+                            task_id=t_idx,
+                            station_mask=(
+                                specific_station_mask.reshape(-1)
+                                if specific_station_mask is not None
+                                else None
+                            ),
+                            worker_mask=mask_worker_list[i],
+                            selected_station=selected_station_id,
+                        )
+                        if completed is None:
+                            state_value_tensors.append(torch.tensor(0.0, device=self.device))
+                            decoded_actions.append((0, 1, [], torch.tensor(0.0, device=self.device), None))
+                            task_mask_refs.append(None)
+                            worker_mask_refs.append(None)
+                            eval_fail_flags.append(True)
+                            continue
+                        selected_team = list(completed.team)
+                        action_station_id = completed.station_id
                     state_value_tensors.append(state_values_batch[i])
                     decoded_actions.append(
                         (
                             t_idx,
-                            completed.station_id + 1,
-                            list(completed.team),
-                            task_logprob + station_logprob,
+                            action_station_id + 1,
+                            selected_team,
+                            task_logprob + station_logprob + team_logprob,
                             specific_station_mask,
                         )
                     )
@@ -1521,6 +1751,14 @@ class PPOAgent:
                          curr_mask = (d_w_mask > 0.5) | (~w_p_mask)
                     else:
                          curr_mask = (~w_p_mask)
+
+                    if hasattr(batch, 'y_worker_mask'):
+                        replay_worker_mask, _ = to_dense_batch(
+                            batch.y_worker_mask.float(), batch['worker'].batch
+                        )
+                        replay_worker_mask = replay_worker_mask > 0.5
+                    else:
+                        replay_worker_mask = torch.zeros_like(w_p_mask, dtype=torch.bool)
                     
                     B_size, Max_W_size = int(worker_x.size(0)), int(worker_x.size(1))
                     static_worker_mask = self.compute_static_worker_constraint_mask(
@@ -1574,6 +1812,33 @@ class PPOAgent:
                         # Update mask for next worker in team
                         curr_mask = curr_mask.clone()
                         curr_mask[valid_b_indices, target[valid_step]] = True
+
+                    if action_scope == "operation_station_gated_team":
+                        raw_task_x, _ = to_dense_batch(
+                            batch['task'].x, batch['task'].batch
+                        )
+                        raw_station_x, _ = to_dense_batch(
+                            batch['station'].x, batch['station'].batch
+                        )
+                        raw_worker_x, _ = to_dense_batch(
+                            batch['worker'].x, batch['worker'].batch
+                        )
+                        selected_station_embeddings = station_x[
+                            batch_indices, torch.clamp(batch.y_station, min=0)
+                        ]
+                        team_lp, team_entropy = self._recompute_gated_team_logprobs(
+                            batch=batch,
+                            task_embeddings=sel_task_emb,
+                            station_embeddings=selected_station_embeddings,
+                            worker_embeddings=worker_x,
+                            raw_task_x=raw_task_x,
+                            raw_station_x=raw_station_x,
+                            raw_worker_x=raw_worker_x,
+                            worker_masks=replay_worker_mask,
+                            selected_task=batch.y_task,
+                            selected_station=batch.y_station,
+                            selected_teams=batch.y_team,
+                        )
                                 
                     if action_scope == "operation":
                         total_lp = task_lp

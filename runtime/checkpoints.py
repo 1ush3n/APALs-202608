@@ -18,6 +18,9 @@ WORKER_FEATURE_LAYOUT_VERSION = "five_skill_v2"
 class ModelSpec:
     resource_graph_mode: str
     policy_action_scope: str = "operation_station_worker"
+    conditional_team_max_candidates: int = 4
+    conditional_team_gate_bias: float = -4.0
+    conditional_team_nonbaseline_logit: float = -8.0
     workforce_binding_mode: str = "endogenous"
     workforce_preallocation_ratio: float = 1.0
     team_selection_mode: str = "autoregressive"
@@ -60,6 +63,9 @@ def build_model_spec(config: Config) -> ModelSpec:
     return ModelSpec(
         resource_graph_mode=mode,
         policy_action_scope=str(config.policy_action_scope),
+        conditional_team_max_candidates=int(config.conditional_team_max_candidates),
+        conditional_team_gate_bias=float(config.conditional_team_gate_bias),
+        conditional_team_nonbaseline_logit=float(config.conditional_team_nonbaseline_logit),
         workforce_binding_mode=str(config.workforce_binding_mode),
         workforce_preallocation_ratio=float(config.workforce_preallocation_ratio),
         team_selection_mode=str(config.team_selection_mode),
@@ -115,6 +121,11 @@ def extract_state_dict(payload: Any) -> tuple[dict[str, torch.Tensor], str]:
 
 def infer_model_spec(state_dict: Mapping[str, torch.Tensor]) -> ModelSpec:
     keys = tuple(state_dict)
+    inferred_action_scope = (
+        "operation_station_gated_team"
+        if any(key.startswith("conditional_team_head.") for key in keys)
+        else "operation_station_worker"
+    )
     has_direct = any("can_do" in key for key in keys)
     has_hub = any(
         marker in key for key in keys
@@ -147,6 +158,7 @@ def infer_model_spec(state_dict: Mapping[str, torch.Tensor]) -> ModelSpec:
     is_current_layout = worker_feat_dim == 17
     return ModelSpec(
         resource_graph_mode=mode,
+        policy_action_scope=inferred_action_scope,
         hidden_dim=int(task.shape[0]) if task is not None else None,
         num_gat_layers=max(indexes) + 1 if indexes else None,
         task_feat_dim=int(task.shape[1]) if task is not None else None,
@@ -203,6 +215,9 @@ def apply_checkpoint_model_spec(
         "use_skill_hub": spec.use_skill_hub,
         "skill_hub_bidirectional": spec.skill_hub_bidirectional,
         "policy_action_scope": spec.policy_action_scope,
+        "conditional_team_max_candidates": spec.conditional_team_max_candidates,
+        "conditional_team_gate_bias": spec.conditional_team_gate_bias,
+        "conditional_team_nonbaseline_logit": spec.conditional_team_nonbaseline_logit,
         "workforce_binding_mode": spec.workforce_binding_mode,
         "workforce_preallocation_ratio": spec.workforce_preallocation_ratio,
         "team_selection_mode": spec.team_selection_mode,

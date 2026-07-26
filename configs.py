@@ -39,6 +39,9 @@ class Config:
     # 联合决策与消融实验语义（checkpoint 结构字段）
     # ------------------
     policy_action_scope: str = "operation_station_worker"
+    conditional_team_max_candidates: int = 4
+    conditional_team_gate_bias: float = -4.0
+    conditional_team_nonbaseline_logit: float = -8.0
     workforce_binding_mode: str = "endogenous"
     workforce_preallocation_ratio: float = 1.0
     team_selection_mode: str = "autoregressive"

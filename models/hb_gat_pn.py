@@ -420,6 +420,63 @@ class WorkerPointer(nn.Module):
         logits = self.stop_head(cat_feat) 
         return logits
 
+
+class ConditionalTeamSelector(nn.Module):
+    """在固定工序—工位后，对安全团队候选进行条件式残差重排序。"""
+
+    def __init__(self, config) -> None:
+        super().__init__()
+        hidden_dim = int(config.hidden_dim)
+        self.nonbaseline_logit = float(config.conditional_team_nonbaseline_logit)
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2 + 5, hidden_dim),
+            get_activation(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.residual = nn.Sequential(
+            nn.Linear(hidden_dim * 3 + 5, hidden_dim),
+            get_activation(),
+            nn.Linear(hidden_dim, 1),
+        )
+        # 残差零初始化与负门控偏置确保初始确定性动作退化为候选 0。
+        nn.init.zeros_(self.residual[-1].weight)
+        nn.init.zeros_(self.residual[-1].bias)
+        nn.init.constant_(self.gate[-1].bias, float(config.conditional_team_gate_bias))
+
+    def forward(
+        self,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        candidate_team_emb: torch.Tensor,
+        gate_features: torch.Tensor,
+        candidate_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回团队 logits 与状态门控值。
+
+        task/station: [B, H]；candidate_team_emb: [B, K, H]；
+        gate_features: [B, 5]；candidate_mask: [B, K]，True 表示填充候选。
+        """
+        assert task_emb.ndim == station_emb.ndim == gate_features.ndim == 2
+        assert candidate_team_emb.ndim == 3
+        batch_size, candidate_count, hidden_dim = candidate_team_emb.shape
+        assert task_emb.shape == station_emb.shape == (batch_size, hidden_dim)
+        assert gate_features.shape == (batch_size, 5)
+
+        state_features = torch.cat([task_emb, station_emb, gate_features], dim=-1)
+        gate = torch.sigmoid(self.gate(state_features))
+        expanded_state = state_features.unsqueeze(1).expand(-1, candidate_count, -1)
+        residual_input = torch.cat([expanded_state, candidate_team_emb], dim=-1)
+        residual = self.residual(residual_input).squeeze(-1)
+        base = candidate_team_emb.new_full(
+            (batch_size, candidate_count), self.nonbaseline_logit
+        )
+        base[:, 0] = 0.0
+        logits = base + gate * residual
+        if candidate_mask is not None:
+            assert candidate_mask.shape == logits.shape
+            logits = logits.masked_fill(candidate_mask, -1.0e4)
+        return logits, gate
+
 # ---------------------------------------------------------------------------
 # 完整模型: HB-GAT-PN (Heterogeneous Graph Attention Pointer Network)
 # ---------------------------------------------------------------------------
@@ -436,6 +493,7 @@ class HBGATPN(nn.Module):
         self.task_head = TaskPointer(config)
         self.station_head = StationSelector(config)
         self.worker_head = WorkerPointer(config)
+        self.conditional_team_head = None
 
         action_scope = str(
             getattr(config, "policy_action_scope", "operation_station_worker")
@@ -445,6 +503,9 @@ class HBGATPN(nn.Module):
             self.worker_head.requires_grad_(False)
         elif action_scope == "operation_station":
             self.worker_head.requires_grad_(False)
+        elif action_scope == "operation_station_gated_team":
+            self.worker_head.requires_grad_(False)
+            self.conditional_team_head = ConditionalTeamSelector(config)
         if str(getattr(config, "team_selection_mode", "autoregressive")) == "static_topq":
             self.worker_head.ar_query_proj.requires_grad_(False)
         
