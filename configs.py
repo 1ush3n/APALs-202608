@@ -42,6 +42,18 @@ class Config:
     conditional_team_max_candidates: int = 4
     conditional_team_gate_bias: float = -4.0
     conditional_team_nonbaseline_logit: float = -8.0
+    # Best-anchor 策略蒸馏仅服务于条件式团队门控实验分支；默认关闭，
+    # 不能影响既有主方法、消融或对比算法。
+    best_anchor_distill_enabled: bool = False
+    best_anchor_distill_external_checkpoint_path: str = ""
+    best_anchor_distill_external_selection_score: float = float("nan")
+    best_anchor_distill_external_protocol_id: str = ""
+    best_anchor_distill_external_manifest_sha256: str = ""
+    best_anchor_distill_temperature: float = 1.0
+    best_anchor_distill_lambda_start: float = 0.02
+    best_anchor_distill_lambda_end: float = 0.08
+    best_anchor_distill_ramp_updates: int = 2
+    best_anchor_distill_min_improvement: float = 0.0
     workforce_binding_mode: str = "endogenous"
     workforce_preallocation_ratio: float = 1.0
     team_selection_mode: str = "autoregressive"

@@ -11,11 +11,13 @@ import gc
 import random
 import time
 from contextlib import nullcontext
-from typing import Tuple, List, Dict, Optional, Any
+from typing import Callable, Tuple, List, Dict, Optional, Any
 from torch_geometric.data import HeteroData
+from torch_geometric.utils import to_dense_batch
 from configs import configs
 from core.action_completion import EarliestFinishActionCompleter, TeamCandidates
 from worker_feature_layout import resolve_worker_feature_layout
+from training.best_anchor_teacher import BestAnchorTeacherManager
 try:
     from schedulefree import AdamWScheduleFree
 except ImportError:
@@ -26,7 +28,21 @@ class PPOAgent:
     PPO (Proximal Policy Optimization) 鏅鸿兘浣撱€?
     璐熻矗涓?Environment 浜や簰锛屾敹闆嗚建杩癸紝骞舵洿鏂?Strategy Network銆?
     """
-    def __init__(self, model, lr, gamma, k_epochs, eps_clip, device, batch_size=4, total_timesteps=0, config=None):
+    def __init__(
+        self,
+        model,
+        lr,
+        gamma,
+        k_epochs,
+        eps_clip,
+        device,
+        batch_size=4,
+        total_timesteps=0,
+        config=None,
+        *,
+        teacher_model_factory: Callable[[], torch.nn.Module] | None = None,
+        teacher_checkpoint_dir: Any | None = None,
+    ):
         self.config = config if config is not None else configs
         self.action_completer = EarliestFinishActionCompleter(self.config)
         self.policy = model.to(device)
@@ -111,6 +127,18 @@ class PPOAgent:
         self.amp_device_type = self.device.type if isinstance(self.device, torch.device) else str(self.device)
         self.amp_enabled = self.amp_device_type == "cuda"
         self.scaler = torch.amp.GradScaler(self.amp_device_type, enabled=self.amp_enabled)
+        self.best_anchor_teacher: BestAnchorTeacherManager | None = None
+        if bool(getattr(self.config, "best_anchor_distill_enabled", False)):
+            if teacher_model_factory is None or teacher_checkpoint_dir is None:
+                raise ValueError("启用 best-anchor 蒸馏时必须提供模型工厂和当前 run 的 checkpoint 目录")
+            self.best_anchor_teacher = BestAnchorTeacherManager(
+                config=self.config,
+                device=self.device,
+                model_factory=teacher_model_factory,
+                checkpoint_dir=teacher_checkpoint_dir,
+                make_schedulefree_optimizer=self._make_schedulefree_teacher_optimizer,
+                use_schedule_free=self.use_schedule_free,
+            )
         
         # 鑷€傚簲璇勪及鏂版棫绛栫暐宸窛 (KL鏁ｅ害) 鐨勬柟娉曞湪 update 灏鹃儴鍙樺姩 LR銆?
 
@@ -119,6 +147,102 @@ class PPOAgent:
         if self.amp_enabled:
             return torch.amp.autocast(device_type=self.amp_device_type)
         return nullcontext()
+
+    def _make_schedulefree_teacher_optimizer(self, model: torch.nn.Module) -> Any:
+        """为冻结教师恢复 ScheduleFree 的评估态，不加入学生优化图。"""
+        if AdamWScheduleFree is None:
+            raise RuntimeError("未安装 schedulefree，无法恢复 ScheduleFree 教师")
+        actor_params = []
+        critic_params = []
+        for name, parameter in model.named_parameters():
+            if name.startswith("critic") or ".critic" in name:
+                critic_params.append(parameter)
+            else:
+                actor_params.append(parameter)
+        groups = [
+            {
+                "params": actor_params,
+                "lr": self.lr * float(getattr(self.config, "actor_lr_multiplier", 1.0)),
+                "name": "actor",
+            },
+            {
+                "params": critic_params,
+                "lr": self.lr * float(getattr(self.config, "critic_lr_multiplier", 1.0)),
+                "name": "critic",
+            },
+        ]
+        warmup = int(
+            getattr(
+                self.config,
+                "sf_warmup_steps",
+                max(100, int(max(1, self.total_timesteps) * 0.05)),
+            )
+        )
+        return AdamWScheduleFree(groups, lr=self.lr, weight_decay=1e-4, warmup_steps=warmup)
+
+    @staticmethod
+    def _masked_kl(
+        teacher_logits: torch.Tensor,
+        student_logits: torch.Tensor,
+        invalid_mask: torch.Tensor,
+        temperature: float,
+    ) -> torch.Tensor:
+        """计算共享动作掩码上的 KL(teacher || student)。"""
+        assert teacher_logits.shape == student_logits.shape == invalid_mask.shape
+        scale = max(float(temperature), 1.0e-6)
+        teacher_log_probs = F.log_softmax(teacher_logits.float() / scale, dim=-1)
+        student_log_probs = F.log_softmax(student_logits.float() / scale, dim=-1)
+        teacher_probs = teacher_log_probs.exp()
+        kl_terms = teacher_probs * (teacher_log_probs - student_log_probs)
+        kl_terms = torch.where(invalid_mask, torch.zeros_like(kl_terms), kl_terms)
+        return kl_terms.sum(dim=-1) * (scale * scale)
+
+    def _teacher_task_station_logits(
+        self,
+        batch: HeteroData,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """在学生前向前计算冻结教师的任务/工位 logits，降低显存峰值。"""
+        manager = self.best_anchor_teacher
+        if manager is None or not manager.active or manager.teacher is None:
+            return None
+        batch_indices = torch.arange(batch.y_task.size(0), device=self.device)
+        # 原始节点特征仅用于构造 [B, N] 的有效节点掩码。
+        _, task_present = to_dense_batch(batch["task"].x[:, :1], batch["task"].batch)
+        _, station_present = to_dense_batch(batch["station"].x[:, :1], batch["station"].batch)
+        if hasattr(batch, "y_task_mask"):
+            logical_task_mask, _ = to_dense_batch(batch.y_task_mask, batch["task"].batch)
+            task_mask = logical_task_mask | (~task_present)
+        else:
+            task_mask = ~task_present
+        if hasattr(batch, "y_station_mask"):
+            dense_station_mask, _ = to_dense_batch(batch.y_station_mask, batch["task"].batch)
+            station_mask = dense_station_mask[batch_indices, batch.y_task] | (~station_present)
+        else:
+            station_mask = ~station_present
+        with torch.inference_mode(), self.autocast_context():
+            teacher_x, teacher_global = manager.teacher(batch)
+            teacher_task_x, _ = to_dense_batch(teacher_x["task"], batch["task"].batch)
+            teacher_station_x, _ = to_dense_batch(teacher_x["station"], batch["station"].batch)
+            teacher_task_logits = manager.teacher.task_head(
+                teacher_task_x, teacher_global, mask=task_mask
+            ).float()
+            teacher_selected_task = teacher_task_x[batch_indices, batch.y_task]
+            teacher_station_logits = manager.teacher.station_head(
+                teacher_selected_task, teacher_station_x, mask=station_mask
+            ).float()
+        return teacher_task_logits, teacher_station_logits, task_mask, station_mask
+
+    def best_anchor_checkpoint_state(self) -> dict[str, Any] | None:
+        if self.best_anchor_teacher is None:
+            return None
+        return self.best_anchor_teacher.checkpoint_state()
+
+    def restore_best_anchor_checkpoint_state(self, raw: object) -> None:
+        if self.best_anchor_teacher is None:
+            if raw is not None:
+                raise RuntimeError("checkpoint 包含 best-anchor 教师，但当前训练未启用该开关")
+            return
+        self.best_anchor_teacher.restore_checkpoint_state(raw)
 
     def clear_device_cache(self) -> None:
         """按当前设备清理缓存，降低连续 PPO 更新后的显存或内存残留风险。"""
@@ -1459,6 +1583,14 @@ class PPOAgent:
         """执行一次 PPO 更新，并返回 TensorBoard 指标。"""
         # 无引用缓存清理只能缓解碎片化；活跃张量由显式生命周期管理。
         self.clear_device_cache()
+        distill_lifecycle = {
+            "Distill/Enabled": 0.0,
+            "Distill/TeacherReloaded": 0.0,
+            "Distill/TeacherVersion": 0.0,
+            "Distill/TeacherScore": 0.0,
+        }
+        if self.best_anchor_teacher is not None:
+            distill_lifecycle = self.best_anchor_teacher.on_update_started()
 
         # 1. 计算广义优势估计（GAE）。
         self.validate_snapshot_homogeneity(memory.states)
@@ -1628,6 +1760,10 @@ class PPOAgent:
         task_entropy_values = []
         station_entropy_values = []
         team_entropy_values = []
+        distill_task_values = []
+        distill_station_values = []
+        distill_weighted_values = []
+        distill_lambda_values = []
         
         # 鏀堕泦 batch 绾?Critic 棰勬祴鍋忓樊涓庝紭鍔垮垎甯?
         batch_pred_vals = []
@@ -1679,6 +1815,7 @@ class PPOAgent:
                     batch,
                     batch_size=int(batch.y_task.view(-1).numel()) if hasattr(batch, 'y_task') else None,
                 )
+                teacher_outputs = self._teacher_task_station_logits(batch)
                 
                 with self.autocast_context():
                     # 褰撳墠绛栫暐鐨勫墠鍚戜紶鎾?
@@ -1689,7 +1826,6 @@ class PPOAgent:
                     
                     # --- Re-evaluate LogProbs ---
                     # A. Task LogProb
-                    from torch_geometric.utils import to_dense_batch
                     task_x, p_mask = to_dense_batch(x_dict['task'], batch['task'].batch)
                     
                     # 鎭㈠ Mask
@@ -1937,8 +2073,43 @@ class PPOAgent:
                         c_ent_team * norm_team_entropy.mean()
                     )
                     entropy_loss = -c_ent * avg_normalized_entropy
-                    
-                    loss = c_pol * policy_loss + value_loss + entropy_loss
+
+                    distill_task_loss = torch.zeros((), device=self.device)
+                    distill_station_loss = torch.zeros((), device=self.device)
+                    distill_loss = torch.zeros((), device=self.device)
+                    distill_lambda = 0.0
+                    if teacher_outputs is not None and self.best_anchor_teacher is not None:
+                        (
+                            teacher_task_logits,
+                            teacher_station_logits,
+                            teacher_task_mask,
+                            teacher_station_mask,
+                        ) = teacher_outputs
+                        temperature = float(self.config.best_anchor_distill_temperature)
+                        distill_task_loss = self._masked_kl(
+                            teacher_task_logits,
+                            task_logits,
+                            teacher_task_mask,
+                            temperature,
+                        ).mean()
+                        station_kl = self._masked_kl(
+                            teacher_station_logits,
+                            station_logits,
+                            teacher_station_mask,
+                            temperature,
+                        )
+                        physical_action = batch.y_station >= 0
+                        if physical_action.any():
+                            distill_station_loss = station_kl[physical_action].mean()
+                        distill_loss = 0.5 * (distill_task_loss + distill_station_loss)
+                        distill_lambda = self.best_anchor_teacher.current_lambda()
+
+                    loss = (
+                        c_pol * policy_loss
+                        + value_loss
+                        + entropy_loss
+                        + float(distill_lambda) * distill_loss
+                    )
                     raw_total_loss = loss
                     
                     # 搴旂敤杞啍鏂缉鏀?
@@ -1972,6 +2143,10 @@ class PPOAgent:
                 task_entropy_values.append(task_entropy.mean().detach())
                 station_entropy_values.append(station_entropy.mean().detach())
                 team_entropy_values.append(team_entropy.mean().detach())
+                distill_task_values.append(distill_task_loss.detach())
+                distill_station_values.append(distill_station_loss.detach())
+                distill_weighted_values.append((float(distill_lambda) * distill_loss).detach())
+                distill_lambda_values.append(torch.tensor(float(distill_lambda), device=self.device))
                 total_batches_diagnosed += 1
                 
                 # 璁板綍 batch 绾х殑棰勬祴鍋忓樊涓庝紭鍔垮垎甯冿紝杈呭姪缁嗗寲 TensorBoard 璇婃柇
@@ -2040,6 +2215,10 @@ class PPOAgent:
             'Entropy/Task': _mean_scalar(task_entropy_values, 0.0),
             'Entropy/Station': _mean_scalar(station_entropy_values, 0.0),
             'Entropy/WorkerTeam': _mean_scalar(team_entropy_values, 0.0),
+            'Distill/KLTask': _mean_scalar(distill_task_values, 0.0),
+            'Distill/KLStation': _mean_scalar(distill_station_values, 0.0),
+            'Distill/WeightedLoss': _mean_scalar(distill_weighted_values, 0.0),
+            'Distill/Lambda': _mean_scalar(distill_lambda_values, 0.0),
             'Critic/Explained_Variance': mean_exp_var,
             'Critic/Value_Predictions_Mean': mean_pred_val,
             'Critic/Target_Returns_Mean': mean_target_ret,
@@ -2060,4 +2239,5 @@ class PPOAgent:
             'Memory/Allocated_GB': memory_snapshot['allocated_gb'],
             'Memory/Reserved_GB': memory_snapshot['reserved_gb'],
         }
+        metrics.update(distill_lifecycle)
         return metrics

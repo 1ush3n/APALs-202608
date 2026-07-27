@@ -193,6 +193,51 @@ def validate_runtime_config(config: Config) -> None:
         setattr(config, field_name, value)
     if config.conditional_team_nonbaseline_logit >= 0.0:
         raise ValueError("conditional_team_nonbaseline_logit 必须严格为负数")
+    if bool(getattr(config, "best_anchor_distill_enabled", False)):
+        if config.policy_action_scope != "operation_station_gated_team":
+            raise ValueError(
+                "best_anchor_distill_enabled 仅允许用于 "
+                "policy_action_scope=operation_station_gated_team"
+            )
+        if not bool(getattr(config, "async_eval_enabled", False)):
+            raise ValueError("best-anchor 蒸馏要求启用异步四实例 checkpoint 选择")
+        if str(getattr(config, "checkpoint_selection_protocol", "")).strip().lower() != "multiscale_manifest":
+            raise ValueError("best-anchor 蒸馏要求 checkpoint_selection_protocol=multiscale_manifest")
+        if not str(getattr(config, "checkpoint_selection_manifest_path", "")).strip():
+            raise ValueError("best-anchor 蒸馏要求提供 checkpoint_selection_manifest_path")
+        for field_name in (
+            "best_anchor_distill_temperature",
+            "best_anchor_distill_lambda_start",
+            "best_anchor_distill_lambda_end",
+            "best_anchor_distill_min_improvement",
+        ):
+            value = float(getattr(config, field_name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{field_name} 必须是非负有限数")
+            setattr(config, field_name, value)
+        if float(config.best_anchor_distill_temperature) <= 0.0:
+            raise ValueError("best_anchor_distill_temperature 必须大于 0")
+        if int(getattr(config, "best_anchor_distill_ramp_updates", 0)) < 1:
+            raise ValueError("best_anchor_distill_ramp_updates 必须大于 0")
+        external_path = str(
+            getattr(config, "best_anchor_distill_external_checkpoint_path", "")
+        ).strip()
+        if external_path:
+            external_score = float(
+                getattr(config, "best_anchor_distill_external_selection_score", float("nan"))
+            )
+            if not math.isfinite(external_score):
+                raise ValueError(
+                    "外部 best-anchor 教师必须提供 "
+                    "best_anchor_distill_external_selection_score"
+                )
+            if not str(getattr(config, "best_anchor_distill_external_protocol_id", "")).strip():
+                raise ValueError("外部 best-anchor 教师必须提供选择协议 ID")
+            manifest_sha = str(
+                getattr(config, "best_anchor_distill_external_manifest_sha256", "")
+            ).strip().lower()
+            if len(manifest_sha) != 64 or any(char not in "0123456789abcdef" for char in manifest_sha):
+                raise ValueError("外部 best-anchor 教师必须提供合法的 manifest SHA-256")
     if bool(getattr(config, "ablation_no_gat", False)):
         raise ValueError("ablation_no_gat 已移除；请使用 graph_encoder_mode=none")
     if bool(getattr(config, "ablation_no_pointer", False)):

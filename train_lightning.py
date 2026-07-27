@@ -4,6 +4,7 @@ import os
 # 启用可扩展显存段以缓解动态图 GNN 变长 batch 的碎片化；峰值显存仍由 batch 控制。
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+import copy
 import math
 import platform
 from pathlib import Path
@@ -394,6 +395,16 @@ def run(args, *, config_initialized: bool = False) -> None:
         batch_size=int(configs.batch_size),
         total_timesteps=total_updates,
         config=configs,
+        teacher_model_factory=(
+            (lambda: HBGATPN(copy.deepcopy(configs)))
+            if bool(getattr(configs, "best_anchor_distill_enabled", False))
+            else None
+        ),
+        teacher_checkpoint_dir=(
+            checkpoint_paths["lightning_dir"]
+            if bool(getattr(configs, "best_anchor_distill_enabled", False))
+            else None
+        ),
     )
     service = APALRolloutService(
         agent=agent,

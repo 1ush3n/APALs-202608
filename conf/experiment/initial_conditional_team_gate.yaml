@@ -24,6 +24,12 @@ model:
   conditional_team_max_candidates: 4
   conditional_team_gate_bias: -4.0
   conditional_team_nonbaseline_logit: -8.0
+  best_anchor_distill_enabled: false
+  best_anchor_distill_temperature: 1.0
+  best_anchor_distill_lambda_start: 0.02
+  best_anchor_distill_lambda_end: 0.08
+  best_anchor_distill_ramp_updates: 2
+  best_anchor_distill_min_improvement: 0.0
 
 train:
   eval_freq: 1

@@ -156,6 +156,10 @@ class APALLightningModule(pl.LightningModule):
         }
         if hasattr(self.agent, "scaler"):
             agent_state["scaler"] = self.agent.scaler.state_dict()
+        if hasattr(self.agent, "best_anchor_checkpoint_state"):
+            teacher_state = self.agent.best_anchor_checkpoint_state()
+            if teacher_state is not None:
+                agent_state["best_anchor_teacher"] = teacher_state
         checkpoint["apal_agent_state"] = agent_state
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
@@ -170,6 +174,10 @@ class APALLightningModule(pl.LightningModule):
         scaler_state = agent_state.get("scaler")
         if isinstance(scaler_state, dict) and hasattr(self.agent, "scaler"):
             self.agent.scaler.load_state_dict(scaler_state)
+        if "best_anchor_teacher" in agent_state and hasattr(
+            self.agent, "restore_best_anchor_checkpoint_state"
+        ):
+            self.agent.restore_best_anchor_checkpoint_state(agent_state["best_anchor_teacher"])
 
     def transfer_batch_to_device(
         self,

@@ -10,9 +10,11 @@ from core.action_completion import EarliestFinishActionCompleter
 from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
-from runtime.checkpoints import build_model_spec, infer_model_spec
+from runtime.checkpoints import build_checkpoint_metadata, build_model_spec, infer_model_spec
 from runtime.configuration import validate_runtime_config
+from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
 from tests.runtime_safety import temporary_config
+from training.best_anchor_teacher import BestAnchorTeacherManager
 from training.memory import Memory
 from utils.gpu_graph_manager import GPUBatchGraphManager
 from worker_feature_layout import resolve_worker_feature_layout
@@ -174,6 +176,7 @@ def test_zero_initialized_gate_matches_operation_station_at_temperature_zero() -
 def test_gated_scope_configuration_and_checkpoint_spec_are_explicit() -> None:
     cfg = Config()
     cfg.policy_action_scope = "operation_station_gated_team"
+    cfg.async_eval_enabled = True
     cfg.conditional_team_max_candidates = 4
     cfg.conditional_team_gate_bias = -4.0
     cfg.conditional_team_nonbaseline_logit = -8.0
@@ -185,6 +188,157 @@ def test_gated_scope_configuration_and_checkpoint_spec_are_explicit() -> None:
     assert spec.conditional_team_nonbaseline_logit == -8.0
     inferred = infer_model_spec(HBGATPN(cfg).state_dict())
     assert inferred.policy_action_scope == "operation_station_gated_team"
+
+
+def test_best_anchor_switch_is_default_off_and_rejects_non_gated_scope() -> None:
+    cfg = Config()
+    validate_runtime_config(cfg)
+    assert not cfg.best_anchor_distill_enabled
+
+    cfg.best_anchor_distill_enabled = True
+    with torch.no_grad():
+        cfg.policy_action_scope = "operation_station"
+    try:
+        validate_runtime_config(cfg)
+    except ValueError as exc:
+        assert "operation_station_gated_team" in str(exc)
+    else:
+        raise AssertionError("best-anchor 蒸馏不应作用于非门控动作范围")
+
+
+def test_best_anchor_external_teacher_is_strictly_verified(tmp_path: Path) -> None:
+    cfg = Config()
+    cfg.hidden_dim = 32
+    cfg.num_gat_layers = 1
+    cfg.num_heads = 2
+    cfg.use_shared_trunk = True
+    cfg.use_schedule_free = False
+    cfg.policy_action_scope = "operation_station_gated_team"
+    cfg.async_eval_enabled = True
+    cfg.checkpoint_selection_protocol = "multiscale_manifest"
+    cfg.checkpoint_selection_manifest_path = (
+        "data/initial_selection_manifests/real_four_instances_temperature0_v1.json"
+    )
+    manifest = load_initial_checkpoint_selection_manifest(
+        cfg.checkpoint_selection_manifest_path
+    )
+    checkpoint_path = tmp_path / "external_teacher.ckpt"
+    teacher_model = HBGATPN(cfg)
+    torch.save(
+        {
+            "state_dict": {
+                f"policy.{name}": value.detach().clone()
+                for name, value in teacher_model.state_dict().items()
+            },
+            "apal_metadata": build_checkpoint_metadata(cfg, episode=1),
+        },
+        checkpoint_path,
+    )
+    cfg.best_anchor_distill_enabled = True
+    cfg.best_anchor_distill_external_checkpoint_path = str(checkpoint_path)
+    cfg.best_anchor_distill_external_selection_score = 0.9
+    cfg.best_anchor_distill_external_protocol_id = manifest.protocol_id
+    cfg.best_anchor_distill_external_manifest_sha256 = manifest.sha256
+    validate_runtime_config(cfg)
+    manager = BestAnchorTeacherManager(
+        config=cfg,
+        device=torch.device("cpu"),
+        model_factory=lambda: HBGATPN(copy.deepcopy(cfg)),
+        checkpoint_dir=tmp_path / "run_checkpoints",
+        make_schedulefree_optimizer=None,
+        use_schedule_free=False,
+    )
+    assert manager.active
+    assert manager.state is not None and manager.state.source == "external"
+    first = manager.on_update_started()
+    assert first["Distill/Enabled"] == 1.0
+    assert manager.current_lambda() == cfg.best_anchor_distill_lambda_start
+
+    cfg.best_anchor_distill_external_manifest_sha256 = "0" * 64
+    try:
+        BestAnchorTeacherManager(
+            config=cfg,
+            device=torch.device("cpu"),
+            model_factory=lambda: HBGATPN(copy.deepcopy(cfg)),
+            checkpoint_dir=tmp_path / "run_checkpoints",
+            make_schedulefree_optimizer=None,
+            use_schedule_free=False,
+        )
+    except ValueError as exc:
+        assert "manifest" in str(exc)
+    else:
+        raise AssertionError("协议不一致的外部教师不应被加载")
+
+
+def test_best_anchor_distillation_completes_two_ppo_updates(tmp_path: Path) -> None:
+    """低资源 smoke：教师前向、KL 损失和两次 PPO 更新必须同时有限。"""
+    manifest_path = "data/initial_selection_manifests/real_four_instances_temperature0_v1.json"
+    manifest = load_initial_checkpoint_selection_manifest(manifest_path)
+    checkpoint_path = tmp_path / "teacher.ckpt"
+    overrides = _small_overrides(
+        checkpoint_selection_protocol="multiscale_manifest",
+        checkpoint_selection_manifest_path=manifest_path,
+        async_eval_enabled=True,
+        best_anchor_distill_enabled=True,
+        best_anchor_distill_external_checkpoint_path=str(checkpoint_path),
+        best_anchor_distill_external_selection_score=0.9,
+        best_anchor_distill_external_protocol_id=manifest.protocol_id,
+        best_anchor_distill_external_manifest_sha256=manifest.sha256,
+    )
+    with temporary_config(configs, overrides):
+        teacher_model = HBGATPN(configs)
+        torch.save(
+            {
+                "state_dict": {
+                    f"policy.{name}": value.detach().clone()
+                    for name, value in teacher_model.state_dict().items()
+                },
+                "apal_metadata": build_checkpoint_metadata(configs, episode=1),
+            },
+            checkpoint_path,
+        )
+        validate_runtime_config(configs)
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = PPOAgent(
+            HBGATPN(configs),
+            lr=1.0e-4,
+            gamma=0.99,
+            k_epochs=1,
+            eps_clip=0.2,
+            device=torch.device("cpu"),
+            batch_size=1,
+            total_timesteps=2,
+            config=configs,
+            teacher_model_factory=lambda: HBGATPN(copy.deepcopy(configs)),
+            teacher_checkpoint_dir=tmp_path / "run_checkpoints",
+        )
+        for episode in (1, 2):
+            obs, masks, _task_id = _first_physical_action_state(env)
+            action, logprob, value, _station_mask, invalid = agent.select_action(
+                obs,
+                masks[0],
+                masks[1],
+                masks[2],
+                deterministic=False,
+                temperature=1.0,
+            )
+            assert action is not None and not invalid
+            snapshot = env.get_state_snapshot()
+            _obs, reward, done, info = env.step(action)
+            assert not info.get("invalid_action", False)
+            memory = Memory()
+            memory.states.append(snapshot)
+            memory.actions.append(action)
+            memory.logprobs.append(logprob)
+            memory.values.append(value)
+            memory.masks.append(masks)
+            memory.rewards.append(float(reward))
+            memory.is_terminals.append(bool(done))
+            metrics = agent.update(memory, env, current_ep=episode)
+            assert metrics["Distill/Enabled"] == 1.0
+            assert torch.isfinite(torch.tensor(metrics["Distill/KLTask"]))
+            assert torch.isfinite(torch.tensor(metrics["Distill/KLStation"]))
+            assert torch.isfinite(torch.tensor(metrics["Loss/Total"]))
 
 
 def test_gated_team_batch_decoding_preserves_apal_legality() -> None:
