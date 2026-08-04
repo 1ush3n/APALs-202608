@@ -1,5 +1,6 @@
 env:
   data_file_path: data/3182.csv
   train_data_path_or_dir: data/generated/initial_3182
+  training_manifest_path: data/generated/initial_3182/manifest.json
   n_w_min: 160
   n_w: 160

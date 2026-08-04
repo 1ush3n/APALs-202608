@@ -11,6 +11,7 @@ import gc
 import random
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Callable, Tuple, List, Dict, Optional, Any
 from torch_geometric.data import HeteroData
 from torch_geometric.utils import to_dense_batch
@@ -22,6 +23,23 @@ try:
     from schedulefree import AdamWScheduleFree
 except ImportError:
     AdamWScheduleFree = None
+
+
+@dataclass(frozen=True)
+class FrozenGatedTeamTrace:
+    """采样时冻结的 APAL 团队候选动作空间。
+
+    PPO 的重要性比率必须在与采样时相同的离散动作空间上计算。这里仅保存
+    少量候选团队及其门控特征，不保存图张量，从而避免事后重建观测时的动态
+    特征差异改变候选集合。
+    """
+
+    task_id: int
+    station_id: int
+    teams: tuple[tuple[int, ...], ...]
+    selected_index: int
+    gate_features: tuple[float, ...]
+
 
 class PPOAgent:
     """
@@ -46,6 +64,9 @@ class PPOAgent:
         self.config = config if config is not None else configs
         self.action_completer = EarliestFinishActionCompleter(self.config)
         self.policy = model.to(device)
+        # 仅供 rollout_service 在同一次批量解码后立即写入 Memory；不参与 checkpoint。
+        self.last_gated_team_trace: FrozenGatedTeamTrace | None = None
+        self.last_gated_team_traces: list[FrozenGatedTeamTrace | None] = []
         
         from utils.gpu_graph_manager import GPUBatchGraphManager
         self.gpu_graph_manager = GPUBatchGraphManager(device, config=self.config)
@@ -319,7 +340,7 @@ class PPOAgent:
         worker_embs: torch.Tensor,
         deterministic: bool,
         temperature: float,
-    ) -> tuple[list[int], torch.Tensor] | None:
+    ) -> tuple[list[int], torch.Tensor, FrozenGatedTeamTrace] | None:
         """从同一确定性候选生成器中采样团队，供单环境和批量路径共用。"""
         candidates = self.action_completer.enumerate_team_candidates(
             obs,
@@ -346,7 +367,17 @@ class PPOAgent:
             sampled = dist.sample()
             selected_index = int(sampled.item())
             team_logprob = dist.log_prob(sampled)
-        return list(candidates.teams[selected_index]), team_logprob
+        frozen_trace = FrozenGatedTeamTrace(
+            task_id=int(task_id),
+            station_id=int(station_id),
+            teams=tuple(tuple(int(worker_id) for worker_id in team) for team in candidates.teams),
+            selected_index=selected_index,
+            gate_features=tuple(
+                float(value)
+                for value in candidates.gate_features.detach().to("cpu", torch.float32).tolist()
+            ),
+        )
+        return list(candidates.teams[selected_index]), team_logprob, frozen_trace
 
     def _recompute_gated_team_logprobs(
         self,
@@ -362,9 +393,15 @@ class PPOAgent:
         selected_task: torch.Tensor,
         selected_station: torch.Tensor,
         selected_teams: torch.Tensor,
+        frozen_traces: list[FrozenGatedTeamTrace | None],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """按采样时完全相同的候选规则重算团队动作的 PPO 对数概率。"""
+        """使用采样时冻结的团队候选动作空间重算 PPO 对数概率。"""
         batch_size = int(selected_task.numel())
+        if len(frozen_traces) != batch_size:
+            raise RuntimeError(
+                "门控团队 PPO 轨迹缺少冻结候选序列："
+                f"traces={len(frozen_traces)} batch={batch_size}"
+            )
         candidate_rows: list[TeamCandidates] = []
         chosen_indices: list[int] = []
         for batch_idx in range(batch_size):
@@ -379,29 +416,49 @@ class PPOAgent:
                 )
                 chosen_indices.append(0)
                 continue
-            candidates = self.action_completer.enumerate_team_candidates_from_features(
-                task_x=raw_task_x[batch_idx],
-                worker_x=raw_worker_x[batch_idx],
-                station_x=raw_station_x[batch_idx],
-                task_id=int(selected_task[batch_idx].item()),
-                station_id=station_id,
-                worker_mask=worker_masks[batch_idx],
-            )
-            if candidates is None:
-                raise RuntimeError("PPO 重算时无法重建采样阶段的合法团队候选")
+            trace = frozen_traces[batch_idx]
+            if trace is None:
+                raise RuntimeError(
+                    "门控团队 PPO 轨迹缺少采样时冻结的候选序列；"
+                    "拒绝基于事后重枚举的动作空间更新"
+                )
+            if trace.task_id != int(selected_task[batch_idx].item()) or trace.station_id != station_id:
+                raise RuntimeError(
+                    "门控团队冻结轨迹与采样动作的工序/工位不一致："
+                    f"trace=({trace.task_id},{trace.station_id}) "
+                    f"action=({int(selected_task[batch_idx].item())},{station_id})"
+                )
+            if not trace.teams or not (0 <= trace.selected_index < len(trace.teams)):
+                raise RuntimeError("门控团队冻结轨迹的候选索引或候选集合非法")
             selected_team = tuple(
                 int(worker_id)
                 for worker_id in selected_teams[batch_idx].tolist()
                 if int(worker_id) >= 0
             )
-            try:
-                selected_index = candidates.teams.index(selected_team)
-            except ValueError as exc:
+            if selected_team != trace.teams[trace.selected_index]:
                 raise RuntimeError(
-                    "PPO 重算候选与采样动作不一致；拒绝使用错误的对数概率更新"
-                ) from exc
+                    "门控团队冻结轨迹与采样动作团队不一致；"
+                    "拒绝使用错误的对数概率更新"
+                )
+            max_worker_count = int(worker_embeddings.size(1))
+            if any(
+                not team or any(worker_id < 0 or worker_id >= max_worker_count for worker_id in team)
+                for team in trace.teams
+            ):
+                raise RuntimeError("门控团队冻结轨迹包含越界或空团队候选")
+            if len(trace.gate_features) != 5:
+                raise RuntimeError("门控团队冻结轨迹的门控特征维度必须为 5")
+            candidates = TeamCandidates(
+                station_id=station_id,
+                teams=trace.teams,
+                gate_features=torch.tensor(
+                    trace.gate_features,
+                    dtype=raw_task_x.dtype,
+                    device=raw_task_x.device,
+                ),
+            )
             candidate_rows.append(candidates)
-            chosen_indices.append(selected_index)
+            chosen_indices.append(trace.selected_index)
 
         max_candidates = max(len(item.teams) for item in candidate_rows)
         hidden_dim = int(worker_embeddings.size(-1))
@@ -746,6 +803,7 @@ class PPOAgent:
             state_value: float
             specific_station_mask: 鐢ㄤ簬 Memory 璁板綍
         """
+        self.last_gated_team_trace = None
         no_mask = self.config.ablation_no_mask
         
         if self.use_schedule_free and manage_optimizer_mode:
@@ -905,7 +963,8 @@ class PPOAgent:
                     )
                     if gated_team is None:
                         return None, 0.0, 0.0, None, True
-                    selected_team, team_logprob = gated_team
+                    selected_team, team_logprob, gated_trace = gated_team
+                    self.last_gated_team_trace = gated_trace
                     action_station_id = selected_station_id
                 else:
                     completed = self.action_completer.complete(
@@ -1120,6 +1179,7 @@ class PPOAgent:
         task_mask_refs = []
         worker_mask_refs = []
         eval_fail_flags = []
+        gated_team_traces: list[FrozenGatedTeamTrace | None] = [None] * batch_size
 
         profile: Dict[str, float] = {}
 
@@ -1325,7 +1385,8 @@ class PPOAgent:
                             worker_mask_refs.append(None)
                             eval_fail_flags.append(True)
                             continue
-                        selected_team, team_logprob = gated_team
+                        selected_team, team_logprob, gated_trace = gated_team
+                        gated_team_traces[i] = gated_trace
                         action_station_id = selected_station_id
                     else:
                         completed = self.action_completer.complete(
@@ -1527,6 +1588,7 @@ class PPOAgent:
             _profile_sync()
             profile["action_decode_ms"] = (time.perf_counter() - stage_started) * 1000.0
         self.last_action_profile = profile if profile_breakdown else {}
+        self.last_gated_team_traces = gated_team_traces
 
         return results
 
@@ -1637,6 +1699,16 @@ class PPOAgent:
         # 2. 鍑嗗 Batch 鏁版嵁
         old_actions = memory.actions 
         old_logprobs = torch.tensor(memory.logprobs, dtype=torch.float32)
+        action_scope = str(
+            getattr(self.config, "policy_action_scope", "operation_station_worker")
+        )
+        if action_scope == "operation_station_gated_team":
+            traces = getattr(memory, "gated_team_traces", None)
+            if traces is None or len(traces) != len(memory.states):
+                raise RuntimeError(
+                    "门控团队 PPO 轨迹未与冻结候选序列一一对齐："
+                    f"states={len(memory.states)} traces={0 if traces is None else len(traces)}"
+                )
         
         # Pad Team List (鍙橀暱 -> 瀹氶暱 Tensor)
         max_team_size = max(len(a[2]) for a in old_actions) if old_actions else 1
@@ -1667,6 +1739,7 @@ class PPOAgent:
             state.y_station = b_station[idx].unsqueeze(0)
             state.y_team = b_team[idx].unsqueeze(0)
             state.y_logprob = old_logprobs[idx].unsqueeze(0)
+            state.y_memory_index = torch.tensor([idx], dtype=torch.long)
             state.y_reward = rewards[idx].unsqueeze(0)
             state.y_advantage = advantages[idx].unsqueeze(0)
             if len(memory.values) > idx:
@@ -1694,6 +1767,9 @@ class PPOAgent:
             batch.y_station = b_station[batch_indices].to(self.device)
             batch.y_team = b_team[batch_indices].to(self.device)
             batch.y_logprob = old_logprobs[batch_indices].to(self.device)
+            batch.y_memory_index = torch.as_tensor(
+                batch_indices, dtype=torch.long, device=self.device
+            )
             batch.y_reward = rewards[batch_indices].to(self.device)
             batch.y_advantage = advantages[batch_indices].to(self.device)
             if len(memory.values) > 0:
@@ -1962,6 +2038,11 @@ class PPOAgent:
                         selected_station_embeddings = station_x[
                             batch_indices, torch.clamp(batch.y_station, min=0)
                         ]
+                        memory_indices = batch.y_memory_index.detach().cpu().tolist()
+                        frozen_traces = [
+                            memory.gated_team_traces[int(memory_index)]
+                            for memory_index in memory_indices
+                        ]
                         team_lp, team_entropy = self._recompute_gated_team_logprobs(
                             batch=batch,
                             task_embeddings=sel_task_emb,
@@ -1974,6 +2055,7 @@ class PPOAgent:
                             selected_task=batch.y_task,
                             selected_station=batch.y_station,
                             selected_teams=batch.y_team,
+                            frozen_traces=frozen_traces,
                         )
                                 
                     if action_scope == "operation":

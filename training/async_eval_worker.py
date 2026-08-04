@@ -189,7 +189,7 @@ def _verified_candidate_path(job: dict[str, Any]) -> Path:
     return candidate_path
 
 
-def _load_candidate_agent(job: dict[str, Any]):
+def _load_candidate_agent(job: dict[str, Any], device: "torch.device"):
     import torch
 
     from configs import configs
@@ -204,7 +204,7 @@ def _load_candidate_agent(job: dict[str, Any]):
         raise ValueError("异步候选 checkpoint 缺少 apal_metadata.config")
     configs.update_from_dict(saved_config)
     apply_checkpoint_model_spec(configs, checkpoint.model_spec)
-    model = HBGATPN(configs).to(torch.device("cpu"))
+    model = HBGATPN(configs).to(device)
     load_policy_weights(model, checkpoint, strict=True)
     total_updates = math.ceil(int(configs.max_episodes) / int(configs.update_every_episodes))
     agent = PPOAgent(
@@ -213,7 +213,7 @@ def _load_candidate_agent(job: dict[str, Any]):
         gamma=float(configs.gamma),
         k_epochs=int(configs.k_epochs),
         eps_clip=float(configs.eps_clip),
-        device=torch.device("cpu"),
+        device=device,
         batch_size=int(configs.batch_size),
         total_timesteps=total_updates,
         config=configs,
@@ -388,7 +388,7 @@ def _evaluate_initial_multiscale_job(
     return output
 
 
-def _evaluate_job(job: dict[str, Any], project_root: Path) -> tuple[dict[str, Any], list[Any]]:
+def _evaluate_job(job: dict[str, Any], project_root: Path, *, device: "torch.device") -> tuple[dict[str, Any], list[Any]]:
     import torch
 
     from configs import configs
@@ -398,7 +398,7 @@ def _evaluate_job(job: dict[str, Any], project_root: Path) -> tuple[dict[str, An
     evaluation_kind = str(job.get("evaluation_kind", "reschedule"))
     if evaluation_kind not in {"reschedule", "initial_standard", "initial_multi_benchmark"}:
         raise ValueError(f"未知异步验证类型: {evaluation_kind}")
-    checkpoint, saved_config, agent = _load_candidate_agent(job)
+    checkpoint, saved_config, agent = _load_candidate_agent(job, device)
     is_reschedule = bool(configs.enable_reschedule_mode)
     if evaluation_kind == "reschedule" and not is_reschedule:
         raise ValueError("异步重调度验证候选不是重调度模型")
@@ -420,6 +420,7 @@ def _evaluate_job(job: dict[str, Any], project_root: Path) -> tuple[dict[str, An
     if evaluation_kind == "reschedule":
         from runtime.reschedule_eval import evaluate_reschedule_model
         from runtime.reschedule_manifest import load_reschedule_manifest
+        from runtime.initial_worker_mapping import apply_initial_worker_mapping
 
         manifest = load_reschedule_manifest(configs.reschedule_manifest_path)
         entry = manifest.get(str(job["instance_id"]))
@@ -429,6 +430,9 @@ def _evaluate_job(job: dict[str, Any], project_root: Path) -> tuple[dict[str, An
         configs.reschedule_baseline_schedule_path = str(entry.baseline_schedule_path)
         configs.reschedule_eval_scenario_path = str(entry.scenario_path)
         configs.reschedule_eval_instance_id = str(entry.instance_id)
+        # 异步进程从训练 checkpoint 的配置恢复，必须在构造环境前同步真实
+        # 实例的工人池规模，避免跨规模 baseline 出现 worker-range 误报。
+        apply_initial_worker_mapping(configs, entry.data_path, explicit_fields=set())
         env = AirLineEnv_Graph(str(entry.data_path), seed=int(configs.reschedule_eval_scenario_seed))
         result = evaluate_reschedule_model(
             env, agent, num_runs=None, temperature=float(job["temperature"]),
@@ -557,10 +561,16 @@ def _record_result(paths: AsyncEvalPaths, job: dict[str, Any], result: dict[str,
         )
 
 
-def run_worker(queue_root: Path, project_root: Path, *, heartbeat_interval: float = 30.0, worker_id: str = "worker") -> int:
+def run_worker(queue_root: Path, project_root: Path, *, heartbeat_interval: float = 30.0, worker_id: str = "worker", device_name: str = "cpu") -> int:
     import torch
     from torch.utils.tensorboard import SummaryWriter
 
+    device_name = str(device_name).strip().lower()
+    if device_name not in {"cpu", "cuda", "cuda:0"}:
+        raise ValueError(f"异步验证设备非法: {device_name!r}")
+    if device_name.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("请求 CUDA 异步验证，但 worker 中 CUDA 不可用")
+    device = torch.device(device_name)
     paths = AsyncEvalPaths.create(queue_root)
     thread_count = max(1, int(os.environ.get("APAL_ASYNC_EVAL_CPU_THREADS", "4")))
     torch.set_num_threads(thread_count)
@@ -582,7 +592,7 @@ def run_worker(queue_root: Path, project_root: Path, *, heartbeat_interval: floa
                     episode = int(job["episode"])
                     start_time = time.time()
                     try:
-                        result, schedule = _evaluate_job(job, project_root)
+                        result, schedule = _evaluate_job(job, project_root, device=device)
                         _record_result(paths, job, result, schedule, writer)
                         done_payload = {**job, "completed_at": time.time(), "worker_duration_sec": time.time() - start_time, "result": result}
                         atomic_write_json(paths.done / running_path.name, done_payload)
@@ -619,12 +629,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-root", type=Path, required=True)
     parser.add_argument("--heartbeat-interval", type=float, default=30.0)
     parser.add_argument("--worker-id", type=str, required=True)
+    parser.add_argument("--device", type=str, default="cpu")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    return run_worker(args.queue_root.resolve(), args.project_root.resolve(), heartbeat_interval=float(args.heartbeat_interval), worker_id=str(args.worker_id))
+    return run_worker(args.queue_root.resolve(), args.project_root.resolve(), heartbeat_interval=float(args.heartbeat_interval), worker_id=str(args.worker_id), device_name=str(args.device))
 
 
 if __name__ == "__main__":

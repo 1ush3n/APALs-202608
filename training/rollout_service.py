@@ -101,6 +101,7 @@ class APALRolloutService:
         logprob: Any,
         value: Any,
         masks: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        gated_team_trace: Any = None,
     ) -> None:
         memory.states.append(state)
         memory.actions.append(action)
@@ -113,6 +114,7 @@ class APALRolloutService:
             value if torch.is_tensor(value) else torch.tensor(value, device=self.device)
         )
         memory.masks.append(masks)
+        memory.gated_team_traces.append(gated_team_trace)
 
     def _collect_episode(
         self,
@@ -287,6 +289,7 @@ class APALRolloutService:
                         logprob=logprob,
                         value=value,
                         masks=masks_list[env_idx],
+                        gated_team_trace=self.agent.last_gated_team_traces[result_idx],
                     )
 
                 heartbeat.update(
@@ -423,6 +426,7 @@ class APALRolloutService:
             target.is_truncated.extend(source.is_truncated)
             target.masks.extend(source.masks)
             target.values.extend(source.values)
+            target.gated_team_traces.extend(source.gated_team_traces)
 
     def collect(self, update_index: int) -> RolloutUpdate:
         dataset_count = int(self.vector_env.envs[0].dataset_count)

@@ -4,6 +4,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import Sequence
 from typing import Any
 
 import pandas as pd
@@ -49,9 +50,18 @@ RESCHEDULE_EVAL_EXTRA_ARGS = {
         help="待评估重调度 PPO checkpoint 路径",
     ),
     "num_runs": ExtraArgument(default=None, help="可选评估轮数；缺省使用配置"),
+    "scenario_ids": ExtraArgument(default=None, help="显式指定场景 ID 列表，例如 [low_000,medium_000,high_000]"),
     "temperature": ExtraArgument(default=0.0, help="动作采样温度，0 表示确定性"),
     "output_dir": ExtraArgument(default=None, help="可选输出目录；缺省写入本次 run 的 eval 目录"),
 }
+
+
+def _as_id_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    return [part.strip() for part in str(value).split(",") if part.strip()]
 
 
 def _load_policy_weights(model: torch.nn.Module, model_path: Path, device: torch.device) -> dict[str, int | str]:
@@ -79,6 +89,9 @@ def evaluate_saved_reschedule_model(
     num_runs: int | None,
     temperature: float,
     output_dir: Path,
+    scenario_ids: Sequence[str] | None = None,
+    use_cached_observation: bool = False,
+    skip_value_estimation: bool = False,
 ) -> dict[str, object]:
     """按固定重调度验证场景评估已保存 PPO 模型，并导出逐场景 CSV。"""
 
@@ -108,7 +121,10 @@ def evaluate_saved_reschedule_model(
         env,
         agent,
         num_runs=num_runs,
+        scenario_ids=scenario_ids,
         temperature=temperature,
+        use_cached_observation=use_cached_observation,
+        skip_value_estimation=skip_value_estimation,
     )
     elapsed = time.time() - start_time
     rows = list(getattr(evaluate_reschedule_model, "last_scenario_metrics", []))
@@ -195,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
         num_runs=args.num_runs,
         temperature=float(args.temperature),
         output_dir=output_dir,
+        scenario_ids=_as_id_list(args.scenario_ids),
     )
     print(json.dumps({key: value for key, value in summary.items() if key != "rows"}, ensure_ascii=False, indent=2))
     print(f"PPO 重调度逐场景明细已保存到: {output_dir / 'reschedule_ppo_eval.csv'}")

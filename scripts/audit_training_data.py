@@ -14,20 +14,15 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from runtime.five_skill_schema import (
+    REQUIRED_CSV_COLUMNS,
+    load_profession_skill_mapping,
+    validate_explicit_five_skill_frame,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-REQUIRED_COLUMNS = [
-    "序号",
-    "AO号",
-    "类型",
-    "专业编码",
-    "工种",
-    "紧前工序AO号",
-    "需求人数",
-    "加工时间/h",
-    "限定站位",
-    "部位容量",
-]
+REQUIRED_COLUMNS = list(REQUIRED_CSV_COLUMNS)
 
 
 def _resolve_path(value: str | Path) -> Path:
@@ -45,17 +40,6 @@ def _split_predecessors(value: Any) -> list[str]:
     return [part for part in parts if part.lower() not in {"", "0", "nan", "none"}]
 
 
-def _load_skill_mapping(config_path: Path) -> dict[str, int]:
-    with config_path.open("r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
-    groups = config["groups"]
-    return {
-        str(code).strip().upper(): int(group_id)
-        for group_id, codes in groups.items()
-        for code in codes
-    }
-
-
 def audit_training_data(
     train_dir: Path,
     reference_path: Path,
@@ -65,6 +49,7 @@ def audit_training_data(
     file_pattern: str = "*.csv",
     min_ops: int = 400,
     max_ops: int = 800,
+    required_skill_ids: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     files = sorted(train_dir.glob(file_pattern))
     if not files:
@@ -84,7 +69,7 @@ def audit_training_data(
         f"{sorted(reference_external_predecessors)}"
     )
     reference = reference.set_index(reference["AO号"].astype(str), drop=False)
-    code_to_skill = _load_skill_mapping(mapping_path)
+    code_to_skill = load_profession_skill_mapping(mapping_path)
 
     total_rows = 0
     overlap_rows = 0
@@ -97,6 +82,7 @@ def audit_training_data(
     positive_duration_rows = 0
     physical_rows = 0
     physical_counts: list[int] = []
+    file_skill_counts: dict[str, dict[str, int]] = {}
     skill_counts: Counter[int] = Counter()
     nonoverlap_skill_counts: Counter[int] = Counter()
     known_external_predecessor_references = 0
@@ -104,6 +90,12 @@ def audit_training_data(
 
     for path in files:
         frame = pd.read_csv(path)
+        validate_explicit_five_skill_frame(
+            frame,
+            source=path,
+            require_all_skills=required_skill_ids is not None,
+            mapping_path=mapping_path,
+        )
         assert frame.columns.tolist() == REQUIRED_COLUMNS, f"{path.name} 字段或顺序不一致"
         assert frame["AO号"].notna().all(), f"{path.name} 存在空 AO号"
         assert frame["AO号"].astype(str).is_unique, f"{path.name} 存在重复 AO号"
@@ -156,6 +148,17 @@ def audit_training_data(
         positive_duration_rows += int(positive.sum())
         assert node_type[positive].eq(2).all(), f"{path.name} 正工时节点类型不全为 2"
         skill_counts.update(skill_type[physical].tolist())
+        observed_skills = set(skill_type[physical].tolist())
+        if required_skill_ids is not None:
+            missing_skills = sorted(set(required_skill_ids) - observed_skills)
+            assert not missing_skills, (
+                f"{path.name} 缺少正式协议要求的工种 {missing_skills}; "
+                f"实际工种={sorted(observed_skills)}"
+            )
+        file_skill_counts[path.name] = {
+            str(skill_id): int((skill_type[physical] == skill_id).sum())
+            for skill_id in range(5)
+        }
 
         overlap = ao.isin(reference.index)
         overlap_rows += int(overlap.sum())
@@ -236,6 +239,7 @@ def audit_training_data(
         "物理工序总数": physical_rows,
         "单文件物理工序数范围": [min(physical_counts), max(physical_counts)],
         "五工种物理工序分布": {str(key): int(skill_counts[key]) for key in range(5)},
+        "逐训练图五工种分布": file_skill_counts,
         "五工种总劳动量": {
             str(key): round(float(workload_by_skill.get(key, 0.0)), 2) for key in range(5)
         },
@@ -266,6 +270,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pattern", default="*.csv")
     parser.add_argument("--min-ops", type=int, default=400)
     parser.add_argument("--max-ops", type=int, default=800)
+    parser.add_argument(
+        "--require-skills",
+        default="",
+        help="正式协议要求每张训练图都覆盖的工种，例如 0,1,2,3,4；默认不额外限制",
+    )
     return parser.parse_args()
 
 
@@ -279,6 +288,11 @@ def main() -> None:
         file_pattern=args.pattern,
         min_ops=args.min_ops,
         max_ops=args.max_ops,
+        required_skill_ids=(
+            tuple(int(item.strip()) for item in args.require_skills.split(",") if item.strip())
+            if args.require_skills.strip()
+            else None
+        ),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

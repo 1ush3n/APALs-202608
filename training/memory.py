@@ -17,6 +17,8 @@ class Memory:
         self.is_truncated = []
         self.masks = []
         self.values = []
+        # 与每条动作严格对齐；仅门控团队动作保存冻结候选，其他动作为 None。
+        self.gated_team_traces = []
 
     def clear(self) -> None:
         del self.states[:]
@@ -27,6 +29,7 @@ class Memory:
         del self.is_truncated[:]
         del self.masks[:]
         del self.values[:]
+        del self.gated_team_traces[:]
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

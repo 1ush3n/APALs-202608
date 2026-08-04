@@ -9,7 +9,7 @@ import pandas as pd
 import heapq
 import hashlib
 from collections import OrderedDict
-from typing import Tuple, List, Dict, Optional, Any, Iterable
+from typing import Tuple, List, Dict, Optional, Any, Iterable, Sequence
 from pathlib import Path
 
 from data_loader import load_data
@@ -95,18 +95,29 @@ class AirLineEnv_Graph(gym.Env):
         self._context_lru: OrderedDict[int, None] = OrderedDict()
         self._context_cache_size = max(1, int(getattr(configs, "dataset_context_cache_size", 2)))
 
-        data_source = Path(data_path_or_dir)
-        if data_source.is_dir():
-            files = sorted(
-                path for path in data_source.iterdir()
-                if path.suffix.lower() in {".csv", ".xlsx"}
-            )
+        if isinstance(data_path_or_dir, Sequence) and not isinstance(data_path_or_dir, (str, bytes, Path)):
+            files = [Path(path).resolve() for path in data_path_or_dir]
             if not files:
-                raise ValueError(f"目录 {data_source} 中未找到任何 csv 或 xlsx 文件。")
+                raise ValueError("显式训练文件列表不能为空")
+            if len(set(files)) != len(files):
+                raise ValueError("显式训练文件列表存在重复 CSV")
+            if any(path.suffix.lower() != ".csv" or not path.is_file() for path in files):
+                raise ValueError("显式训练文件列表只能包含存在的 CSV 文件")
             for file_path in files:
                 self._register_dataset(file_path)
         else:
-            self._register_dataset(data_source)
+            data_source = Path(data_path_or_dir)
+            if data_source.is_dir():
+                files = sorted(
+                    path for path in data_source.iterdir()
+                    if path.suffix.lower() in {".csv", ".xlsx"}
+                )
+                if not files:
+                    raise ValueError(f"目录 {data_source} 中未找到任何 csv 或 xlsx 文件。")
+                for file_path in files:
+                    self._register_dataset(file_path)
+            else:
+                self._register_dataset(data_source)
             
         # 初始化激活索引
         self.active_dataset_idx = 0

@@ -158,7 +158,7 @@ def restore_interrupted_jobs(paths: AsyncEvalPaths) -> None:
 
 
 class AsyncEvaluationManager:
-    """管理可恢复、有界、可并行的 CPU 异步验证队列。"""
+    """管理可恢复、有界的异步验证队列。CUDA 模式限定单 worker。"""
 
     def __init__(
         self,
@@ -175,6 +175,11 @@ class AsyncEvaluationManager:
         self.paths = AsyncEvalPaths.create(self.latest_path.parent / "async_eval")
         self.capacity = int(config.async_eval_queue_capacity)
         self.worker_count = int(getattr(config, "async_eval_worker_count", 1))
+        self.device = str(getattr(config, "async_eval_device", "cpu")).strip().lower()
+        if self.device not in {"cpu", "cuda", "cuda:0"}:
+            raise AsyncEvaluationError(f"async_eval_device 仅允许 cpu、cuda 或 cuda:0，实际为 {self.device!r}")
+        if self.device.startswith("cuda") and self.worker_count != 1:
+            raise AsyncEvaluationError("CUDA 异步验证只允许 async_eval_worker_count=1，避免与训练争抢显存")
         self.poll_interval = float(config.async_eval_poll_interval_sec)
         self.heartbeat_interval = float(config.async_eval_heartbeat_interval_sec)
         self.stale_timeout = float(config.async_eval_stale_timeout_sec)
@@ -250,8 +255,9 @@ class AsyncEvaluationManager:
         for _ in range(self.worker_count - len(self._processes)):
             worker_id = f"worker_{uuid.uuid4().hex}"
             env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = ""
-            thread_count = str(int(self.config.async_eval_cpu_threads))
+            if self.device == "cpu":
+                env["CUDA_VISIBLE_DEVICES"] = ""
+            thread_count = str(int(self.config.async_eval_cpu_threads)) if self.device == "cpu" else "1"
             for name in (
                 "OMP_NUM_THREADS",
                 "MKL_NUM_THREADS",
@@ -273,11 +279,13 @@ class AsyncEvaluationManager:
                 str(self.heartbeat_interval),
                 "--worker-id",
                 worker_id,
+                "--device",
+                self.device,
             ]
             process = subprocess.Popen(command, cwd=str(self.project_root), env=env, text=True)
             self._processes[worker_id] = process
             print(
-                f"[AsyncEval] worker_id={worker_id} pid={process.pid} device=cpu "
+                f"[AsyncEval] worker_id={worker_id} pid={process.pid} device={self.device} "
                 f"threads={thread_count} workers={self.worker_count} capacity={self.capacity}",
                 flush=True,
             )

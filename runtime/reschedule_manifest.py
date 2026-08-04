@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
 from runtime.paths import PROJECT_ROOT, resolve_workspace_path
+from runtime.five_skill_schema import (
+    ALLOWED_PRODUCTION_PROTOCOLS,
+    EXPLICIT_FIVE_SKILL_PROTOCOL,
+    validate_explicit_five_skill_csv,
+)
+
+
+REAL_INSTANCE_IDS = ("real_283", "real_680", "real_2338", "real_3182")
 
 
 @dataclass(frozen=True)
@@ -22,6 +31,9 @@ class RescheduleManifestEntry:
     baseline_makespan: float | None = None
     status: str = "ready"
     source: str = ""
+    data_sha256: str = ""
+    baseline_sha256: str = ""
+    scenario_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -97,6 +109,9 @@ def _load_reschedule_manifest_cached(path_key: str) -> RescheduleManifest:
             baseline_makespan=None if row.get("baseline_makespan") is None else float(row["baseline_makespan"]),
             status=status,
             source=str(row.get("source", "")),
+            data_sha256=str(row.get("data_sha256", "")).strip().lower(),
+            baseline_sha256=str(row.get("baseline_sha256", "")).strip().lower(),
+            scenario_sha256=str(row.get("scenario_sha256", "")).strip().lower(),
         )
         entries.append(entry)
     return RescheduleManifest(path=manifest_path, payload=payload, entries=tuple(entries))
@@ -105,6 +120,83 @@ def _load_reschedule_manifest_cached(path_key: str) -> RescheduleManifest:
 def load_reschedule_manifest(path: str | Path) -> RescheduleManifest:
     manifest_path = resolve_workspace_path(path).resolve()
     return _load_reschedule_manifest_cached(str(manifest_path))
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _validate_asset_hash(entry: RescheduleManifestEntry, *, field: str, path: Path) -> None:
+    expected = str(getattr(entry, field)).strip().lower()
+    if not expected:
+        raise ValueError(f"{entry.instance_id} 缺少正式协议哈希字段 {field}")
+    actual = _sha256(path)
+    if actual != expected:
+        raise ValueError(f"{entry.instance_id} 的 {field} 与文件 SHA-256 不一致")
+
+
+def validate_explicit_five_skill_training_manifest(manifest: RescheduleManifest) -> None:
+    """拒绝将旧单技能资产用于正式五技能重调度训练。
+
+    这是训练入口的最终防线。r4 构建阶段已完成更完整的 DAG、映射和基准排程
+    审计；这里以低开销方式复核 protocol、30 个训练条目以及每张训练图的显式
+    语义字段和五工种覆盖，防止历史 DataLoader 兼容回退再次静默生效。
+    """
+    protocol = str(manifest.payload.get("protocol", "")).strip()
+    if protocol not in ALLOWED_PRODUCTION_PROTOCOLS:
+        raise ValueError(
+            f"正式重调度训练只接受 {sorted(ALLOWED_PRODUCTION_PROTOCOLS)} manifest；"
+            f"当前 protocol={protocol or '<missing>'!r}。历史 r3/无 protocol 资产禁止用于训练。"
+        )
+    train_entries = tuple(entry for entry in manifest.ready_entries() if entry.split == "train")
+    if len(train_entries) != 30:
+        raise ValueError(f"正式协议要求 30 个 ready 训练图，实际为 {len(train_entries)}")
+    ids = [entry.instance_id for entry in train_entries]
+    if len(set(ids)) != len(ids):
+        raise ValueError("训练 manifest 存在重复 instance_id")
+
+    real_entries = tuple(entry for entry in manifest.ready_entries() if entry.instance_id in REAL_INSTANCE_IDS)
+    if tuple(entry.instance_id for entry in real_entries) != REAL_INSTANCE_IDS:
+        raise ValueError(f"正式协议必须精确包含四个真实实例 {REAL_INSTANCE_IDS}")
+    if len(manifest.ready_entries()) != 34 or manifest.payload.get("skipped", []) not in ([], None):
+        raise ValueError("正式协议必须恰有 34 个 ready 条目且零 skipped")
+
+    for entry in (*train_entries, *real_entries):
+        if not entry.data_path.is_file():
+            raise FileNotFoundError(f"manifest 数据图不存在: {entry.data_path}")
+        if not entry.baseline_schedule_path.is_file():
+            raise FileNotFoundError(f"manifest 基准排程不存在: {entry.baseline_schedule_path}")
+        _validate_asset_hash(entry, field="data_sha256", path=entry.data_path)
+        _validate_asset_hash(entry, field="baseline_sha256", path=entry.baseline_schedule_path)
+        validate_explicit_five_skill_csv(entry.data_path, require_all_skills=True)
+        if entry.split == "eval":
+            if entry.scenario_path is None or not entry.scenario_path.is_file():
+                raise FileNotFoundError(f"{entry.instance_id} 缺少真实实例场景文件")
+            _validate_asset_hash(entry, field="scenario_sha256", path=entry.scenario_path)
+
+
+def resolve_explicit_five_skill_training_paths(
+    manifest: RescheduleManifest,
+    configured_data_path: str | Path,
+) -> tuple[Path, ...]:
+    """验证目录与 manifest 完全一致，并返回唯一允许运行的有序训练文件。"""
+    validate_explicit_five_skill_training_manifest(manifest)
+    directory = resolve_workspace_path(configured_data_path).resolve()
+    if not directory.is_dir():
+        raise ValueError("正式重调度训练的 train_data_path_or_dir 必须是 manifest 训练图所在目录")
+    declared = tuple(entry.data_path.resolve() for entry in manifest.filter(split="train"))
+    discovered = tuple(sorted(path.resolve() for path in directory.iterdir() if path.suffix.lower() == ".csv"))
+    if len(set(declared)) != len(declared):
+        raise ValueError("manifest 训练数据路径重复")
+    if discovered != tuple(sorted(declared)):
+        extra = sorted(str(path) for path in set(discovered) - set(declared))
+        missing = sorted(str(path) for path in set(declared) - set(discovered))
+        raise ValueError(f"训练目录与 manifest 精确文件列表不一致: extra={extra}; missing={missing}")
+    return declared
 
 
 def get_configured_reschedule_manifest(config_obj: Any) -> RescheduleManifest | None:
@@ -149,6 +241,8 @@ __all__ = [
     "RescheduleManifestEntry",
     "get_configured_reschedule_manifest",
     "load_reschedule_manifest",
+    "resolve_explicit_five_skill_training_paths",
+    "validate_explicit_five_skill_training_manifest",
     "resolve_manifest_entry_for_data",
     "resolve_manifest_eval_entry",
     "to_manifest_path",

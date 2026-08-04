@@ -38,6 +38,7 @@ from runtime.hydra_config import (
 )
 from runtime.paths import resolve_workspace_path
 from runtime.reschedule_manifest import load_reschedule_manifest
+from runtime.initial_worker_mapping import apply_initial_worker_mapping
 
 
 MANIFEST_EVAL_ARGS = {
@@ -45,8 +46,11 @@ MANIFEST_EVAL_ARGS = {
     "manifest_path": ExtraArgument(required=True, help="prepare_reschedule_data.py 生成的 manifest"),
     "instance_ids": ExtraArgument(default=["real_283", "real_680", "real_2338", "real_3182"], help="要评估的 manifest 实例 ID"),
     "num_runs": ExtraArgument(default=None, help="每个实例最多评估多少个固定场景；缺省评估全部"),
+    "scenario_ids": ExtraArgument(default=None, help="显式指定每个实例评估的场景 ID 列表"),
     "temperature": ExtraArgument(default=0.0, help="评估动作温度，0 表示确定性"),
     "output_dir": ExtraArgument(default="results/reschedule_manifest_eval", help="输出目录"),
+    "reschedule_eval_use_cached_observation": ExtraArgument(default=False, help="use cached observations as async evaluation"),
+    "reschedule_eval_skip_value_estimation": ExtraArgument(default=False, help="skip value estimation as async evaluation"),
 }
 
 
@@ -65,6 +69,9 @@ def _backup_config() -> dict[str, Any]:
         "reschedule_eval_instance_id",
         "enable_reschedule_mode",
         "verbose_reschedule_eval_progress",
+        "n_w",
+        "n_w_min",
+        "n_w_max",
     )
     return {key: getattr(configs, key, False) for key in keys}
 
@@ -80,9 +87,12 @@ def evaluate_manifest_instances(
     manifest_path: Path,
     instance_ids: list[str],
     num_runs: int | None,
+    scenario_ids: list[str] | None,
     temperature: float,
     output_dir: Path,
     explicit_fields: set[str] | None = None,
+    use_cached_observation: bool = False,
+    skip_value_estimation: bool = False,
 ) -> dict[str, Any]:
     checkpoint = load_checkpoint(model_path)
     apply_checkpoint_model_spec(configs, checkpoint.model_spec, explicit_fields=explicit_fields)
@@ -103,6 +113,7 @@ def evaluate_manifest_instances(
             configs.data_file_path = str(entry.data_path)
             configs.reschedule_baseline_schedule_path = str(entry.baseline_schedule_path)
             configs.reschedule_eval_scenario_path = str(entry.scenario_path)
+            apply_initial_worker_mapping(configs, entry.data_path, explicit_fields=set())
             subdir = output_dir / instance_id
             print(
                 f"[ManifestEval] start instance={instance_id} "
@@ -113,8 +124,11 @@ def evaluate_manifest_instances(
             summary = evaluate_saved_reschedule_model(
                 model_path=model_path,
                 num_runs=num_runs,
+                scenario_ids=scenario_ids,
                 temperature=float(temperature),
                 output_dir=subdir,
+                use_cached_observation=use_cached_observation,
+                skip_value_estimation=skip_value_estimation,
             )
             summary_row = {
                 "instance_id": instance_id,
@@ -154,6 +168,7 @@ def evaluate_manifest_instances(
             "instance_ids": instance_ids,
             "rows": rows,
             "summaries": summaries,
+            "scenario_ids": scenario_ids,
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
@@ -177,9 +192,12 @@ def main(argv: list[str] | None = None) -> int:
             manifest_path=resolve_workspace_path(args.manifest_path),
             instance_ids=_as_id_list(args.instance_ids),
             num_runs=None if args.num_runs is None else int(args.num_runs),
+            scenario_ids=_as_id_list(args.scenario_ids) if args.scenario_ids is not None else None,
             temperature=float(args.temperature),
             output_dir=resolve_workspace_path(args.output_dir),
             explicit_fields=set(getattr(args, "explicit_config_fields", set())),
+            use_cached_observation=bool(args.reschedule_eval_use_cached_observation),
+            skip_value_estimation=bool(args.reschedule_eval_skip_value_estimation),
         )
     except (HydraCliError, KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
         print(f"[CLI] {exc}", file=sys.stderr)

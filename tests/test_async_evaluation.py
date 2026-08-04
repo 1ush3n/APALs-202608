@@ -52,11 +52,16 @@ def test_async_eval_config_accepts_initial_standard_and_rejects_unsupported_opti
 
     config.eval_scenarios = ["standard"]
     config.enable_reschedule_mode = True
+    config.enable_multi_benchmark_eval = False
     config.async_eval_device = "cuda"
-    with pytest.raises(ValueError, match="必须为 cpu"):
+    validate_runtime_config(config)
+
+    config.async_eval_worker_count = 2
+    with pytest.raises(ValueError, match="worker_count=1"):
         validate_runtime_config(config)
 
     config.async_eval_device = "cpu"
+    config.async_eval_worker_count = 1
     config.eval_freq = 2
     with pytest.raises(ValueError, match="eval_freq=1"):
         validate_runtime_config(config)

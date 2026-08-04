@@ -1,0 +1,898 @@
+{
+  "schema_version": "r4_asset_integrity_v1",
+  "status": "passed",
+  "verified_at": "2026-07-29T10:13:56+08:00",
+  "checkpoint": {
+    "path": "checkpoints/init/g15.ckpt",
+    "bytes": 127124342,
+    "sha256": "9e8f9136ac99eaaff7efe1e8bbb14612e6327b03ff69c36f9fee1b6d1b6a3225"
+  },
+  "source_real_manifest": "data/r3/m.json",
+  "generated_training_bucket": {
+    "version": 1,
+    "template": "data/680.csv",
+    "template_sha256": "5171c1c1bfcc532b469f351f8482b2c2d7deb83baf3f1aab44ee8783c909125d",
+    "baseline_file": "",
+    "min_length": 400,
+    "max_length": 600,
+    "num_samples": 30,
+    "time_var": 0.2,
+    "seed": 20260701,
+    "require_explicit_skill_columns": true,
+    "required_skill_ids": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "files": [
+      {
+        "file": "variant_01_tasks_466_template_680.csv",
+        "target_task_count": 466,
+        "actual_task_count": 466,
+        "graph_node_count": 501,
+        "sha256": "f7e1e1703065b2928c3794ee4cf2a6c745ae1b9fa8c3ee2532b1672df811d34d"
+      },
+      {
+        "file": "variant_02_tasks_528_template_680.csv",
+        "target_task_count": 528,
+        "actual_task_count": 528,
+        "graph_node_count": 563,
+        "sha256": "409ef408b59f086d937697fc5e9fd15215a31b6cd4a82d569a3827a200d9747f"
+      },
+      {
+        "file": "variant_03_tasks_415_template_680.csv",
+        "target_task_count": 415,
+        "actual_task_count": 415,
+        "graph_node_count": 450,
+        "sha256": "07acfbc1845440361d8a75280f9abfb536fba7d7171f36fdc65cdcacc5d7fe56"
+      },
+      {
+        "file": "variant_04_tasks_480_template_680.csv",
+        "target_task_count": 480,
+        "actual_task_count": 480,
+        "graph_node_count": 515,
+        "sha256": "0d1f03d408917d1b0879d5a0208242be15ea7cf28f50001ad2edf1af52efa50f"
+      },
+      {
+        "file": "variant_05_tasks_406_template_680.csv",
+        "target_task_count": 406,
+        "actual_task_count": 406,
+        "graph_node_count": 441,
+        "sha256": "1dfca673f3b8a9f469c874dea68e482712628abc9268590debc2aa8affb0c31f"
+      },
+      {
+        "file": "variant_06_tasks_425_template_680.csv",
+        "target_task_count": 425,
+        "actual_task_count": 425,
+        "graph_node_count": 460,
+        "sha256": "5e909f66b995875078fa61374d63ec209b06a9094188fdce7d53e705ce997378"
+      },
+      {
+        "file": "variant_07_tasks_491_template_680.csv",
+        "target_task_count": 491,
+        "actual_task_count": 491,
+        "graph_node_count": 526,
+        "sha256": "4cf39d0016efe0705b526557d2bd875037e265ddd9188b0eadc7a455de2422c4"
+      },
+      {
+        "file": "variant_08_tasks_598_template_680.csv",
+        "target_task_count": 598,
+        "actual_task_count": 598,
+        "graph_node_count": 633,
+        "sha256": "bbe39ce6ac712f8077e39c0a8e068bd954f514bc75b854bc19c6ebb23532291e"
+      },
+      {
+        "file": "variant_09_tasks_504_template_680.csv",
+        "target_task_count": 504,
+        "actual_task_count": 504,
+        "graph_node_count": 539,
+        "sha256": "6100252105a688ea7563d18dddc3f8819eec4b484aeeffb1e2bccaa84f6b455e"
+      },
+      {
+        "file": "variant_10_tasks_485_template_680.csv",
+        "target_task_count": 485,
+        "actual_task_count": 485,
+        "graph_node_count": 520,
+        "sha256": "7818b72e745d53ca8ba89133acd62a87408e97a8cedefb694b78eb88c47d74a0"
+      },
+      {
+        "file": "variant_11_tasks_568_template_680.csv",
+        "target_task_count": 568,
+        "actual_task_count": 568,
+        "graph_node_count": 603,
+        "sha256": "0f4f78b2f3b14eff8f10ad151d0528c144d3163a00e0e9808e46d7ea9000723b"
+      },
+      {
+        "file": "variant_12_tasks_501_template_680.csv",
+        "target_task_count": 501,
+        "actual_task_count": 501,
+        "graph_node_count": 536,
+        "sha256": "408c486f25acdeb12a0c1b2976f64844894949b841dc000adcbb9b08342c83f1"
+      },
+      {
+        "file": "variant_13_tasks_539_template_680.csv",
+        "target_task_count": 539,
+        "actual_task_count": 539,
+        "graph_node_count": 574,
+        "sha256": "a107c902562ec12253f195ada5f4dcc7f39422f255629a2b2d26780d4cffcace"
+      },
+      {
+        "file": "variant_14_tasks_569_template_680.csv",
+        "target_task_count": 569,
+        "actual_task_count": 569,
+        "graph_node_count": 604,
+        "sha256": "365af2aa0aacea99f91edeac80f5c1a39c64048341be6f0146b14193d7a7d03e"
+      },
+      {
+        "file": "variant_15_tasks_409_template_680.csv",
+        "target_task_count": 409,
+        "actual_task_count": 409,
+        "graph_node_count": 444,
+        "sha256": "9501d1583c47e62bd4afc4adf0c56e1d3e0253b9a2b3da159d64471aa812224e"
+      },
+      {
+        "file": "variant_16_tasks_556_template_680.csv",
+        "target_task_count": 556,
+        "actual_task_count": 556,
+        "graph_node_count": 591,
+        "sha256": "59dbf6d5298951414941ceeecf52f28e6867eebb782e3dc69b1b3f749e402ba8"
+      },
+      {
+        "file": "variant_17_tasks_598_template_680.csv",
+        "target_task_count": 598,
+        "actual_task_count": 598,
+        "graph_node_count": 633,
+        "sha256": "6c77b0043912b3fbcd5b9628e758c10b596fb13ffde67ec4cacd3bc88b50fd43"
+      },
+      {
+        "file": "variant_18_tasks_516_template_680.csv",
+        "target_task_count": 516,
+        "actual_task_count": 516,
+        "graph_node_count": 551,
+        "sha256": "423eb3f25c362e02535ee13067b47c2c5768a4e85fc7c57859df936e71f8e8f1"
+      },
+      {
+        "file": "variant_19_tasks_597_template_680.csv",
+        "target_task_count": 597,
+        "actual_task_count": 597,
+        "graph_node_count": 632,
+        "sha256": "2a1727c140801176680292fd90cd0684db84d89ebf49c180cd0e86f51aff543c"
+      },
+      {
+        "file": "variant_20_tasks_525_template_680.csv",
+        "target_task_count": 525,
+        "actual_task_count": 525,
+        "graph_node_count": 560,
+        "sha256": "0121a5b8e7b788e44fbe95a585acbabce76badeaf89c1e7ca6f595f6286e93f5"
+      },
+      {
+        "file": "variant_21_tasks_518_template_680.csv",
+        "target_task_count": 518,
+        "actual_task_count": 518,
+        "graph_node_count": 553,
+        "sha256": "dc2d7a7801976bafb83dd6c9b72a379ec57f4c5d32fe8069c073892af02bcc74"
+      },
+      {
+        "file": "variant_22_tasks_447_template_680.csv",
+        "target_task_count": 447,
+        "actual_task_count": 447,
+        "graph_node_count": 482,
+        "sha256": "721ce110ad33b496d7bc0c426e4581cd668e4641782fefcad8e421a16070bb5b"
+      },
+      {
+        "file": "variant_23_tasks_445_template_680.csv",
+        "target_task_count": 445,
+        "actual_task_count": 445,
+        "graph_node_count": 480,
+        "sha256": "47ba1c6c7d3f2c748f34d96afd8e6317a6c20f9443843bc8949bed047588ae29"
+      },
+      {
+        "file": "variant_24_tasks_464_template_680.csv",
+        "target_task_count": 464,
+        "actual_task_count": 464,
+        "graph_node_count": 499,
+        "sha256": "a6438f5ee7b8f9ef1ba9913751f80cdb86533092b1f0a3650320130b1e2f4b1b"
+      },
+      {
+        "file": "variant_25_tasks_497_template_680.csv",
+        "target_task_count": 497,
+        "actual_task_count": 497,
+        "graph_node_count": 532,
+        "sha256": "319b9cdc22b5ac52205ef4f15c8029139c0633a043b42f72faeda9880fe347a4"
+      },
+      {
+        "file": "variant_26_tasks_464_template_680.csv",
+        "target_task_count": 464,
+        "actual_task_count": 464,
+        "graph_node_count": 499,
+        "sha256": "04f01f67b8b2579bba9acbb8080b1ac3d9258330755b3ca4635d7053eba93590"
+      },
+      {
+        "file": "variant_27_tasks_564_template_680.csv",
+        "target_task_count": 564,
+        "actual_task_count": 564,
+        "graph_node_count": 599,
+        "sha256": "798c7d139483ff940d6a0912da279712819db2603b9eef257329755a913bc8a7"
+      },
+      {
+        "file": "variant_28_tasks_462_template_680.csv",
+        "target_task_count": 462,
+        "actual_task_count": 462,
+        "graph_node_count": 497,
+        "sha256": "5ad0c13c0ad7a58a8fdd06d0a8e29199395ec827ce04b306e75a25b7de1d3b71"
+      },
+      {
+        "file": "variant_29_tasks_450_template_680.csv",
+        "target_task_count": 450,
+        "actual_task_count": 450,
+        "graph_node_count": 485,
+        "sha256": "4c7d5c14766eeb654c6d9544e41de92d046ce7e9e4629f122ed86926535e787f"
+      },
+      {
+        "file": "variant_30_tasks_583_template_680.csv",
+        "target_task_count": 583,
+        "actual_task_count": 583,
+        "graph_node_count": 618,
+        "sha256": "042f980e08d8705bbf4fd7cffdf90b128c404921249aa1907d9f4b25ed0c7648"
+      }
+    ]
+  },
+  "training_data_audit": {
+    "训练文件数量": 30,
+    "总行数": 16120,
+    "AO号可在2338.csv找到的行": 15331,
+    "重合率": 0.9510545905707196,
+    "非重合行": 789,
+    "重合行工时一致数": 1229,
+    "重合行需求人数一致数": 15331,
+    "重合行类型一致数": 15331,
+    "三个字段同时一致数": 1229,
+    "重合行专业编码一致数": 15331,
+    "重合行工种一致数": 15331,
+    "训练集中正工时行": 15070,
+    "物理工序总数": 15070,
+    "单文件物理工序数范围": [
+      406,
+      598
+    ],
+    "五工种物理工序分布": {
+      "0": 3689,
+      "1": 3708,
+      "2": 3130,
+      "3": 991,
+      "4": 3552
+    },
+    "逐训练图五工种分布": {
+      "variant_01_tasks_466_template_680.csv": {
+        "0": 128,
+        "1": 113,
+        "2": 101,
+        "3": 24,
+        "4": 100
+      },
+      "variant_02_tasks_528_template_680.csv": {
+        "0": 121,
+        "1": 117,
+        "2": 114,
+        "3": 39,
+        "4": 137
+      },
+      "variant_03_tasks_415_template_680.csv": {
+        "0": 104,
+        "1": 104,
+        "2": 80,
+        "3": 26,
+        "4": 101
+      },
+      "variant_04_tasks_480_template_680.csv": {
+        "0": 122,
+        "1": 117,
+        "2": 96,
+        "3": 29,
+        "4": 116
+      },
+      "variant_05_tasks_406_template_680.csv": {
+        "0": 105,
+        "1": 93,
+        "2": 81,
+        "3": 30,
+        "4": 97
+      },
+      "variant_06_tasks_425_template_680.csv": {
+        "0": 101,
+        "1": 100,
+        "2": 95,
+        "3": 28,
+        "4": 101
+      },
+      "variant_07_tasks_491_template_680.csv": {
+        "0": 125,
+        "1": 122,
+        "2": 97,
+        "3": 31,
+        "4": 116
+      },
+      "variant_08_tasks_598_template_680.csv": {
+        "0": 144,
+        "1": 143,
+        "2": 126,
+        "3": 45,
+        "4": 140
+      },
+      "variant_09_tasks_504_template_680.csv": {
+        "0": 121,
+        "1": 124,
+        "2": 96,
+        "3": 29,
+        "4": 134
+      },
+      "variant_10_tasks_485_template_680.csv": {
+        "0": 104,
+        "1": 118,
+        "2": 112,
+        "3": 25,
+        "4": 126
+      },
+      "variant_11_tasks_568_template_680.csv": {
+        "0": 133,
+        "1": 142,
+        "2": 123,
+        "3": 36,
+        "4": 134
+      },
+      "variant_12_tasks_501_template_680.csv": {
+        "0": 120,
+        "1": 131,
+        "2": 96,
+        "3": 34,
+        "4": 120
+      },
+      "variant_13_tasks_539_template_680.csv": {
+        "0": 151,
+        "1": 130,
+        "2": 109,
+        "3": 30,
+        "4": 119
+      },
+      "variant_14_tasks_569_template_680.csv": {
+        "0": 137,
+        "1": 145,
+        "2": 117,
+        "3": 35,
+        "4": 135
+      },
+      "variant_15_tasks_409_template_680.csv": {
+        "0": 99,
+        "1": 101,
+        "2": 90,
+        "3": 24,
+        "4": 95
+      },
+      "variant_16_tasks_556_template_680.csv": {
+        "0": 141,
+        "1": 133,
+        "2": 123,
+        "3": 36,
+        "4": 123
+      },
+      "variant_17_tasks_598_template_680.csv": {
+        "0": 155,
+        "1": 142,
+        "2": 123,
+        "3": 37,
+        "4": 141
+      },
+      "variant_18_tasks_516_template_680.csv": {
+        "0": 124,
+        "1": 140,
+        "2": 99,
+        "3": 32,
+        "4": 121
+      },
+      "variant_19_tasks_597_template_680.csv": {
+        "0": 145,
+        "1": 140,
+        "2": 131,
+        "3": 42,
+        "4": 139
+      },
+      "variant_20_tasks_525_template_680.csv": {
+        "0": 129,
+        "1": 125,
+        "2": 118,
+        "3": 37,
+        "4": 116
+      },
+      "variant_21_tasks_518_template_680.csv": {
+        "0": 140,
+        "1": 125,
+        "2": 101,
+        "3": 31,
+        "4": 121
+      },
+      "variant_22_tasks_447_template_680.csv": {
+        "0": 102,
+        "1": 110,
+        "2": 98,
+        "3": 32,
+        "4": 105
+      },
+      "variant_23_tasks_445_template_680.csv": {
+        "0": 99,
+        "1": 118,
+        "2": 92,
+        "3": 27,
+        "4": 109
+      },
+      "variant_24_tasks_464_template_680.csv": {
+        "0": 106,
+        "1": 120,
+        "2": 99,
+        "3": 34,
+        "4": 105
+      },
+      "variant_25_tasks_497_template_680.csv": {
+        "0": 128,
+        "1": 118,
+        "2": 98,
+        "3": 35,
+        "4": 118
+      },
+      "variant_26_tasks_464_template_680.csv": {
+        "0": 114,
+        "1": 114,
+        "2": 93,
+        "3": 33,
+        "4": 110
+      },
+      "variant_27_tasks_564_template_680.csv": {
+        "0": 132,
+        "1": 149,
+        "2": 110,
+        "3": 39,
+        "4": 134
+      },
+      "variant_28_tasks_462_template_680.csv": {
+        "0": 109,
+        "1": 118,
+        "2": 93,
+        "3": 36,
+        "4": 106
+      },
+      "variant_29_tasks_450_template_680.csv": {
+        "0": 106,
+        "1": 110,
+        "2": 90,
+        "3": 35,
+        "4": 109
+      },
+      "variant_30_tasks_583_template_680.csv": {
+        "0": 144,
+        "1": 146,
+        "2": 129,
+        "3": 40,
+        "4": 124
+      }
+    },
+    "五工种总劳动量": {
+      "0": 22113.86,
+      "1": 32993.73,
+      "2": 44041.85,
+      "3": 5904.1,
+      "4": 26002.15
+    },
+    "五工种劳动量占比": {
+      "0": 0.16873635932938127,
+      "1": 0.2517535102825372,
+      "2": 0.3360544666164437,
+      "3": 0.04505031410692661,
+      "4": 0.19840534966471124
+    },
+    "非重合物理工序五工种分布": {
+      "0": 242,
+      "1": 55,
+      "2": 301,
+      "3": 10,
+      "4": 181
+    },
+    "工人数量": 1000,
+    "工人技能覆盖": {
+      "0": 604,
+      "1": 605,
+      "2": 604,
+      "3": 605,
+      "4": 604
+    },
+    "每名工人技能数范围": [
+      2,
+      4
+    ],
+    "工人效率范围": [
+      0.8004932250047633,
+      1.1996418921896954
+    ],
+    "源数据已知外部前驱AO": [],
+    "训练集已知外部前驱引用数": 0,
+    "结构与语义校验": "全部通过"
+  },
+  "real_asset_copies": [
+    {
+      "source": "data/r3/b/r/real_283_schedule.csv",
+      "target": "data/r4/b/r/real_283_schedule.csv",
+      "sha256": "b14f86061fac1febe946279469dac5219966bdfcb14670d683d466bf92d732e8"
+    },
+    {
+      "source": "data/r3/s/real_283_load_grid_seed20260701.csv",
+      "target": "data/r4/s/real_283_load_grid_seed20260701.csv",
+      "sha256": "46a84f95acabe98f74fdaf777b0c41f972c008c3c0694bfcb3ad31c3a0e602a6"
+    },
+    {
+      "source": "data/r3/s/real_283_load_grid_seed20260701.metadata.json",
+      "target": "data/r4/s/real_283_load_grid_seed20260701.metadata.json",
+      "sha256": "d12f96c4014182056fc866229c9a2ad52ec8332d4149ce4b5c9b801ffd1f81da"
+    },
+    {
+      "source": "data/r3/b/r/real_680_schedule.csv",
+      "target": "data/r4/b/r/real_680_schedule.csv",
+      "sha256": "89287c7624f14c674b106b9affdec40de08b3992bffc920204ee65f11cf0adce"
+    },
+    {
+      "source": "data/r3/s/real_680_load_grid_seed20260701.csv",
+      "target": "data/r4/s/real_680_load_grid_seed20260701.csv",
+      "sha256": "44099e7816bbf76d9bb1c8c53f76c31a764de75c40354a8718ac53e90b49dd1f"
+    },
+    {
+      "source": "data/r3/s/real_680_load_grid_seed20260701.metadata.json",
+      "target": "data/r4/s/real_680_load_grid_seed20260701.metadata.json",
+      "sha256": "edc914ed3dbdd23639c0ebc369b1308852672a04280762a2fc8ed9e48c5680ce"
+    },
+    {
+      "source": "data/r3/b/r/real_2338_schedule.csv",
+      "target": "data/r4/b/r/real_2338_schedule.csv",
+      "sha256": "3d06f08f209cbf2ca7e3bc5d95082b7d4100f85208d8ce9eed75ac3981b9ffe7"
+    },
+    {
+      "source": "data/r3/s/real_2338_load_grid_seed20260701.csv",
+      "target": "data/r4/s/real_2338_load_grid_seed20260701.csv",
+      "sha256": "0adc16aeb245ee0d80d1162813c37367d312814feead61201e318c08a985b5c8"
+    },
+    {
+      "source": "data/r3/s/real_2338_load_grid_seed20260701.metadata.json",
+      "target": "data/r4/s/real_2338_load_grid_seed20260701.metadata.json",
+      "sha256": "89e12b099a6dbb3e7dc4ad51a4652da99270306515809538f0d6d142f66bbfd0"
+    },
+    {
+      "source": "data/r3/b/r/real_3182_schedule.csv",
+      "target": "data/r4/b/r/real_3182_schedule.csv",
+      "sha256": "65a8f5b413fed2045432b11590264a9c2e54e346aefb8aec935922d4b3ab23a5"
+    },
+    {
+      "source": "data/r3/s/real_3182_load_grid_seed20260701.csv",
+      "target": "data/r4/s/real_3182_load_grid_seed20260701.csv",
+      "sha256": "2cbfd3d9836f9551f9503a269563efc1734ea3433f466cec865684645cf0f7dc"
+    },
+    {
+      "source": "data/r3/s/real_3182_load_grid_seed20260701.metadata.json",
+      "target": "data/r4/s/real_3182_load_grid_seed20260701.metadata.json",
+      "sha256": "14d7bcc2dcf26f275a60f6563d0f11a500e55c89fcc3201d9e6faab7bc76b846"
+    }
+  ],
+  "real_reset_worker_counts": {
+    "real_283": 80,
+    "real_680": 100,
+    "real_2338": 140,
+    "real_3182": 160
+  },
+  "manifest": {
+    "ready": 34,
+    "skipped": 0,
+    "path": "data/r4/m.json"
+  },
+  "file_sha256": {
+    "b/r/real_2338_schedule.csv": {
+      "bytes": 175258,
+      "sha256": "3d06f08f209cbf2ca7e3bc5d95082b7d4100f85208d8ce9eed75ac3981b9ffe7"
+    },
+    "b/r/real_283_schedule.csv": {
+      "bytes": 19996,
+      "sha256": "b14f86061fac1febe946279469dac5219966bdfcb14670d683d466bf92d732e8"
+    },
+    "b/r/real_3182_schedule.csv": {
+      "bytes": 241149,
+      "sha256": "65a8f5b413fed2045432b11590264a9c2e54e346aefb8aec935922d4b3ab23a5"
+    },
+    "b/r/real_680_schedule.csv": {
+      "bytes": 50212,
+      "sha256": "89287c7624f14c674b106b9affdec40de08b3992bffc920204ee65f11cf0adce"
+    },
+    "b/t/train_0001_schedule.csv": {
+      "bytes": 34646,
+      "sha256": "0964fbeae09b2da35bce579848c687f9d3018bb5ab500940bffab5f09a389235"
+    },
+    "b/t/train_0002_schedule.csv": {
+      "bytes": 39218,
+      "sha256": "e5e3f454b2e788a553550798b45183b9ac8880df22a6c528c5e2098e1d949217"
+    },
+    "b/t/train_0003_schedule.csv": {
+      "bytes": 31008,
+      "sha256": "63f3980fa89752e1b522d11ad4465adbbc26935e2fdc272ade0c1bd27451803f"
+    },
+    "b/t/train_0004_schedule.csv": {
+      "bytes": 35766,
+      "sha256": "8d5dacaac50f712185b06cac36805be62105cf215ffeb4aaa3203aaf0a5c93a6"
+    },
+    "b/t/train_0005_schedule.csv": {
+      "bytes": 30285,
+      "sha256": "ca5a5a6097837f53ac10e0528d8550fbee725dfdcd04d1dca608270e592cfd42"
+    },
+    "b/t/train_0006_schedule.csv": {
+      "bytes": 31664,
+      "sha256": "9a299aaf1edd03c1df1cd58417e47b72b50565e785882a938d2565c5bb5bb1aa"
+    },
+    "b/t/train_0007_schedule.csv": {
+      "bytes": 36455,
+      "sha256": "d41df14e029bef32ea623b96a94c4cb1065264bb91410ee35792402e8c9ba4f8"
+    },
+    "b/t/train_0008_schedule.csv": {
+      "bytes": 44266,
+      "sha256": "c0ae1678c57a4a0b22cf4b2c90b759f4f98c32ed279fb870eaa5a62391720a71"
+    },
+    "b/t/train_0009_schedule.csv": {
+      "bytes": 37358,
+      "sha256": "7901c23685ecc616cc82a37f3e076e23e6e60f51cbf3212ed87e490827799175"
+    },
+    "b/t/train_0010_schedule.csv": {
+      "bytes": 36149,
+      "sha256": "153558a905ea058763140c689d66ecfcf9fe41f5a9a31a2352cabe1b19d9476f"
+    },
+    "b/t/train_0011_schedule.csv": {
+      "bytes": 41905,
+      "sha256": "79981f5d476b993534b8c2ca95adda735d6449e42faf10386a88a4e6d95ca894"
+    },
+    "b/t/train_0012_schedule.csv": {
+      "bytes": 37336,
+      "sha256": "18038f7240dd9321fad9c3cc1c42e6f46a7b573257870fe2b0451a3378cde8f1"
+    },
+    "b/t/train_0013_schedule.csv": {
+      "bytes": 39887,
+      "sha256": "a916e6bd7573e9ff745a965eef3f39171817b6aea5bec11c7b60fc3cb29db075"
+    },
+    "b/t/train_0014_schedule.csv": {
+      "bytes": 42131,
+      "sha256": "0d4ece7795212df20863ef1cb2016b968773fc74446f849f5ee7c032f00b145b"
+    },
+    "b/t/train_0015_schedule.csv": {
+      "bytes": 30594,
+      "sha256": "6f3cab09cf4c47ef3a2ab6822f4d8b559a44ffe28eb9ce65d79c4def6e1c80f1"
+    },
+    "b/t/train_0016_schedule.csv": {
+      "bytes": 40942,
+      "sha256": "87d7591ebe245598dc70ed6ab239b4927251f9bea297a86599a1c1f0ae1f93c2"
+    },
+    "b/t/train_0017_schedule.csv": {
+      "bytes": 44234,
+      "sha256": "94a9aca860a424a176b8e03999808444a73a0359fcbc248d2e92405c27acf060"
+    },
+    "b/t/train_0018_schedule.csv": {
+      "bytes": 38146,
+      "sha256": "b486d508cfb12044c7604e780b21f630b2ce2fefbb115bfdfb064418b6bb5ffe"
+    },
+    "b/t/train_0019_schedule.csv": {
+      "bytes": 44080,
+      "sha256": "ae4280f7730a6848d0004666121dfcecef30890cf3250ec6647eb6b3ae6e246e"
+    },
+    "b/t/train_0020_schedule.csv": {
+      "bytes": 38993,
+      "sha256": "0263b0f713af7a49631318133df9e2e72e9d62cf62cc367459010988e6a1f5e3"
+    },
+    "b/t/train_0021_schedule.csv": {
+      "bytes": 38354,
+      "sha256": "7062837c123018cf652ba6703cde9dd5606345328b659b50878ce1776e94e33c"
+    },
+    "b/t/train_0022_schedule.csv": {
+      "bytes": 33313,
+      "sha256": "f409c520d105c7b7514bd3ce99e814f1a703e88980c81519eb8fbba847403f4a"
+    },
+    "b/t/train_0023_schedule.csv": {
+      "bytes": 33228,
+      "sha256": "e0d809d0cbc8198e405afdb27cbc3c0ea941cc183a98ee2f4cc95c9b38214f55"
+    },
+    "b/t/train_0024_schedule.csv": {
+      "bytes": 34385,
+      "sha256": "c6e09bdb2c7935d7c7772608c78b8b12c57af0d0293f4abd166ad97af05ebe54"
+    },
+    "b/t/train_0025_schedule.csv": {
+      "bytes": 36948,
+      "sha256": "b6b37803fb22464a2d7c4354168c34e43f42037fb019e36f4e20a67b7d5ff5a6"
+    },
+    "b/t/train_0026_schedule.csv": {
+      "bytes": 34480,
+      "sha256": "88b5b7a3e2613b8877cae1560971d354a13d5093fdcc41794f28853e0029e720"
+    },
+    "b/t/train_0027_schedule.csv": {
+      "bytes": 41673,
+      "sha256": "74fbf7e372d80bb932ffdaf44f064eb202a71fd2b2751b34f71b315fe70b25bd"
+    },
+    "b/t/train_0028_schedule.csv": {
+      "bytes": 34349,
+      "sha256": "facd77a3abefdc7e7971581b62ba72be4a9dda5ef42896abf0cfb0f8a818fd7f"
+    },
+    "b/t/train_0029_schedule.csv": {
+      "bytes": 33499,
+      "sha256": "8d619dfb0fc83a6011c62924804363dbcc4dfd46e750a488c182b95840408796"
+    },
+    "b/t/train_0030_schedule.csv": {
+      "bytes": 43066,
+      "sha256": "9ee8897cb0a5ad6777aa4707338be7751d29907d36275fd7b035ad1c69fbf449"
+    },
+    "m.json": {
+      "bytes": 14423,
+      "sha256": "22306c8ac410b84e017f9a60041b50eb34f4f73a2b8b3360b78aeb377017cebb"
+    },
+    "README.md": {
+      "bytes": 1090,
+      "sha256": "9d4caf37aed6fdbca3d095b981ab0c1a691303389eb2c83021e9d07e80c1aa42"
+    },
+    "s/real_2338_load_grid_seed20260701.csv": {
+      "bytes": 176836,
+      "sha256": "0adc16aeb245ee0d80d1162813c37367d312814feead61201e318c08a985b5c8"
+    },
+    "s/real_2338_load_grid_seed20260701.metadata.json": {
+      "bytes": 25208,
+      "sha256": "89e12b099a6dbb3e7dc4ad51a4652da99270306515809538f0d6d142f66bbfd0"
+    },
+    "s/real_283_load_grid_seed20260701.csv": {
+      "bytes": 49815,
+      "sha256": "46a84f95acabe98f74fdaf777b0c41f972c008c3c0694bfcb3ad31c3a0e602a6"
+    },
+    "s/real_283_load_grid_seed20260701.metadata.json": {
+      "bytes": 24947,
+      "sha256": "d12f96c4014182056fc866229c9a2ad52ec8332d4149ce4b5c9b801ffd1f81da"
+    },
+    "s/real_3182_load_grid_seed20260701.csv": {
+      "bytes": 362336,
+      "sha256": "2cbfd3d9836f9551f9503a269563efc1734ea3433f466cec865684645cf0f7dc"
+    },
+    "s/real_3182_load_grid_seed20260701.metadata.json": {
+      "bytes": 24837,
+      "sha256": "14d7bcc2dcf26f275a60f6563d0f11a500e55c89fcc3201d9e6faab7bc76b846"
+    },
+    "s/real_680_load_grid_seed20260701.csv": {
+      "bytes": 61818,
+      "sha256": "44099e7816bbf76d9bb1c8c53f76c31a764de75c40354a8718ac53e90b49dd1f"
+    },
+    "s/real_680_load_grid_seed20260701.metadata.json": {
+      "bytes": 25082,
+      "sha256": "edc914ed3dbdd23639c0ebc369b1308852672a04280762a2fc8ed9e48c5680ce"
+    },
+    "t/manifest.json": {
+      "bytes": 7996,
+      "sha256": "1d65a83708f525ad043ecf32b5073586c6d9c898f5eee661ddf5c93c7c9cd2dd"
+    },
+    "t/variant_01_tasks_466_template_680.csv": {
+      "bytes": 17689,
+      "sha256": "f7e1e1703065b2928c3794ee4cf2a6c745ae1b9fa8c3ee2532b1672df811d34d"
+    },
+    "t/variant_02_tasks_528_template_680.csv": {
+      "bytes": 20102,
+      "sha256": "409ef408b59f086d937697fc5e9fd15215a31b6cd4a82d569a3827a200d9747f"
+    },
+    "t/variant_03_tasks_415_template_680.csv": {
+      "bytes": 15541,
+      "sha256": "07acfbc1845440361d8a75280f9abfb536fba7d7171f36fdc65cdcacc5d7fe56"
+    },
+    "t/variant_04_tasks_480_template_680.csv": {
+      "bytes": 17588,
+      "sha256": "0d1f03d408917d1b0879d5a0208242be15ea7cf28f50001ad2edf1af52efa50f"
+    },
+    "t/variant_05_tasks_406_template_680.csv": {
+      "bytes": 15290,
+      "sha256": "1dfca673f3b8a9f469c874dea68e482712628abc9268590debc2aa8affb0c31f"
+    },
+    "t/variant_06_tasks_425_template_680.csv": {
+      "bytes": 15937,
+      "sha256": "5e909f66b995875078fa61374d63ec209b06a9094188fdce7d53e705ce997378"
+    },
+    "t/variant_07_tasks_491_template_680.csv": {
+      "bytes": 17893,
+      "sha256": "4cf39d0016efe0705b526557d2bd875037e265ddd9188b0eadc7a455de2422c4"
+    },
+    "t/variant_08_tasks_598_template_680.csv": {
+      "bytes": 22132,
+      "sha256": "bbe39ce6ac712f8077e39c0a8e068bd954f514bc75b854bc19c6ebb23532291e"
+    },
+    "t/variant_09_tasks_504_template_680.csv": {
+      "bytes": 18467,
+      "sha256": "6100252105a688ea7563d18dddc3f8819eec4b484aeeffb1e2bccaa84f6b455e"
+    },
+    "t/variant_10_tasks_485_template_680.csv": {
+      "bytes": 18364,
+      "sha256": "7818b72e745d53ca8ba89133acd62a87408e97a8cedefb694b78eb88c47d74a0"
+    },
+    "t/variant_11_tasks_568_template_680.csv": {
+      "bytes": 20905,
+      "sha256": "0f4f78b2f3b14eff8f10ad151d0528c144d3163a00e0e9808e46d7ea9000723b"
+    },
+    "t/variant_12_tasks_501_template_680.csv": {
+      "bytes": 18509,
+      "sha256": "408c486f25acdeb12a0c1b2976f64844894949b841dc000adcbb9b08342c83f1"
+    },
+    "t/variant_13_tasks_539_template_680.csv": {
+      "bytes": 20174,
+      "sha256": "a107c902562ec12253f195ada5f4dcc7f39422f255629a2b2d26780d4cffcace"
+    },
+    "t/variant_14_tasks_569_template_680.csv": {
+      "bytes": 20878,
+      "sha256": "365af2aa0aacea99f91edeac80f5c1a39c64048341be6f0146b14193d7a7d03e"
+    },
+    "t/variant_15_tasks_409_template_680.csv": {
+      "bytes": 15329,
+      "sha256": "9501d1583c47e62bd4afc4adf0c56e1d3e0253b9a2b3da159d64471aa812224e"
+    },
+    "t/variant_16_tasks_556_template_680.csv": {
+      "bytes": 20915,
+      "sha256": "59dbf6d5298951414941ceeecf52f28e6867eebb782e3dc69b1b3f749e402ba8"
+    },
+    "t/variant_17_tasks_598_template_680.csv": {
+      "bytes": 22060,
+      "sha256": "6c77b0043912b3fbcd5b9628e758c10b596fb13ffde67ec4cacd3bc88b50fd43"
+    },
+    "t/variant_18_tasks_516_template_680.csv": {
+      "bytes": 18957,
+      "sha256": "423eb3f25c362e02535ee13067b47c2c5768a4e85fc7c57859df936e71f8e8f1"
+    },
+    "t/variant_19_tasks_597_template_680.csv": {
+      "bytes": 22339,
+      "sha256": "2a1727c140801176680292fd90cd0684db84d89ebf49c180cd0e86f51aff543c"
+    },
+    "t/variant_20_tasks_525_template_680.csv": {
+      "bytes": 19625,
+      "sha256": "0121a5b8e7b788e44fbe95a585acbabce76badeaf89c1e7ca6f595f6286e93f5"
+    },
+    "t/variant_21_tasks_518_template_680.csv": {
+      "bytes": 19461,
+      "sha256": "dc2d7a7801976bafb83dd6c9b72a379ec57f4c5d32fe8069c073892af02bcc74"
+    },
+    "t/variant_22_tasks_447_template_680.csv": {
+      "bytes": 16847,
+      "sha256": "721ce110ad33b496d7bc0c426e4581cd668e4641782fefcad8e421a16070bb5b"
+    },
+    "t/variant_23_tasks_445_template_680.csv": {
+      "bytes": 16579,
+      "sha256": "47ba1c6c7d3f2c748f34d96afd8e6317a6c20f9443843bc8949bed047588ae29"
+    },
+    "t/variant_24_tasks_464_template_680.csv": {
+      "bytes": 17232,
+      "sha256": "a6438f5ee7b8f9ef1ba9913751f80cdb86533092b1f0a3650320130b1e2f4b1b"
+    },
+    "t/variant_25_tasks_497_template_680.csv": {
+      "bytes": 18550,
+      "sha256": "319b9cdc22b5ac52205ef4f15c8029139c0633a043b42f72faeda9880fe347a4"
+    },
+    "t/variant_26_tasks_464_template_680.csv": {
+      "bytes": 17098,
+      "sha256": "04f01f67b8b2579bba9acbb8080b1ac3d9258330755b3ca4635d7053eba93590"
+    },
+    "t/variant_27_tasks_564_template_680.csv": {
+      "bytes": 20622,
+      "sha256": "798c7d139483ff940d6a0912da279712819db2603b9eef257329755a913bc8a7"
+    },
+    "t/variant_28_tasks_462_template_680.csv": {
+      "bytes": 16973,
+      "sha256": "5ad0c13c0ad7a58a8fdd06d0a8e29199395ec827ce04b306e75a25b7de1d3b71"
+    },
+    "t/variant_29_tasks_450_template_680.csv": {
+      "bytes": 16709,
+      "sha256": "4c7d5c14766eeb654c6d9544e41de92d046ce7e9e4629f122ed86926535e787f"
+    },
+    "t/variant_30_tasks_583_template_680.csv": {
+      "bytes": 21828,
+      "sha256": "042f980e08d8705bbf4fd7cffdf90b128c404921249aa1907d9f4b25ed0c7648"
+    }
+  },
+  "protocol": "explicit_fiveskill_v1",
+  "asset_id": "r4",
+  "manifest_sha256": "fa17a3d15ef263c9a666b91f62be20dbccbfaadaaacfe7b246261b0de00cf07a"
+}

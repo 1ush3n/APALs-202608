@@ -3,7 +3,7 @@ import multiprocessing as mp
 import os
 import time
 from multiprocessing.connection import wait
-from typing import Callable, List, Tuple, Any, Optional
+from typing import Callable, List, Tuple, Any, Optional, Sequence
 import numpy as np
 import torch
 from torch_geometric.data import HeteroData
@@ -13,8 +13,8 @@ class EnvCreator:
     一个可序列化 (Picklable) 的环境创建器。
     用于规避 Windows 平台 spawn 模式下闭包 (Local Function) 无法被序列化传输至子进程的问题。
     """
-    def __init__(self, data_path_or_dir: str, seed_offset: int = 42, config_overrides: Optional[dict] = None):
-        self.data_path_or_dir = data_path_or_dir
+    def __init__(self, data_path_or_dir: str | Sequence[str], seed_offset: int = 42, config_overrides: Optional[dict] = None):
+        self.data_path_or_dir = tuple(data_path_or_dir) if not isinstance(data_path_or_dir, str) else data_path_or_dir
         self.seed_offset = seed_offset
         if config_overrides is None:
             try:

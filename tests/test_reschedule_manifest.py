@@ -9,6 +9,7 @@ import pandas as pd
 from configs import Config, configs, load_config_files
 from environment import AirLineEnv_Graph
 from runtime.reschedule_manifest import load_reschedule_manifest
+from runtime.initial_worker_mapping import apply_initial_worker_mapping
 from tests.runtime_safety import temporary_config
 from tests.test_reschedule_task_delay import PROJECT_ROOT, _reschedule_overrides, _write_greedy_baseline
 
@@ -124,3 +125,37 @@ def test_environment_switches_reschedule_baseline_from_manifest(tmp_path: Path) 
         env.switch_dataset(1)
         env.reset(randomize_duration=False, randomize_workers=False, seed=19)
         assert abs(env.baseline_schedule.makespan - float(shifted["End"].max())) < 1e-6
+
+
+def test_fiveskill_r4_real_manifest_resets_with_dataset_worker_mapping() -> None:
+    """四个真实重调度实例必须按各自固定工人规模加载合法基准。"""
+
+    manifest_path = PROJECT_ROOT / "data" / "r4" / "m.json"
+    manifest = load_reschedule_manifest(manifest_path)
+    expected_workers = {
+        "real_283": 80,
+        "real_680": 100,
+        "real_2338": 140,
+        "real_3182": 160,
+    }
+    cfg = Config()
+    load_config_files([str(PROJECT_ROOT / "conf" / "experiment" / "reschedule_task_delay.yaml")], target=cfg)
+    overrides = cfg.to_flat_dict()
+    overrides.update(
+        {
+            "enable_reschedule_mode": True,
+            "reschedule_manifest_path": str(manifest_path),
+            "randomize_durations": False,
+            "enable_shadow_mask_verification": False,
+        }
+    )
+    with temporary_config(configs, overrides):
+        for instance_id, expected_worker_count in expected_workers.items():
+            entry = manifest.get(instance_id)
+            configs.reschedule_eval_instance_id = instance_id
+            apply_initial_worker_mapping(configs, entry.data_path, explicit_fields=set())
+            env = AirLineEnv_Graph(data_path_or_dir=str(entry.data_path), seed=42)
+            env.reset(randomize_duration=False, randomize_workers=False, seed=42)
+            assert int(configs.n_w) == expected_worker_count
+            assert env.num_workers == expected_worker_count
+            assert env.baseline_schedule is not None

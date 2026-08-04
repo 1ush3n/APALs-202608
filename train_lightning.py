@@ -31,7 +31,11 @@ from runtime.reschedule_eval import (
     load_warm_start_weights_with_input_expansion,
 )
 from runtime.reschedule_manifest import resolve_manifest_eval_entry
-from runtime.reschedule_manifest import load_reschedule_manifest
+from runtime.reschedule_manifest import (
+    load_reschedule_manifest,
+    resolve_explicit_five_skill_training_paths,
+)
+from runtime.training_data_manifest import resolve_explicit_five_skill_initial_training_paths
 from utils.reschedule import load_reschedule_scenarios
 from runtime.seed import set_seed
 from training.lightning_module import APALDataModule, APALLightningModule
@@ -41,6 +45,7 @@ from utils.vector_env import EnvCreator, VectorEnv
 from runtime.artifacts import run_context as create_run_context, uses_runs_layout, write_run_context_files, write_run_manifest
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
 from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
+from runtime.initial_worker_mapping import apply_initial_worker_mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -89,6 +94,9 @@ def _apply_reschedule_eval_manifest_override() -> None:
     configs.reschedule_baseline_schedule_path = str(entry.baseline_schedule_path)
     if entry.scenario_path is not None:
         configs.reschedule_eval_scenario_path = str(entry.scenario_path)
+    # 重调度真实实例沿用初始调度的固定工人数；否则 2338/3182 的基准团队
+    # 会在较小工人池中被错误判定为越界。
+    apply_initial_worker_mapping(configs, entry.data_path, explicit_fields=set())
     print(
         f"[Reschedule] eval_instance={entry.instance_id} "
         f"data={entry.data_path} baseline={entry.baseline_schedule_path} "
@@ -357,14 +365,30 @@ def run(args, *, config_initialized: bool = False) -> None:
     train_path = resolve_workspace_path(configs.train_data_path_or_dir)
     eval_path = resolve_workspace_path(configs.data_file_path)
     if bool(getattr(configs, "enable_reschedule_mode", False)):
+        manifest_path = str(getattr(configs, "reschedule_manifest_path", "") or "").strip()
+        if not manifest_path:
+            raise ValueError("正式重调度训练必须配置 explicit_fiveskill_v1 manifest")
+        training_manifest = load_reschedule_manifest(manifest_path)
+        train_paths = resolve_explicit_five_skill_training_paths(training_manifest, train_path)
+        print(
+            f"[Reschedule] 已通过五技能协议及训练文件精确绑定: {training_manifest.path}",
+            flush=True,
+        )
         baseline_path = ensure_reschedule_baseline_available(configs)
         if baseline_path is not None:
             print(f"[Reschedule] baseline={baseline_path}", flush=True)
         scenario_path = ensure_reschedule_eval_scenarios_available(configs)
         if scenario_path is not None:
             print(f"[Reschedule] eval_scenarios={scenario_path}", flush=True)
+    else:
+        initial_manifest_path = str(getattr(configs, "training_manifest_path", "") or "").strip()
+        if not initial_manifest_path:
+            raise ValueError("正式初始调度训练必须配置 explicit_fiveskill_v1 training_manifest_path")
+        train_paths = resolve_explicit_five_skill_initial_training_paths(initial_manifest_path, train_path)
+        print(f"[Initial] 已通过五技能协议及训练文件精确绑定: {initial_manifest_path}", flush=True)
+    vector_data_source = tuple(str(path) for path in train_paths)
     vector_env = VectorEnv(
-        EnvCreator(str(train_path), seed_offset=int(configs.seed)),
+        EnvCreator(vector_data_source, seed_offset=int(configs.seed)),
         num_envs=int(num_envs),
         start_method=start_method,
         worker_threads=configs.vector_env_worker_threads,

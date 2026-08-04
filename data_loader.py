@@ -7,6 +7,8 @@ import os
 import re
 from typing import Any
 
+from runtime.five_skill_schema import validate_explicit_five_skill_frame
+
 
 def _parse_predecessor_tokens(value: Any) -> list[str]:
     """把前驱字段规范化为 AO 号列表；空值与 0 表示无显式前驱。"""
@@ -67,6 +69,9 @@ def load_data(file_path: str | Path) -> dict[str, Any]:
     else:
         df = pd.read_excel(path)
     
+    # 正式生产入口一律采用显式五技能协议；禁止旧 CSV 静默降级为工种 0。
+    validate_explicit_five_skill_frame(df, source=path, require_all_skills=False)
+
     # ------------------
     # 2. 列名标准化
     # ------------------
@@ -93,25 +98,18 @@ def load_data(file_path: str | Path) -> dict[str, Any]:
     
     df = df.rename(columns=mapping)
     
-    required_columns = {'task_id', 'duration'}
+    required_columns = {'task_id', 'duration', 'node_type', 'skill_type', 'profession_code', 'demand_workers'}
     missing_required = sorted(required_columns - set(df.columns))
     if missing_required:
         raise ValueError(f"数据缺少必要字段：{missing_required}")
 
-    # 兼容尚未迁移的旧数据集：物理工序暂记为工种 0，虚拟节点统一为 -1。
-    # 该兼容逻辑不从“类型”推导具体工种，因此不会再次混淆两种语义。
-    if 'node_type' not in df.columns:
-        df['node_type'] = np.where(pd.to_numeric(df['duration'], errors='coerce').fillna(0).gt(0), 2, 1)
     df['node_type'] = pd.to_numeric(df['node_type'], errors='raise').astype(int)
-    if 'skill_type' not in df.columns:
-        df['skill_type'] = np.where(df['node_type'].eq(2), 0, -1)
     df['skill_type'] = pd.to_numeric(df['skill_type'], errors='raise').astype(int)
     physical_mask = df['node_type'].eq(2)
     if df.loc[physical_mask, 'skill_type'].lt(0).any():
         raise ValueError("物理工序的工种编号必须为非负整数")
     if df.loc[~physical_mask, 'skill_type'].ne(-1).any():
         raise ValueError("虚拟层级节点的工种必须为 -1")
-    if 'demand_workers' not in df.columns: df['demand_workers'] = 1
     if 'fixed_station' not in df.columns: df['fixed_station'] = np.nan
     
     df['demand_workers'] = df['demand_workers'].fillna(1).astype(int)

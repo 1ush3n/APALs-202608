@@ -13,6 +13,7 @@ experiment:
   experiment_name: initial_conditional_team_gate
   checkpoint_root: checkpoints
   train_data_path_or_dir: data/scale_400_800_datasets
+  training_manifest_path: data/scale_400_800_datasets/manifest.json
   data_file_path: data/680.csv
   enable_multiscale_training: false
   enable_multi_benchmark_eval: false

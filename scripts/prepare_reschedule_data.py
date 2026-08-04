@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ from runtime.reschedule_manifest import to_manifest_path
 from scripts.generate_reschedule_load_scenarios import write_scenario_library
 from scripts.generate_schedule import generate_schedule
 from utils.generate_random_dataset import generate_bucket
+from runtime.five_skill_schema import REQUIRED_SKILL_IDS, validate_explicit_five_skill_csv
 from utils.reschedule import load_baseline_schedule
 
 
@@ -42,6 +44,14 @@ PREPARE_ARGS = {
     "real_data_paths": ExtraArgument(default=["data/283.csv", "data/680.csv", "data/2338.csv", "data/3182.csv"], help="真实验证数据集列表"),
     "overwrite": ExtraArgument(default=False, help="是否覆盖已存在的训练实例、baseline 和场景"),
 }
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _as_path_list(value: Any) -> list[Path]:
@@ -230,6 +240,9 @@ def prepare_reschedule_data(
             time_var=float(time_var),
             seed=int(seed),
             worker_pool_path=PROJECT_ROOT / "data" / "worker_pool_fixed.csv",
+            require_explicit_skill_columns=True,
+            required_skill_ids=tuple(sorted(REQUIRED_SKILL_IDS)),
+            copy_template_to_output=False,
         )
 
     generated_manifest = json.loads((train_output_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -242,6 +255,7 @@ def prepare_reschedule_data(
 
     for idx, item in enumerate(generated_manifest.get("files", []), start=1):
         data_path = train_output_dir / str(item["file"])
+        validate_explicit_five_skill_csv(data_path, require_all_skills=True)
         instance_id = f"train_{idx:04d}"
         baseline_path = baseline_output_dir / "train" / f"{instance_id}_schedule.csv"
         result, error = _generate_baseline(
@@ -267,6 +281,8 @@ def prepare_reschedule_data(
                 "source": "generated",
                 "data_path": to_manifest_path(data_path),
                 "scenario_path": "",
+                "data_sha256": _sha256(data_path),
+                "baseline_sha256": _sha256(baseline_path),
                 **result,
             }
         )
@@ -312,6 +328,9 @@ def prepare_reschedule_data(
                 "source": "real",
                 "data_path": to_manifest_path(real_path),
                 "scenario_path": to_manifest_path(scenario_path),
+                "data_sha256": _sha256(real_path),
+                "baseline_sha256": _sha256(baseline_path),
+                "scenario_sha256": _sha256(scenario_path),
                 **result,
             }
         )
@@ -320,6 +339,8 @@ def prepare_reschedule_data(
     payload = {
         "version": 1,
         "kind": "reschedule_dataset_manifest",
+        "protocol": "explicit_fiveskill_v1",
+        "protocol_version": 1,
         "seed": int(seed),
         "train_count_requested": int(train_count),
         "min_ops": int(min_ops),
@@ -327,6 +348,8 @@ def prepare_reschedule_data(
         "time_var": float(time_var),
         "scenarios_per_level": int(scenarios_per_level),
         "initial_model_path": to_manifest_path(initial_model_path),
+        "initial_model_sha256": _sha256(initial_model_path),
+        "initial_model_bytes": initial_model_path.stat().st_size,
         "train_output_dir": to_manifest_path(train_output_dir),
         "baseline_output_dir": to_manifest_path(baseline_output_dir),
         "scenario_output_dir": to_manifest_path(scenario_output_dir),

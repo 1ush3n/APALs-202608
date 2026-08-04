@@ -85,6 +85,8 @@ class Config:
     # 泛化性与域随机化 (Domain Randomization)
     # ------------------
     train_data_path_or_dir: str = "data/generated/initial_283"
+    # 所有正式初始调度训练必须由 explicit_fiveskill_v1 manifest 精确绑定。
+    training_manifest_path: str = ""
     switch_dataset_every_updates: int = 1                 # 频繁切换以增强泛化能力
     random_sample_dataset: bool = True                   # 是否启用随机抽取数据集图纸，默认开启，可配置为 false 恢复顺序轮询
     dataset_context_cache_size: int = 2                   # 每个环境最多缓存的完整图上下文数量

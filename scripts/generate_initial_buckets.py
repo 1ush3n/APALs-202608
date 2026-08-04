@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import shutil
 import sys
+import hashlib
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +19,7 @@ from runtime.hydra_config import (
     should_show_help,
 )
 from utils.generate_random_dataset import generate_bucket
+from runtime.five_skill_schema import REQUIRED_SKILL_IDS
 
 
 BUCKETS = {
@@ -23,10 +27,11 @@ BUCKETS = {
     "680": ("data/680.csv", "data/generated/initial_680", 550, 850),
     "2338": ("data/2338.csv", "data/generated/initial_2338", 2000, 2750),
     "3182": ("data/3182.csv", "data/generated/initial_3182", 2800, 3500),
+    "scale400_800": ("data/680.csv", "data/scale_400_800_datasets", 400, 800),
 }
 
 BUCKET_ARGS = {
-    "bucket": ExtraArgument(default="all", help="数据桶名称，可选 all/283/680/2338/3182"),
+    "bucket": ExtraArgument(default="all", help="数据桶名称，可选 all/283/680/2338/3182/scale400_800"),
     "num_samples": ExtraArgument(default=32, help="每个数据桶生成的样本数量"),
     "time_var": ExtraArgument(default=0.2, help="工时扰动系数"),
     "seed": ExtraArgument(default=42, help="随机种子"),
@@ -37,9 +42,20 @@ BUCKET_ARGS = {
 def _clear_output_directory(output_dir: Path) -> None:
     """清空受管生成目录内容，但保留 OneDrive 同步目录本身。"""
     resolved = output_dir.resolve()
-    generated_root = (PROJECT_ROOT / "data" / "generated").resolve()
-    if not resolved.is_relative_to(generated_root):
+    allowed_roots = ((PROJECT_ROOT / "data" / "generated").resolve(), (PROJECT_ROOT / "data" / "scale_400_800_datasets").resolve())
+    if not any(resolved == root or resolved.is_relative_to(root) for root in allowed_roots):
         raise ValueError(f"拒绝清理受管目录之外的路径：{resolved}")
+    retired_root = (PROJECT_ROOT / "data" / "historical_invalid_training_pools").resolve()
+    retired_root.mkdir(parents=True, exist_ok=True)
+    inventory: list[dict[str, object]] = []
+    for child in sorted(resolved.rglob("*")):
+        if child.is_file():
+            digest = hashlib.sha256(child.read_bytes()).hexdigest()
+            inventory.append({"path": child.relative_to(PROJECT_ROOT).as_posix(), "bytes": child.stat().st_size, "sha256": digest})
+    (retired_root / f"{resolved.name}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json").write_text(
+        json.dumps({"status": "retired_invalid_schema", "source": resolved.relative_to(PROJECT_ROOT).as_posix(), "files": inventory}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     for child in resolved.iterdir():
         if child.is_dir():
             shutil.rmtree(child)
@@ -81,6 +97,9 @@ def main(argv: list[str] | None = None) -> None:
             time_var=float(args.time_var),
             seed=int(args.seed) + seed_offsets[name],
             worker_pool_path=worker_pool,
+            require_explicit_skill_columns=True,
+            required_skill_ids=tuple(sorted(REQUIRED_SKILL_IDS)),
+            copy_template_to_output=False,
         )
         print(
             f"[{name}] 范围={min_length}-{max_length}，"

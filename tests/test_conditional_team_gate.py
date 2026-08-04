@@ -329,6 +329,7 @@ def test_best_anchor_distillation_completes_two_ppo_updates(tmp_path: Path) -> N
             memory = Memory()
             memory.states.append(snapshot)
             memory.actions.append(action)
+            memory.gated_team_traces.append(agent.last_gated_team_trace)
             memory.logprobs.append(logprob)
             memory.values.append(value)
             memory.masks.append(masks)
@@ -438,6 +439,7 @@ def test_gated_team_action_is_legal_in_single_batch_and_ppo_update() -> None:
         memory = Memory()
         memory.states.append(snapshot)
         memory.actions.append(action)
+        memory.gated_team_traces.append(agent.last_gated_team_trace)
         memory.logprobs.append(logprob)
         memory.values.append(value)
         memory.masks.append(masks)
@@ -445,3 +447,97 @@ def test_gated_team_action_is_legal_in_single_batch_and_ppo_update() -> None:
         memory.is_terminals.append(bool(done))
         metrics = agent.update(memory, env, current_ep=1)
         assert torch.isfinite(torch.tensor(metrics["Loss/Total"]))
+
+
+def test_gated_team_ppo_uses_frozen_candidates_when_rebuild_features_change() -> None:
+    """PPO 必须沿用采样时的 APAL 团队动作空间，而非事后重枚举。"""
+    with temporary_config(configs, _small_overrides()):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        obs, masks, _task_id = _first_physical_action_state(env)
+        agent = PPOAgent(
+            HBGATPN(configs),
+            lr=1.0e-4,
+            gamma=0.99,
+            k_epochs=1,
+            eps_clip=0.2,
+            device=torch.device("cpu"),
+            batch_size=1,
+            total_timesteps=1,
+            config=configs,
+        )
+        action, logprob, value, _station_mask, invalid = agent.select_action(
+            obs,
+            masks[0],
+            masks[1],
+            masks[2],
+            deterministic=False,
+            temperature=1.0,
+        )
+        assert action is not None and not invalid
+        trace = agent.last_gated_team_trace
+        assert trace is not None
+        assert tuple(action[2]) == trace.teams[trace.selected_index]
+
+        snapshot = env.get_state_snapshot()
+        _obs, reward, done, info = env.step(action)
+        assert not info.get("invalid_action", False)
+
+        # 故意改变重建时的工人等待特征；旧实现可能改变候选 0，冻结轨迹不得受影响。
+        for worker_id in action[2]:
+            snapshot["worker_free_time"][worker_id] += 1000.0
+
+        memory = Memory()
+        memory.states.append(snapshot)
+        memory.actions.append(action)
+        memory.gated_team_traces.append(trace)
+        memory.logprobs.append(logprob)
+        memory.values.append(value)
+        memory.masks.append(masks)
+        memory.rewards.append(float(reward))
+        memory.is_terminals.append(bool(done))
+        metrics = agent.update(memory, env, current_ep=1)
+        assert torch.isfinite(torch.tensor(metrics["Loss/Total"]))
+
+
+def test_gated_team_three_small_ppo_updates_remain_legal() -> None:
+    """低资源回归：连续三次采样、合法执行与 PPO 更新均应完成。"""
+    with temporary_config(configs, _small_overrides()):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = PPOAgent(
+            HBGATPN(configs),
+            lr=1.0e-4,
+            gamma=0.99,
+            k_epochs=1,
+            eps_clip=0.2,
+            device=torch.device("cpu"),
+            batch_size=1,
+            total_timesteps=3,
+            config=configs,
+        )
+        for episode in range(1, 4):
+            obs, masks, _task_id = _first_physical_action_state(env)
+            action, logprob, value, _station_mask, invalid = agent.select_action(
+                obs,
+                masks[0],
+                masks[1],
+                masks[2],
+                deterministic=False,
+                temperature=1.0,
+            )
+            assert action is not None and not invalid
+            assert agent.last_gated_team_trace is not None
+            snapshot = env.get_state_snapshot()
+            _obs, reward, done, info = env.step(action)
+            assert not info.get("invalid_action", False)
+
+            memory = Memory()
+            memory.states.append(snapshot)
+            memory.actions.append(action)
+            memory.gated_team_traces.append(agent.last_gated_team_trace)
+            memory.logprobs.append(logprob)
+            memory.values.append(value)
+            memory.masks.append(masks)
+            memory.rewards.append(float(reward))
+            memory.is_terminals.append(bool(done))
+            metrics = agent.update(memory, env, current_ep=episode)
+            assert torch.isfinite(torch.tensor(metrics["Loss/Total"]))

@@ -264,14 +264,17 @@ def validate_runtime_config(config: Config) -> None:
             raise ValueError(
                 "checkpoint_selection_protocol 仅支持 single_standard 或 multiscale_manifest"
             )
-        if str(getattr(config, "async_eval_device", "cpu")).lower() != "cpu":
-            raise ValueError("async_eval_device 当前必须为 cpu，训练进程独占 GPU")
+        async_device = str(getattr(config, "async_eval_device", "cpu")).strip().lower()
+        if async_device not in {"cpu", "cuda", "cuda:0"}:
+            raise ValueError("async_eval_device 仅支持 cpu、cuda 或 cuda:0")
         if int(getattr(config, "async_eval_cpu_threads", 4)) < 1:
             raise ValueError("async_eval_cpu_threads 必须大于 0")
         if int(getattr(config, "async_eval_queue_capacity", 4)) < 1:
             raise ValueError("async_eval_queue_capacity 必须大于 0")
         if int(getattr(config, "async_eval_worker_count", 1)) < 1:
             raise ValueError("async_eval_worker_count 必须大于 0")
+        if async_device.startswith("cuda") and int(getattr(config, "async_eval_worker_count", 1)) != 1:
+            raise ValueError("CUDA 异步验证必须使用 async_eval_worker_count=1")
         if int(getattr(config, "async_eval_submit_every_episodes", 1)) < 1:
             raise ValueError("async_eval_submit_every_episodes 必须大于 0")
         if bool(getattr(config, "enable_reschedule_mode", False)):

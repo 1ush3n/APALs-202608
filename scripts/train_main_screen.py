@@ -32,6 +32,7 @@ from runtime.hydra_config import ExtraArgument, HydraCliError, initialize_hydra_
 from runtime.paths import resolve_checkpoint_paths, resolve_tensorboard_log_root, resolve_workspace_path, sanitize_experiment_name
 from runtime.seed import set_seed
 from train_lightning import RolloutCheckpoint
+from runtime.training_data_manifest import resolve_explicit_five_skill_initial_training_paths
 from training.lightning_module import APALDataModule, APALLightningModule
 from training.rollout_service import APALRolloutService
 from utils.vector_env import EnvCreator, VectorEnv
@@ -119,12 +120,16 @@ def run_screen(args: Any) -> None:
     eval_path = resolve_workspace_path(configs.data_file_path)
     if not train_path.exists() or not eval_path.is_file():
         raise FileNotFoundError(f"训练或验证数据不存在：train={train_path}; eval={eval_path}")
+    initial_manifest_path = str(getattr(configs, "training_manifest_path", "") or "").strip()
+    if not initial_manifest_path:
+        raise ValueError("筛查训练同样必须配置 explicit_fiveskill_v1 training_manifest_path")
+    train_paths = resolve_explicit_five_skill_initial_training_paths(initial_manifest_path, train_path)
 
     start_method = str(configs.vector_env_start_method)
     if start_method == "auto":
         start_method = "forkserver" if sys.platform != "win32" else "spawn"
     vector_env = VectorEnv(
-        EnvCreator(str(train_path), seed_offset=int(configs.seed)),
+        EnvCreator(tuple(str(path) for path in train_paths), seed_offset=int(configs.seed)),
         num_envs=int(configs.num_envs),
         start_method=start_method,
         worker_threads=configs.vector_env_worker_threads,
