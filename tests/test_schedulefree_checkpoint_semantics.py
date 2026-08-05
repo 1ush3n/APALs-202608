@@ -9,6 +9,7 @@ from schedulefree import AdamWScheduleFree
 
 from runtime.schedulefree_checkpoint import save_checkpoint_with_schedulefree_eval_parameters
 from runtime.schedulefree_export import export_schedulefree_eval_payload
+from scripts.export_schedulefree_eval_checkpoint import optional_finite_score
 from training.async_eval_worker import load_checkpoint_agent_for_evaluation
 from training.async_evaluation import _save_async_candidate_checkpoint
 
@@ -178,3 +179,11 @@ def test_export_payload_rewrites_policy_and_optimizer_to_eval_x_without_mutating
 def test_checkpoint_agent_loader_is_public_for_migration_tools() -> None:
     """迁移工具必须复用异步 worker 的完整 checkpoint 恢复语义。"""
     assert callable(load_checkpoint_agent_for_evaluation)
+
+
+def test_conversion_audit_rejects_non_finite_callback_score() -> None:
+    """异步选择未写入 RolloutCallback 分数时，审计 JSON 不得写入 Infinity。"""
+    assert optional_finite_score(0.970978) == pytest.approx(0.970978)
+    assert optional_finite_score(float("inf")) is None
+    assert optional_finite_score(float("nan")) is None
+    assert optional_finite_score("not-a-score") is None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import uuid
 from pathlib import Path
@@ -22,6 +23,15 @@ from runtime.initial_checkpoint_selection import sha256_file
 from runtime.schedulefree_checkpoint import schedulefree_parameter_mode
 from runtime.schedulefree_export import export_schedulefree_eval_payload
 from training.async_eval_worker import load_checkpoint_agent_for_evaluation
+
+
+def optional_finite_score(value: Any) -> float | None:
+    """将回调指标转为严格 JSON 可表达的有限浮点数。"""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) else None
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -100,6 +110,7 @@ def main() -> int:
 
     callbacks = payload.get("callbacks", {}) if isinstance(payload, dict) else {}
     rollout_state = callbacks.get("RolloutCheckpoint", {}) if isinstance(callbacks, dict) else {}
+    source_selection_score = optional_finite_score(rollout_state.get("best_score"))
     metadata = checkpoint.metadata
     _atomic_write_json(
         audit_path,
@@ -112,7 +123,12 @@ def main() -> int:
             "output_sha256": output_sha256,
             "output_parameter_state": "eval_x",
             "source_episode": metadata.get("episode"),
-            "source_selection_score": rollout_state.get("best_score"),
+            "source_selection_score": source_selection_score,
+            "source_selection_score_status": (
+                "recorded_in_rollout_callback"
+                if source_selection_score is not None
+                else "not_recorded_in_rollout_callback_async_selection"
+            ),
             "model_spec": metadata.get("model_spec"),
             "conversion_device": "cpu",
         },
