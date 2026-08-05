@@ -21,6 +21,9 @@ class ModelSpec:
     conditional_team_max_candidates: int = 4
     conditional_team_gate_bias: float = -4.0
     conditional_team_nonbaseline_logit: float = -8.0
+    conditional_team_scoring_mode: str = "fixed_prior_v1"
+    conditional_team_prior_margin: float = 4.0
+    conditional_team_prior_weight: float = 1.0
     workforce_binding_mode: str = "endogenous"
     workforce_preallocation_ratio: float = 1.0
     team_selection_mode: str = "autoregressive"
@@ -66,6 +69,9 @@ def build_model_spec(config: Config) -> ModelSpec:
         conditional_team_max_candidates=int(config.conditional_team_max_candidates),
         conditional_team_gate_bias=float(config.conditional_team_gate_bias),
         conditional_team_nonbaseline_logit=float(config.conditional_team_nonbaseline_logit),
+        conditional_team_scoring_mode=str(config.conditional_team_scoring_mode),
+        conditional_team_prior_margin=float(config.conditional_team_prior_margin),
+        conditional_team_prior_weight=float(config.conditional_team_prior_weight),
         workforce_binding_mode=str(config.workforce_binding_mode),
         workforce_preallocation_ratio=float(config.workforce_preallocation_ratio),
         team_selection_mode=str(config.team_selection_mode),
@@ -190,6 +196,20 @@ def apply_checkpoint_model_spec(
     *,
     explicit_fields: set[str] | None = None,
 ) -> None:
+    current_scope = str(getattr(config, "policy_action_scope", ""))
+    current_scoring_mode = str(
+        getattr(config, "conditional_team_scoring_mode", "fixed_prior_v1")
+    )
+    if (
+        current_scope == "operation_station_gated_team"
+        and spec.policy_action_scope == "operation_station_gated_team"
+        and current_scoring_mode != spec.conditional_team_scoring_mode
+    ):
+        raise ValueError(
+            "条件式团队评分模式与 checkpoint 不一致："
+            f"config={current_scoring_mode!r}, "
+            f"checkpoint={spec.conditional_team_scoring_mode!r}"
+        )
     current_layout = resolve_worker_feature_layout(config)
     if (
         spec.worker_feat_dim is not None
@@ -218,6 +238,9 @@ def apply_checkpoint_model_spec(
         "conditional_team_max_candidates": spec.conditional_team_max_candidates,
         "conditional_team_gate_bias": spec.conditional_team_gate_bias,
         "conditional_team_nonbaseline_logit": spec.conditional_team_nonbaseline_logit,
+        "conditional_team_scoring_mode": spec.conditional_team_scoring_mode,
+        "conditional_team_prior_margin": spec.conditional_team_prior_margin,
+        "conditional_team_prior_weight": spec.conditional_team_prior_weight,
         "workforce_binding_mode": spec.workforce_binding_mode,
         "workforce_preallocation_ratio": spec.workforce_preallocation_ratio,
         "team_selection_mode": spec.team_selection_mode,

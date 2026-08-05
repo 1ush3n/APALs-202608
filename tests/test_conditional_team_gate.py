@@ -3,14 +3,21 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
+import pytest
 import torch
 
 from configs import Config, configs
 from core.action_completion import EarliestFinishActionCompleter
 from environment import AirLineEnv_Graph
-from models.hb_gat_pn import HBGATPN
+from models.hb_gat_pn import ConditionalTeamSelector, HBGATPN
 from ppo_agent import PPOAgent
-from runtime.checkpoints import build_checkpoint_metadata, build_model_spec, infer_model_spec
+from runtime.checkpoints import (
+    ModelSpec,
+    apply_checkpoint_model_spec,
+    build_checkpoint_metadata,
+    build_model_spec,
+    infer_model_spec,
+)
 from runtime.configuration import validate_runtime_config
 from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
 from tests.runtime_safety import temporary_config
@@ -101,8 +108,15 @@ def test_team_candidates_are_deterministic_legal_and_anchor_old_completer() -> N
         assert base is not None and first is not None and second is not None
         assert first.teams == second.teams
         torch.testing.assert_close(first.gate_features, second.gate_features)
+        torch.testing.assert_close(
+            first.relative_finish_costs, second.relative_finish_costs
+        )
         assert first.teams[0] == base.team
         assert 1 <= len(first.teams) <= configs.conditional_team_max_candidates
+        assert first.relative_finish_costs.shape == (len(first.teams),)
+        assert float(first.relative_finish_costs[0].item()) == 0.0
+        assert bool(torch.isfinite(first.relative_finish_costs).all())
+        assert bool((first.relative_finish_costs[1:] >= 0.0).all())
 
         layout = resolve_worker_feature_layout(configs)
         demand = int(env.task_static_feat[task_id, 2].item())
@@ -141,6 +155,44 @@ def test_team_candidate_generator_degrades_to_single_base_team() -> None:
         )
         assert candidates is not None
         assert candidates.teams == (base.team,)
+        torch.testing.assert_close(
+            candidates.relative_finish_costs,
+            torch.zeros(1, dtype=candidates.relative_finish_costs.dtype),
+        )
+
+
+def test_relative_heuristic_prior_uses_relative_residual_and_strict_anchor() -> None:
+    """候选 0 必须是严格锚点，残差只允许表达相对修正。"""
+    cfg = Config()
+    cfg.hidden_dim = 8
+    cfg.conditional_team_scoring_mode = "relative_heuristic_prior_v1"
+    cfg.conditional_team_prior_margin = 4.0
+    cfg.conditional_team_prior_weight = 1.0
+    selector = ConditionalTeamSelector(cfg)
+    residual = torch.tensor([[2.0, 3.0, 0.5]])
+    gate = torch.tensor([[0.5]])
+    costs = torch.tensor([[0.0, 0.25, 0.75]])
+    logits = selector._compose_logits(residual, gate, costs)
+    expected = torch.tensor([[0.0, -3.75, -5.50]])
+    torch.testing.assert_close(logits, expected)
+
+    shifted_logits = selector._compose_logits(residual + 19.0, gate, costs)
+    torch.testing.assert_close(shifted_logits, logits)
+
+
+def test_relative_heuristic_prior_rejects_invalid_cost_shape() -> None:
+    cfg = Config()
+    cfg.hidden_dim = 8
+    cfg.conditional_team_scoring_mode = "relative_heuristic_prior_v1"
+    selector = ConditionalTeamSelector(cfg)
+    try:
+        selector._compose_logits(
+            torch.zeros((1, 2)), torch.zeros((1, 1)), torch.zeros((1, 1))
+        )
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("候选先验长度不一致必须被拒绝")
 
 
 def test_zero_initialized_gate_matches_operation_station_at_temperature_zero() -> None:
@@ -153,6 +205,9 @@ def test_zero_initialized_gate_matches_operation_station_at_temperature_zero() -
         base_config.policy_action_scope = "operation_station"
         gated_config = copy.deepcopy(configs)
         gated_config.policy_action_scope = "operation_station_gated_team"
+        gated_config.conditional_team_scoring_mode = "relative_heuristic_prior_v1"
+        gated_config.conditional_team_prior_margin = 4.0
+        gated_config.conditional_team_prior_weight = 1.0
         torch.manual_seed(1234)
         base_model = HBGATPN(base_config)
         torch.manual_seed(1234)
@@ -180,14 +235,33 @@ def test_gated_scope_configuration_and_checkpoint_spec_are_explicit() -> None:
     cfg.conditional_team_max_candidates = 4
     cfg.conditional_team_gate_bias = -4.0
     cfg.conditional_team_nonbaseline_logit = -8.0
+    cfg.conditional_team_scoring_mode = "relative_heuristic_prior_v1"
+    cfg.conditional_team_prior_margin = 4.0
+    cfg.conditional_team_prior_weight = 1.0
     validate_runtime_config(cfg)
     spec = build_model_spec(cfg)
     assert spec.policy_action_scope == "operation_station_gated_team"
     assert spec.conditional_team_max_candidates == 4
     assert spec.conditional_team_gate_bias == -4.0
     assert spec.conditional_team_nonbaseline_logit == -8.0
+    assert spec.conditional_team_scoring_mode == "relative_heuristic_prior_v1"
+    assert spec.conditional_team_prior_margin == 4.0
+    assert spec.conditional_team_prior_weight == 1.0
     inferred = infer_model_spec(HBGATPN(cfg).state_dict())
     assert inferred.policy_action_scope == "operation_station_gated_team"
+
+
+def test_checkpoint_rejects_mixed_conditional_team_scoring_modes() -> None:
+    cfg = Config()
+    cfg.policy_action_scope = "operation_station_gated_team"
+    cfg.conditional_team_scoring_mode = "relative_heuristic_prior_v1"
+    saved = ModelSpec(
+        resource_graph_mode="skill_hub_bidirectional",
+        policy_action_scope="operation_station_gated_team",
+        conditional_team_scoring_mode="fixed_prior_v1",
+    )
+    with pytest.raises(ValueError, match="评分模式"):
+        apply_checkpoint_model_spec(cfg, saved)
 
 
 def test_best_anchor_switch_is_default_off_and_rejects_non_gated_scope() -> None:
@@ -447,6 +521,11 @@ def test_gated_team_action_is_legal_in_single_batch_and_ppo_update() -> None:
         memory.is_terminals.append(bool(done))
         metrics = agent.update(memory, env, current_ep=1)
         assert torch.isfinite(torch.tensor(metrics["Loss/Total"]))
+        assert metrics["CTG/RolloutDecisionCount"] == 1.0
+        assert torch.isfinite(torch.tensor(metrics["CTG/RolloutGateMean"]))
+        assert torch.isfinite(torch.tensor(metrics["CTG/RolloutAltVsBaseLogitGapMean"]))
+        assert torch.isfinite(torch.tensor(metrics["CTG/PPOGateMean"]))
+        assert torch.isfinite(torch.tensor(metrics["CTG/PPOAltVsBaseLogitGapMean"]))
 
 
 def test_gated_team_ppo_uses_frozen_candidates_when_rebuild_features_change() -> None:
@@ -501,7 +580,14 @@ def test_gated_team_ppo_uses_frozen_candidates_when_rebuild_features_change() ->
 
 def test_gated_team_three_small_ppo_updates_remain_legal() -> None:
     """低资源回归：连续三次采样、合法执行与 PPO 更新均应完成。"""
-    with temporary_config(configs, _small_overrides()):
+    with temporary_config(
+        configs,
+        _small_overrides(
+            conditional_team_scoring_mode="relative_heuristic_prior_v1",
+            conditional_team_prior_margin=4.0,
+            conditional_team_prior_weight=1.0,
+        ),
+    ):
         env = AirLineEnv_Graph(DATA_PATH, seed=42)
         agent = PPOAgent(
             HBGATPN(configs),

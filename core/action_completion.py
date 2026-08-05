@@ -25,6 +25,7 @@ class TeamCandidates:
     station_id: int
     teams: tuple[tuple[int, ...], ...]
     gate_features: torch.Tensor
+    relative_finish_costs: torch.Tensor
 
 
 class EarliestFinishActionCompleter:
@@ -257,6 +258,7 @@ class EarliestFinishActionCompleter:
                 station_id=-1,
                 teams=((),),
                 gate_features=torch.zeros(5, dtype=task_x.dtype, device=task_x.device),
+                relative_finish_costs=torch.zeros(1, dtype=task_x.dtype, device=task_x.device),
             )
         required_skill, demand, task_duration = requirements
         base = self._complete_for_station(
@@ -282,6 +284,16 @@ class EarliestFinishActionCompleter:
             worker_x[:, self.worker_layout.efficiency_idx]
             * worker_x[:, self.worker_layout.fatigue_idx]
         ).clamp_min(1.0e-6)
+        base_score = self._team_score(
+            team=base.team,
+            station_id=station_id,
+            task_duration=task_duration,
+            demand=demand,
+            worker_wait=worker_wait,
+            worker_capacity=worker_capacity,
+            station_wait=station_wait,
+            station_x=station_x,
+        )
 
         alternatives: list[tuple[tuple[float, float, int, tuple[int, ...]], tuple[int, ...]]] = []
         base_members = set(base.team)
@@ -309,14 +321,18 @@ class EarliestFinishActionCompleter:
                 )
         alternatives.sort(key=lambda item: item[0])
         teams: list[tuple[int, ...]] = [base.team]
-        for _score, candidate in alternatives:
+        relative_finish_costs: list[float] = [0.0]
+        duration_scale = max(task_duration, 1.0e-6)
+        for score, candidate in alternatives:
             if candidate not in teams:
                 teams.append(candidate)
+                relative_finish_costs.append(
+                    max(0.0, (float(score[0]) - float(base_score[0])) / duration_scale)
+                )
             if len(teams) >= limit:
                 break
 
         legal_waits = worker_wait[torch.tensor(worker_ids, device=worker_wait.device)]
-        duration_scale = max(task_duration, 1.0e-6)
         gate_features = torch.tensor(
             [
                 min(1.0, float(demand) / max(1, int(worker_x.size(0)))),
@@ -332,6 +348,9 @@ class EarliestFinishActionCompleter:
             station_id=int(station_id),
             teams=tuple(teams),
             gate_features=gate_features,
+            relative_finish_costs=torch.tensor(
+                relative_finish_costs, dtype=task_x.dtype, device=task_x.device
+            ),
         )
 
 

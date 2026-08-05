@@ -10,7 +10,7 @@ defaults:
   - _self_
 
 experiment:
-  experiment_name: initial_conditional_team_gate
+  experiment_name: initial_conditional_team_gate_prior_residual
   checkpoint_root: checkpoints
   train_data_path_or_dir: data/scale_400_800_datasets
   training_manifest_path: data/scale_400_800_datasets/manifest.json
@@ -25,15 +25,10 @@ model:
   conditional_team_max_candidates: 4
   conditional_team_gate_bias: -4.0
   conditional_team_nonbaseline_logit: -8.0
-  conditional_team_scoring_mode: fixed_prior_v1
+  conditional_team_scoring_mode: relative_heuristic_prior_v1
   conditional_team_prior_margin: 4.0
   conditional_team_prior_weight: 1.0
   best_anchor_distill_enabled: false
-  best_anchor_distill_temperature: 1.0
-  best_anchor_distill_lambda_start: 0.02
-  best_anchor_distill_lambda_end: 0.08
-  best_anchor_distill_ramp_updates: 2
-  best_anchor_distill_min_improvement: 0.0
 
 train:
   eval_freq: 1

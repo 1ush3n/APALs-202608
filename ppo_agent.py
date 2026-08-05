@@ -39,6 +39,10 @@ class FrozenGatedTeamTrace:
     teams: tuple[tuple[int, ...], ...]
     selected_index: int
     gate_features: tuple[float, ...]
+    relative_finish_costs: tuple[float, ...]
+    gate_value: float
+    alternative_probability: float
+    best_alternative_logit_gap: float
 
 
 class PPOAgent:
@@ -320,11 +324,15 @@ class PPOAgent:
         gate_features = candidates.gate_features.to(
             device=worker_embs.device, dtype=worker_embs.dtype
         ).unsqueeze(0)
+        candidate_prior_costs = candidates.relative_finish_costs.to(
+            device=worker_embs.device, dtype=worker_embs.dtype
+        ).unsqueeze(0)
         return policy.conditional_team_head(
             task_emb,
             station_emb,
             candidate_team_emb,
             gate_features,
+            candidate_prior_costs=candidate_prior_costs,
         )
 
     def _select_gated_team(
@@ -362,22 +370,103 @@ class PPOAgent:
         if deterministic or temperature <= 0.0:
             selected_index = int(torch.argmax(logits, dim=1).item())
             team_logprob = torch.zeros((), device=logits.device)
+            selection_logits = logits
         else:
-            dist = Categorical(logits=(logits / max(float(temperature), 1.0e-5)).float())
+            selection_logits = logits / max(float(temperature), 1.0e-5)
+            dist = Categorical(logits=selection_logits.float())
             sampled = dist.sample()
             selected_index = int(sampled.item())
             team_logprob = dist.log_prob(sampled)
+        if len(candidates.teams) > 1:
+            selection_probs = torch.softmax(selection_logits, dim=1)
+            alternative_probability = selection_probs[:, 1:].sum(dim=1)
+            best_alternative_gap = logits[:, 1:].max(dim=1).values - logits[:, 0]
+        else:
+            alternative_probability = logits.new_zeros(1)
+            best_alternative_gap = logits.new_zeros(1)
+        frozen_values = torch.cat(
+            [
+                candidates.gate_features,
+                candidates.relative_finish_costs,
+                _gate.reshape(-1),
+                alternative_probability.reshape(-1),
+                best_alternative_gap.reshape(-1),
+            ],
+            dim=0,
+        ).detach().to("cpu", torch.float32).tolist()
         frozen_trace = FrozenGatedTeamTrace(
             task_id=int(task_id),
             station_id=int(station_id),
             teams=tuple(tuple(int(worker_id) for worker_id in team) for team in candidates.teams),
             selected_index=selected_index,
-            gate_features=tuple(
-                float(value)
-                for value in candidates.gate_features.detach().to("cpu", torch.float32).tolist()
+            gate_features=tuple(float(value) for value in frozen_values[:5]),
+            relative_finish_costs=tuple(
+                float(value) for value in frozen_values[5 : 5 + len(candidates.teams)]
             ),
+            gate_value=float(frozen_values[-3]),
+            alternative_probability=float(frozen_values[-2]),
+            best_alternative_logit_gap=float(frozen_values[-1]),
         )
         return list(candidates.teams[selected_index]), team_logprob, frozen_trace
+
+    @staticmethod
+    def _gated_team_rollout_metrics(memory: Any) -> dict[str, float]:
+        """从冻结轨迹汇总采样期团队决策诊断，不重建候选集。"""
+        traces = [
+            trace for trace in getattr(memory, "gated_team_traces", [])
+            if isinstance(trace, FrozenGatedTeamTrace)
+        ]
+        if not traces:
+            return {}
+        multi_candidate = [trace for trace in traces if len(trace.teams) > 1]
+        metrics = {
+            "CTG/RolloutDecisionCount": float(len(traces)),
+            "CTG/RolloutCandidateCountMean": float(
+                sum(len(trace.teams) for trace in traces) / len(traces)
+            ),
+            "CTG/RolloutMultiCandidateDecisionCount": float(len(multi_candidate)),
+            "CTG/RolloutMultiCandidateRate": float(len(multi_candidate) / len(traces)),
+            "CTG/RolloutGateMean": float(
+                sum(trace.gate_value for trace in traces) / len(traces)
+            ),
+            "CTG/RolloutGateStd": float(
+                torch.tensor([trace.gate_value for trace in traces], dtype=torch.float32)
+                .std(unbiased=False)
+                .item()
+            ),
+            "CTG/RolloutNonBaselineSelectRate": float(
+                sum(trace.selected_index > 0 for trace in traces) / len(traces)
+            ),
+        }
+        if multi_candidate:
+            metrics.update(
+                {
+                    "CTG/RolloutNonBaselineProbMean": float(
+                        sum(trace.alternative_probability for trace in multi_candidate)
+                        / len(multi_candidate)
+                    ),
+                    "CTG/RolloutAltVsBaseLogitGapMean": float(
+                        sum(trace.best_alternative_logit_gap for trace in multi_candidate)
+                        / len(multi_candidate)
+                    ),
+                    "CTG/RolloutAltBeatsBaseRate": float(
+                        sum(
+                            trace.best_alternative_logit_gap > 0.0
+                            for trace in multi_candidate
+                        )
+                        / len(multi_candidate)
+                    ),
+                }
+            )
+        else:
+            metrics.update(
+                {
+                    "CTG/RolloutNonBaselineProbMean": 0.0,
+                    "CTG/RolloutAltVsBaseLogitGapMean": 0.0,
+                    "CTG/RolloutAltBeatsBaseRate": 0.0,
+                }
+            )
+        return metrics
 
     def _recompute_gated_team_logprobs(
         self,
@@ -394,7 +483,7 @@ class PPOAgent:
         selected_station: torch.Tensor,
         selected_teams: torch.Tensor,
         frozen_traces: list[FrozenGatedTeamTrace | None],
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """使用采样时冻结的团队候选动作空间重算 PPO 对数概率。"""
         batch_size = int(selected_task.numel())
         if len(frozen_traces) != batch_size:
@@ -412,6 +501,7 @@ class PPOAgent:
                         station_id=-1,
                         teams=((0,),),
                         gate_features=torch.zeros(5, device=raw_task_x.device),
+                        relative_finish_costs=torch.zeros(1, device=raw_task_x.device),
                     )
                 )
                 chosen_indices.append(0)
@@ -448,11 +538,24 @@ class PPOAgent:
                 raise RuntimeError("门控团队冻结轨迹包含越界或空团队候选")
             if len(trace.gate_features) != 5:
                 raise RuntimeError("门控团队冻结轨迹的门控特征维度必须为 5")
+            if len(trace.relative_finish_costs) != len(trace.teams):
+                raise RuntimeError("门控团队冻结先验长度与候选数不一致")
+            if (
+                not all(math.isfinite(value) for value in trace.relative_finish_costs)
+                or trace.relative_finish_costs[0] != 0.0
+                or any(value < 0.0 for value in trace.relative_finish_costs[1:])
+            ):
+                raise RuntimeError("门控团队冻结先验不满足相对完工代价约束")
             candidates = TeamCandidates(
                 station_id=station_id,
                 teams=trace.teams,
                 gate_features=torch.tensor(
                     trace.gate_features,
+                    dtype=raw_task_x.dtype,
+                    device=raw_task_x.device,
+                ),
+                relative_finish_costs=torch.tensor(
+                    trace.relative_finish_costs,
                     dtype=raw_task_x.dtype,
                     device=raw_task_x.device,
                 ),
@@ -465,6 +568,7 @@ class PPOAgent:
         candidate_emb_rows = []
         candidate_mask_rows = []
         feature_rows = []
+        prior_cost_rows = []
         for batch_idx, candidates in enumerate(candidate_rows):
             row_embeddings = []
             for team in candidates.teams:
@@ -487,6 +591,16 @@ class PPOAgent:
                     device=worker_embeddings.device, dtype=worker_embeddings.dtype
                 )
             )
+            prior_cost_rows.append(
+                torch.nn.functional.pad(
+                    candidates.relative_finish_costs.to(
+                        device=worker_embeddings.device,
+                        dtype=worker_embeddings.dtype,
+                    ),
+                    (0, padding),
+                    value=0.0,
+                )
+            )
 
         if self.policy.conditional_team_head is None:
             raise RuntimeError("operation_station_gated_team 缺少 conditional_team_head")
@@ -495,12 +609,14 @@ class PPOAgent:
             candidate_mask_rows, dtype=torch.bool, device=worker_embeddings.device
         )
         gate_features = torch.stack(feature_rows, dim=0)
+        candidate_prior_costs = torch.stack(prior_cost_rows, dim=0)
         logits, _gate = self.policy.conditional_team_head(
             task_embeddings,
             station_embeddings,
             candidate_team_emb,
             gate_features,
             candidate_mask,
+            candidate_prior_costs,
         )
         dist = Categorical(logits=logits.float())
         selected_indices = torch.tensor(
@@ -509,7 +625,24 @@ class PPOAgent:
         active = selected_station >= 0
         team_lp = dist.log_prob(selected_indices) * active.to(logits.dtype)
         team_entropy = dist.entropy() * active.to(logits.dtype)
-        return team_lp, team_entropy
+        if max_candidates > 1:
+            has_alternative = (~candidate_mask[:, 1:]).any(dim=1) & active
+            best_alternative = logits[:, 1:].masked_fill(
+                candidate_mask[:, 1:], -1.0e4
+            ).max(dim=1).values
+            alternative_probability = (dist.probs[:, 1:] * (~candidate_mask[:, 1:])).sum(dim=1)
+            best_alternative_gap = best_alternative - logits[:, 0]
+        else:
+            has_alternative = torch.zeros_like(active)
+            alternative_probability = logits.new_zeros(batch_size)
+            best_alternative_gap = logits.new_zeros(batch_size)
+        diagnostics = {
+            "gate": _gate.squeeze(-1),
+            "multi": has_alternative,
+            "alternative_probability": alternative_probability,
+            "best_alternative_gap": best_alternative_gap,
+        }
+        return team_lp, team_entropy, diagnostics
 
     def get_memory_snapshot(self) -> Dict[str, float]:
         """返回当前设备显存快照，单位为 GB；CPU 环境返回 0。"""
@@ -1836,6 +1969,10 @@ class PPOAgent:
         task_entropy_values = []
         station_entropy_values = []
         team_entropy_values = []
+        ctg_ppo_gate_values = []
+        ctg_ppo_alternative_probability_values = []
+        ctg_ppo_alternative_gap_values = []
+        ctg_ppo_alternative_beats_values = []
         distill_task_values = []
         distill_station_values = []
         distill_weighted_values = []
@@ -2043,7 +2180,7 @@ class PPOAgent:
                             memory.gated_team_traces[int(memory_index)]
                             for memory_index in memory_indices
                         ]
-                        team_lp, team_entropy = self._recompute_gated_team_logprobs(
+                        team_lp, team_entropy, team_diagnostics = self._recompute_gated_team_logprobs(
                             batch=batch,
                             task_embeddings=sel_task_emb,
                             station_embeddings=selected_station_embeddings,
@@ -2056,6 +2193,30 @@ class PPOAgent:
                             selected_station=batch.y_station,
                             selected_teams=batch.y_team,
                             frozen_traces=frozen_traces,
+                        )
+                        ctg_ppo_gate_values.append(team_diagnostics["gate"].mean().detach())
+                        multi_candidate = team_diagnostics["multi"].to(
+                            dtype=team_lp.dtype
+                        )
+                        multi_count = multi_candidate.sum().clamp_min(1.0)
+                        alternative_probabilities = team_diagnostics[
+                            "alternative_probability"
+                        ]
+                        alternative_gaps = team_diagnostics["best_alternative_gap"]
+                        ctg_ppo_alternative_probability_values.append(
+                            (
+                                (alternative_probabilities * multi_candidate).sum()
+                                / multi_count
+                            ).detach()
+                        )
+                        ctg_ppo_alternative_gap_values.append(
+                            ((alternative_gaps * multi_candidate).sum() / multi_count).detach()
+                        )
+                        ctg_ppo_alternative_beats_values.append(
+                            (
+                                ((alternative_gaps > 0.0).to(team_lp.dtype) * multi_candidate).sum()
+                                / multi_count
+                            ).detach()
                         )
                                 
                     if action_scope == "operation":
@@ -2321,5 +2482,21 @@ class PPOAgent:
             'Memory/Allocated_GB': memory_snapshot['allocated_gb'],
             'Memory/Reserved_GB': memory_snapshot['reserved_gb'],
         }
+        if action_scope == "operation_station_gated_team":
+            metrics.update(self._gated_team_rollout_metrics(memory))
+            metrics.update(
+                {
+                    "CTG/PPOGateMean": _mean_scalar(ctg_ppo_gate_values, 0.0),
+                    "CTG/PPONonBaselineProbMean": _mean_scalar(
+                        ctg_ppo_alternative_probability_values, 0.0
+                    ),
+                    "CTG/PPOAltVsBaseLogitGapMean": _mean_scalar(
+                        ctg_ppo_alternative_gap_values, 0.0
+                    ),
+                    "CTG/PPOAltBeatsBaseRate": _mean_scalar(
+                        ctg_ppo_alternative_beats_values, 0.0
+                    ),
+                }
+            )
         metrics.update(distill_lifecycle)
         return metrics

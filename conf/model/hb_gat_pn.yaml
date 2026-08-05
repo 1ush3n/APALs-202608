@@ -22,6 +22,9 @@ model:
   conditional_team_max_candidates: 4
   conditional_team_gate_bias: -4.0
   conditional_team_nonbaseline_logit: -8.0
+  conditional_team_scoring_mode: fixed_prior_v1
+  conditional_team_prior_margin: 4.0
+  conditional_team_prior_weight: 1.0
   workforce_binding_mode: endogenous
   workforce_preallocation_ratio: 1.0
   team_selection_mode: autoregressive

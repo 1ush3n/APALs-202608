@@ -40,7 +40,9 @@ STRUCTURAL_FIELDS = {
     "worker_skill_feature_slots",
     "use_input_layer_norm", "use_gat_layer_norm", "use_head_layer_norm",
     "use_shared_trunk", "policy_action_scope", "conditional_team_max_candidates",
-    "conditional_team_gate_bias", "conditional_team_nonbaseline_logit", "workforce_binding_mode",
+    "conditional_team_gate_bias", "conditional_team_nonbaseline_logit",
+    "conditional_team_scoring_mode", "conditional_team_prior_margin",
+    "conditional_team_prior_weight", "workforce_binding_mode",
     "workforce_preallocation_ratio", "team_selection_mode",
     "graph_encoder_mode", "actor_context_mode",
 }
@@ -54,6 +56,9 @@ _VALID_EXPERIMENT_MODES = {
     "team_selection_mode": {"autoregressive", "static_topq"},
     "graph_encoder_mode": {"hetero_gat", "homogeneous_graphsage", "none"},
     "actor_context_mode": {"attention", "mean_max", "local_only"},
+    "conditional_team_scoring_mode": {
+        "fixed_prior_v1", "relative_heuristic_prior_v1",
+    },
 }
 
 
@@ -186,6 +191,8 @@ def validate_runtime_config(config: Config) -> None:
     for field_name in (
         "conditional_team_gate_bias",
         "conditional_team_nonbaseline_logit",
+        "conditional_team_prior_margin",
+        "conditional_team_prior_weight",
     ):
         value = float(getattr(config, field_name))
         if not math.isfinite(value):
@@ -193,6 +200,10 @@ def validate_runtime_config(config: Config) -> None:
         setattr(config, field_name, value)
     if config.conditional_team_nonbaseline_logit >= 0.0:
         raise ValueError("conditional_team_nonbaseline_logit 必须严格为负数")
+    if config.conditional_team_prior_margin <= 0.0:
+        raise ValueError("conditional_team_prior_margin 必须严格大于 0")
+    if config.conditional_team_prior_weight < 0.0:
+        raise ValueError("conditional_team_prior_weight 必须大于等于 0")
     if bool(getattr(config, "best_anchor_distill_enabled", False)):
         if config.policy_action_scope != "operation_station_gated_team":
             raise ValueError(

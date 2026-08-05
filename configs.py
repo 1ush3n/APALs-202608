@@ -42,6 +42,9 @@ class Config:
     conditional_team_max_candidates: int = 4
     conditional_team_gate_bias: float = -4.0
     conditional_team_nonbaseline_logit: float = -8.0
+    conditional_team_scoring_mode: str = "fixed_prior_v1"
+    conditional_team_prior_margin: float = 4.0
+    conditional_team_prior_weight: float = 1.0
     # Best-anchor 策略蒸馏仅服务于条件式团队门控实验分支；默认关闭，
     # 不能影响既有主方法、消融或对比算法。
     best_anchor_distill_enabled: bool = False

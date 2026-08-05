@@ -427,7 +427,16 @@ class ConditionalTeamSelector(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
         hidden_dim = int(config.hidden_dim)
+        self.scoring_mode = str(
+            getattr(config, "conditional_team_scoring_mode", "fixed_prior_v1")
+        )
         self.nonbaseline_logit = float(config.conditional_team_nonbaseline_logit)
+        self.prior_margin = float(
+            getattr(config, "conditional_team_prior_margin", 4.0)
+        )
+        self.prior_weight = float(
+            getattr(config, "conditional_team_prior_weight", 1.0)
+        )
         self.gate = nn.Sequential(
             nn.Linear(hidden_dim * 2 + 5, hidden_dim),
             get_activation(),
@@ -443,6 +452,38 @@ class ConditionalTeamSelector(nn.Module):
         nn.init.zeros_(self.residual[-1].bias)
         nn.init.constant_(self.gate[-1].bias, float(config.conditional_team_gate_bias))
 
+    def _compose_logits(
+        self,
+        residual: torch.Tensor,
+        gate: torch.Tensor,
+        candidate_prior_costs: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """按配置合成团队 logits；固定先验模式保持旧实现行为。"""
+        assert residual.ndim == 2
+        assert gate.shape == (residual.size(0), 1)
+        batch_size, candidate_count = residual.shape
+        if self.scoring_mode == "fixed_prior_v1":
+            base = residual.new_full(
+                (batch_size, candidate_count), self.nonbaseline_logit
+            )
+            base[:, 0] = 0.0
+            return base + gate * residual
+        if self.scoring_mode != "relative_heuristic_prior_v1":
+            raise ValueError(
+                f"未知 conditional_team_scoring_mode: {self.scoring_mode!r}"
+            )
+        if candidate_prior_costs is None:
+            raise ValueError("relative_heuristic_prior_v1 必须提供候选相对完工代价")
+        assert candidate_prior_costs.shape == residual.shape
+        assert bool(torch.isfinite(candidate_prior_costs).all())
+        assert bool(torch.all(candidate_prior_costs[:, 0] == 0.0))
+        assert bool(torch.all(candidate_prior_costs[:, 1:] >= 0.0))
+        # 仅保留候选相对修正，移除共同平移这一不可辨识自由度。
+        relative_residual = residual - residual[:, :1]
+        prior = -self.prior_margin - self.prior_weight * candidate_prior_costs
+        prior[:, 0] = 0.0
+        return prior + gate * relative_residual
+
     def forward(
         self,
         task_emb: torch.Tensor,
@@ -450,6 +491,7 @@ class ConditionalTeamSelector(nn.Module):
         candidate_team_emb: torch.Tensor,
         gate_features: torch.Tensor,
         candidate_mask: torch.Tensor | None = None,
+        candidate_prior_costs: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """返回团队 logits 与状态门控值。
 
@@ -467,11 +509,11 @@ class ConditionalTeamSelector(nn.Module):
         expanded_state = state_features.unsqueeze(1).expand(-1, candidate_count, -1)
         residual_input = torch.cat([expanded_state, candidate_team_emb], dim=-1)
         residual = self.residual(residual_input).squeeze(-1)
-        base = candidate_team_emb.new_full(
-            (batch_size, candidate_count), self.nonbaseline_logit
-        )
-        base[:, 0] = 0.0
-        logits = base + gate * residual
+        if candidate_prior_costs is not None:
+            candidate_prior_costs = candidate_prior_costs.to(
+                device=candidate_team_emb.device, dtype=candidate_team_emb.dtype
+            )
+        logits = self._compose_logits(residual, gate, candidate_prior_costs)
         if candidate_mask is not None:
             assert candidate_mask.shape == logits.shape
             logits = logits.masked_fill(candidate_mask, -1.0e4)
