@@ -189,7 +189,7 @@ def _verified_candidate_path(job: dict[str, Any]) -> Path:
     return candidate_path
 
 
-def _load_candidate_agent(job: dict[str, Any], device: "torch.device"):
+def load_checkpoint_agent_for_evaluation(job: dict[str, Any], device: "torch.device"):
     import torch
 
     from configs import configs
@@ -398,7 +398,7 @@ def _evaluate_job(job: dict[str, Any], project_root: Path, *, device: "torch.dev
     evaluation_kind = str(job.get("evaluation_kind", "reschedule"))
     if evaluation_kind not in {"reschedule", "initial_standard", "initial_multi_benchmark"}:
         raise ValueError(f"未知异步验证类型: {evaluation_kind}")
-    checkpoint, saved_config, agent = _load_candidate_agent(job, device)
+    checkpoint, saved_config, agent = load_checkpoint_agent_for_evaluation(job, device)
     is_reschedule = bool(configs.enable_reschedule_mode)
     if evaluation_kind == "reschedule" and not is_reschedule:
         raise ValueError("异步重调度验证候选不是重调度模型")

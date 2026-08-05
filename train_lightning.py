@@ -46,9 +46,34 @@ from runtime.artifacts import run_context as create_run_context, uses_runs_layou
 from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
 from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
 from runtime.initial_worker_mapping import apply_initial_worker_mapping
+from runtime.schedulefree_checkpoint import save_checkpoint_with_schedulefree_eval_parameters
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _save_rollout_checkpoint(
+    trainer: pl.Trainer,
+    pl_module: APALLightningModule,
+    path: Path,
+) -> None:
+    """以与训练期评估一致的参数态保存 Lightning checkpoint。"""
+    agent = getattr(pl_module, "agent", None)
+    if agent is None:
+        trainer.save_checkpoint(str(path))
+        return
+    state = save_checkpoint_with_schedulefree_eval_parameters(
+        save_checkpoint=lambda target: trainer.save_checkpoint(str(target)),
+        path=Path(path),
+        optimizer=agent.optimizer,
+        schedulefree_enabled=bool(getattr(agent, "use_schedule_free", False)),
+    )
+    if state.source_mode != "disabled":
+        print(
+            "[Checkpoint][ScheduleFree] "
+            f"source={state.source_mode} saved={state.saved_mode} restored={state.restored_mode}",
+            flush=True,
+        )
 
 
 def _resume_start_episode(checkpoint_payload: object) -> int:
@@ -244,7 +269,7 @@ class RolloutCheckpoint(Callback):
             if episode % submit_every == 0:
                 self.async_manager.submit(trainer, episode=episode)
             else:
-                trainer.save_checkpoint(str(self.latest_path))
+                _save_rollout_checkpoint(trainer, pl_module, self.latest_path)
             return
 
         if eval_metrics is not None:
@@ -265,7 +290,7 @@ class RolloutCheckpoint(Callback):
                 metric_name = "eval_makespan"
             if eligible and current_score < self.best_score:
                 self.best_score = current_score
-                trainer.save_checkpoint(str(self.best_path))
+                _save_rollout_checkpoint(trainer, pl_module, self.best_path)
                 
                 # 多尺度评估时，打印出各个子数据集的具体完工时间明细，避免日志只显示单一数据集产生误导
                 if is_multi_benchmark:
@@ -294,7 +319,7 @@ class RolloutCheckpoint(Callback):
                     flush=True,
                 )
 
-        trainer.save_checkpoint(str(self.latest_path))
+        _save_rollout_checkpoint(trainer, pl_module, self.latest_path)
         print(
             f"[Checkpoint] ep={episode} 保存最新模型: path={self.latest_path}",
             flush=True,

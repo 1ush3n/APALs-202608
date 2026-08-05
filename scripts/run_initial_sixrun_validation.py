@@ -11,7 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, stdev
@@ -30,6 +30,30 @@ RUNS = (("temp0_seed42", 0.0, 42),) + tuple(
 )
 PROTOCOL_ID = "initial_real4_sixrun_temp0_s42_temp001_s42_46_v1"
 EXPECTED_RUN_COUNT = len(DATASETS) * len(RUNS)
+
+
+@dataclass(frozen=True)
+class ValidationProtocol:
+    """不可变的初始调度验证协议，避免运行期混用不同 run 集合。"""
+
+    protocol_id: str
+    runs: tuple[tuple[str, float, int], ...]
+    expected_run_count: int
+
+
+def validation_protocol(*, deterministic_only: bool) -> ValidationProtocol:
+    """返回标准六次协议或用于 checkpoint 迁移核验的四次确定性协议。"""
+    selected_runs = RUNS[:1] if deterministic_only else RUNS
+    protocol_id = (
+        "initial_real4_temp0_seed42_v1"
+        if deterministic_only
+        else PROTOCOL_ID
+    )
+    return ValidationProtocol(
+        protocol_id=protocol_id,
+        runs=selected_runs,
+        expected_run_count=len(DATASETS) * len(selected_runs),
+    )
 
 
 def utc_now() -> str:
@@ -164,10 +188,11 @@ def _launch_contract(
     source_manifest: Path,
     checkpoint_format: str,
     model_spec: dict[str, Any],
+    protocol: ValidationProtocol,
 ) -> dict[str, Any]:
     return {
         "run_type": "initial_schedule_sixrun_protocol",
-        "protocol_id": PROTOCOL_ID,
+        "protocol_id": protocol.protocol_id,
         "method": "HB-GAT-PPO",
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": checkpoint_sha256,
@@ -179,9 +204,9 @@ def _launch_contract(
         "datasets": [f"real_{dataset}" for dataset in DATASETS],
         "runs": [
             {"run_name": name, "temperature": temperature, "seed": seed}
-            for name, temperature, seed in RUNS
+            for name, temperature, seed in protocol.runs
         ],
-        "expected_run_count": EXPECTED_RUN_COUNT,
+        "expected_run_count": protocol.expected_run_count,
         "formal_protocol": True,
         "strict_main_table_eligible": False,
         "evidence_level": "completed_conditional_after_success",
@@ -213,10 +238,14 @@ def _write_static_evidence(
     write_json(output_root / "launch_manifest.json", {**launch_contract, "started_at": utc_now()})
 
 
-def _build_detail_rows(output_root: Path) -> list[dict[str, Any]]:
+def _build_detail_rows(
+    output_root: Path,
+    *,
+    protocol: ValidationProtocol,
+) -> list[dict[str, Any]]:
     detail_rows: list[dict[str, Any]] = []
     for dataset in DATASETS:
-        for run_name, temperature, seed in RUNS:
+        for run_name, temperature, seed in protocol.runs:
             run_dir = output_root / f"real_{dataset}" / run_name
             valid, reason, payload = verify_completed_run(run_dir)
             if not valid or payload is None:
@@ -233,8 +262,14 @@ def _build_detail_rows(output_root: Path) -> list[dict[str, Any]]:
     return detail_rows
 
 
-def _write_final_outputs(output_root: Path, launch_contract: dict[str, Any], progress: dict[str, Any]) -> None:
-    detail_rows = _build_detail_rows(output_root)
+def _write_final_outputs(
+    output_root: Path,
+    launch_contract: dict[str, Any],
+    progress: dict[str, Any],
+    *,
+    protocol: ValidationProtocol,
+) -> None:
+    detail_rows = _build_detail_rows(output_root, protocol=protocol)
     with (output_root / "runs_detail.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(detail_rows[0]))
         writer.writeheader()
@@ -249,8 +284,8 @@ def _write_final_outputs(output_root: Path, launch_contract: dict[str, Any], pro
             {
                 "instance_id": f"real_{dataset}",
                 "deterministic_makespan_temp0_seed42": deterministic["makespan"],
-                "stochastic_makespan_temp001_mean": mean(stochastic),
-                "stochastic_makespan_temp001_std_sample": stdev(stochastic),
+                "stochastic_makespan_temp001_mean": mean(stochastic) if stochastic else None,
+                "stochastic_makespan_temp001_std_sample": stdev(stochastic) if len(stochastic) >= 2 else None,
                 "eligible_rate": mean(float(row["legal"]) for row in current),
                 "complete_rate": mean(float(row["complete"]) for row in current),
                 "max_hard_violation": max(int(row["max_hard_violation"]) for row in current),
@@ -262,11 +297,11 @@ def _write_final_outputs(output_root: Path, launch_contract: dict[str, Any], pro
         writer.writerows(summary_rows)
 
     integrity = {
-        "protocol_id": PROTOCOL_ID,
-        "expected_run_count": EXPECTED_RUN_COUNT,
+        "protocol_id": protocol.protocol_id,
+        "expected_run_count": protocol.expected_run_count,
         "observed_run_count": len(detail_rows),
         "instance_count": len(DATASETS),
-        "runs_per_instance": len(RUNS),
+        "runs_per_instance": len(protocol.runs),
         "all_complete": all(row["complete"] for row in detail_rows),
         "all_legal": all(row["legal"] for row in detail_rows),
         "max_hard_violation": max(int(row["max_hard_violation"]) for row in detail_rows),
@@ -280,7 +315,7 @@ def _write_final_outputs(output_root: Path, launch_contract: dict[str, Any], pro
             "method": "HB-GAT-PPO",
             "variant": "conditional_team_gate_formal_v1",
             "checkpoint_sha256": launch_contract["checkpoint_sha256"],
-            "protocol_id": PROTOCOL_ID,
+            "protocol_id": protocol.protocol_id,
             "protocol": "每实例 6 次：temperature=0、seed=42；temperature=0.01、seed=42–46。",
             "rows": summary_rows,
             "strict_main_table_eligible": False,
@@ -324,8 +359,15 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--python", dest="python_executable", default=sys.executable)
     parser.add_argument("--resume", action="store_true", help="只续跑缺失、损坏或审计失败的运行")
+    parser.add_argument(
+        "--deterministic-only",
+        action="store_true",
+        help="只运行四实例 temperature=0、seed=42；用于 checkpoint 参数态迁移复验",
+    )
     parser.add_argument("--dry-run", action="store_true", help="仅校验输入与协议，不执行评估")
     args = parser.parse_args()
+
+    protocol = validation_protocol(deterministic_only=bool(args.deterministic_only))
 
     checkpoint = args.checkpoint.resolve()
     source_run_dir = args.source_run_dir.resolve()
@@ -352,13 +394,14 @@ def main() -> int:
         source_manifest=source_manifest,
         checkpoint_format=loaded_checkpoint.format_name,
         model_spec=asdict(loaded_checkpoint.model_spec),
+        protocol=protocol,
     )
 
     if args.dry_run:
         if output_root.exists():
             raise FileExistsError(f"dry-run 要求目标目录尚不存在：{output_root}")
         print(
-            f"[预检通过] protocol={PROTOCOL_ID} runs={EXPECTED_RUN_COUNT} "
+            f"[预检通过] protocol={protocol.protocol_id} runs={protocol.expected_run_count} "
             f"checkpoint_sha256={checkpoint_sha}",
             flush=True,
         )
@@ -384,14 +427,14 @@ def main() -> int:
     progress_path = output_root / "progress.json"
     completed: list[dict[str, Any]] = []
     for dataset in DATASETS:
-        for run_name, _temperature, _seed in RUNS:
+        for run_name, _temperature, _seed in protocol.runs:
             valid, _reason, payload = verify_completed_run(output_root / f"real_{dataset}" / run_name)
             if valid and payload is not None:
                 completed.append({"key": run_key(dataset, run_name), **payload})
     progress: dict[str, Any] = {
         "status": "running",
-        "protocol_id": PROTOCOL_ID,
-        "expected_run_count": EXPECTED_RUN_COUNT,
+        "protocol_id": protocol.protocol_id,
+        "expected_run_count": protocol.expected_run_count,
         "completed_run_count": len(completed),
         "completed": completed,
         "current": None,
@@ -402,7 +445,7 @@ def main() -> int:
 
     try:
         for dataset in DATASETS:
-            for run_name, temperature, seed in RUNS:
+            for run_name, temperature, seed in protocol.runs:
                 key = run_key(dataset, run_name)
                 run_dir = output_root / f"real_{dataset}" / run_name
                 valid, reason, payload = verify_completed_run(run_dir)
@@ -421,7 +464,11 @@ def main() -> int:
                 )
                 write_json(progress_path, progress)
                 ordinal = len(progress["completed"]) + 1
-                print(f"[开始 {ordinal}/{EXPECTED_RUN_COUNT}] {key} temperature={temperature} seed={seed}", flush=True)
+                print(
+                    f"[开始 {ordinal}/{protocol.expected_run_count}] {key} "
+                    f"temperature={temperature} seed={seed}",
+                    flush=True,
+                )
                 run_command(
                     [
                         args.python_executable,
@@ -464,7 +511,7 @@ def main() -> int:
                 progress["current"] = None
                 write_json(progress_path, progress)
                 print(
-                    f"[完成 {progress['completed_run_count']}/{EXPECTED_RUN_COUNT}] {key} "
+                    f"[完成 {progress['completed_run_count']}/{protocol.expected_run_count}] {key} "
                     f"makespan={payload['makespan']:.6f} legal=yes hard=0",
                     flush=True,
                 )
@@ -478,8 +525,11 @@ def main() -> int:
         write_json(progress_path, progress)
         raise
 
-    _write_final_outputs(output_root, launch_contract, progress)
-    print(f"[全部完成] {EXPECTED_RUN_COUNT}/{EXPECTED_RUN_COUNT} 次评估与合法性审计完成", flush=True)
+    _write_final_outputs(output_root, launch_contract, progress, protocol=protocol)
+    print(
+        f"[全部完成] {protocol.expected_run_count}/{protocol.expected_run_count} 次评估与合法性审计完成",
+        flush=True,
+    )
     return 0
 
 

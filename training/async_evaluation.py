@@ -16,10 +16,32 @@ from runtime.initial_checkpoint_selection import (
     load_initial_checkpoint_selection_manifest,
     sha256_file,
 )
+from runtime.schedulefree_checkpoint import save_checkpoint_with_schedulefree_eval_parameters
 
 
 class AsyncEvaluationError(RuntimeError):
     """异步验证进程、队列或最优模型发布进入不可恢复状态。"""
+
+
+def _save_async_candidate_checkpoint(trainer: Any, path: Path) -> None:
+    """以 ScheduleFree 评估参数态保存异步候选。"""
+    module = getattr(trainer, "lightning_module", None)
+    agent = getattr(module, "agent", None)
+    if agent is None:
+        trainer.save_checkpoint(str(path))
+        return
+    state = save_checkpoint_with_schedulefree_eval_parameters(
+        save_checkpoint=lambda target: trainer.save_checkpoint(str(target)),
+        path=Path(path),
+        optimizer=agent.optimizer,
+        schedulefree_enabled=bool(getattr(agent, "use_schedule_free", False)),
+    )
+    if state.source_mode != "disabled":
+        print(
+            "[AsyncEval][ScheduleFree] "
+            f"source={state.source_mode} saved={state.saved_mode} restored={state.restored_mode}",
+            flush=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -348,7 +370,7 @@ class AsyncEvaluationManager:
         candidate = self.paths.candidates / f"episode_{int(episode):06d}.ckpt"
         temporary = candidate.with_name(f".{candidate.name}.{uuid.uuid4().hex}.tmp")
         try:
-            trainer.save_checkpoint(str(temporary))
+            _save_async_candidate_checkpoint(trainer, temporary)
             temporary.replace(candidate)
         finally:
             temporary.unlink(missing_ok=True)

@@ -499,7 +499,13 @@ def test_async_checkpoint_uses_explicit_submission_cadence(
     callback = train_lightning.RolloutCheckpoint(tmp_path)
     saved: list[str] = []
     trainer = SimpleNamespace(save_checkpoint=lambda path: saved.append(str(path)))
-    module = SimpleNamespace(last_completed_episode=4, last_eval_metrics=None, last_update_committed=True, eval_freq=1)
+    module = SimpleNamespace(
+        agent=SimpleNamespace(optimizer=None, use_schedule_free=False),
+        last_completed_episode=4,
+        last_eval_metrics=None,
+        last_update_committed=True,
+        eval_freq=1,
+    )
     callback.on_train_batch_end(trainer, module, None, None, 0)
     module.last_completed_episode = 5
     callback.on_train_batch_end(trainer, module, None, None, 0)

@@ -42,6 +42,15 @@ def test_four_instance_sixrun_protocol_is_exact() -> None:
     assert validation.EXPECTED_RUN_COUNT == 24
 
 
+def test_four_instance_deterministic_protocol_is_exact() -> None:
+    """ScheduleFree 迁移复验只允许四实例、温度 0、seed 42。"""
+    protocol = validation.validation_protocol(deterministic_only=True)
+
+    assert protocol.protocol_id == "initial_real4_temp0_seed42_v1"
+    assert protocol.runs == (("temp0_seed42", 0.0, 42),)
+    assert protocol.expected_run_count == 4
+
+
 def test_completed_run_requires_full_legal_zero_violation_evidence(tmp_path: Path) -> None:
     run_dir = tmp_path / "real_283" / "temp0_seed42"
     _write_completed_run(run_dir)
