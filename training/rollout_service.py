@@ -446,6 +446,7 @@ class APALRolloutService:
             target.masks.extend(source.masks)
             target.values.extend(source.values)
             target.gated_team_traces.extend(source.gated_team_traces)
+            target.anchor_proposal_traces.extend(source.anchor_proposal_traces)
 
     def collect(self, update_index: int) -> RolloutUpdate:
         dataset_count = int(self.vector_env.envs[0].dataset_count)

@@ -533,19 +533,19 @@ class PPOAgent:
         if demand < 1:
             return None
 
-        worker_feats = obs["worker"].x
-        device = worker_feats.device
         worker_embs3 = (
             worker_embs.unsqueeze(0) if worker_embs.ndim == 2 else worker_embs
         )  # [1, N, H]
         assert worker_embs3.ndim == 3
+        device = worker_embs3.device
+        worker_feats = obs["worker"].x.to(device=device)
         anchor_emb = worker_embs3[:, list(anchor_team), :].mean(dim=1)  # [1, H]
 
         # ---- 合法工人掩码（技能 / 锁定 / 环境 / 去重 / 首步非锚点）----
         worker_skills = worker_feats[:, layout.skill_slice]  # [N, K]
         task_skill_vec = obs["task"].x[
             int(task_id), 5 : 5 + worker_skills.size(1)
-        ]
+        ].to(device=device)
         skill_idx = int(torch.argmax(task_skill_vec).item())
         has_skill = worker_skills[:, skill_idx] > 0.5  # [N]
         locks = torch.argmax(worker_feats[:, layout.lock_slice], dim=1)  # [N]
@@ -999,8 +999,8 @@ class PPOAgent:
                 chosen_t = torch.tensor(
                     [[chosen]], device=worker_embeddings.device
                 )
-                step_lp_sum = step_lp_sum + dist.log_prob(chosen_t)[0]
-                entropy_sum = entropy_sum + dist.entropy()[0]
+                step_lp_sum = step_lp_sum + dist.log_prob(chosen_t)[0].reshape(())
+                entropy_sum = entropy_sum + dist.entropy()[0].reshape(())
             gate_features = torch.tensor(
                 list(trace.gate_features), dtype=torch.float32,
                 device=worker_embeddings.device,
@@ -1026,8 +1026,12 @@ class PPOAgent:
             branch_t = torch.tensor(
                 [[trace.selected_branch]], device=worker_embeddings.device
             )
-            team_lp_rows.append(step_lp_sum + bdist.log_prob(branch_t)[0])
-            entropy_rows.append(entropy_sum + bdist.entropy()[0])
+            team_lp_rows.append(
+                (step_lp_sum + bdist.log_prob(branch_t)[0]).reshape(())
+            )
+            entropy_rows.append(
+                (entropy_sum + bdist.entropy()[0]).reshape(())
+            )
         team_lp = torch.stack(team_lp_rows)
         team_entropy = torch.stack(entropy_rows)
         return team_lp, team_entropy, {}
