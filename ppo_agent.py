@@ -386,8 +386,8 @@ class PPOAgent:
             best_alternative_gap = logits.new_zeros(1)
         frozen_values = torch.cat(
             [
-                candidates.gate_features,
-                candidates.relative_finish_costs,
+                candidates.gate_features.to(device=logits.device),
+                candidates.relative_finish_costs.to(device=logits.device),
                 _gate.reshape(-1),
                 alternative_probability.reshape(-1),
                 best_alternative_gap.reshape(-1),

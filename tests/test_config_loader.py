@@ -293,6 +293,31 @@ def test_initialize_runtime_cli_leaf_override_wins_nested_experiment_defaults() 
     assert cfg.train_data_path_or_dir == "data/scale_400_800_datasets"
 
 
+def test_ctg_margin2_experiment_loads_through_actual_training_entry() -> None:
+    """独立敏感度配置必须经训练入口保留正式 CTG 协议，仅改变先验间隔。"""
+    cfg = Config()
+    args = initialize_hydra_runtime(
+        ["experiment=initial_conditional_team_gate_prior_margin2"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert args.hydra_experiment == "initial_conditional_team_gate_prior_margin2"
+    assert cfg.policy_action_scope == "operation_station_gated_team"
+    assert cfg.conditional_team_scoring_mode == "relative_heuristic_prior_v1"
+    assert cfg.conditional_team_prior_margin == 2.0
+    assert cfg.conditional_team_prior_weight == 1.0
+    assert cfg.conditional_team_gate_bias == -4.0
+    assert cfg.training_manifest_path == (
+        "data/scale_400_800_datasets/manifest_ctg_160_explicit_fiveskill_v1.json"
+    )
+    assert cfg.checkpoint_selection_manifest_path == (
+        "data/initial_selection_manifests/real_four_instances_temperature0_v1.json"
+    )
+
+
 def test_script_extra_arguments_do_not_enter_hydra_config() -> None:
     parsed = parse_hydra_args(
         [

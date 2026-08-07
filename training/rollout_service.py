@@ -39,8 +39,24 @@ class APALRolloutService:
         self.episodes_per_update = max(1, int(config.update_every_episodes))
         self._last_dataset_idx: int | None = None
         self._last_effective_batch_size: int | None = None
+        # L2D checkpoint 兼容层仍序列化该 RNG；主方法的数据集选择不依赖其进程内状态。
         self._rng = np.random.RandomState(int(config.seed))
         self.use_ipc_fusion = bool(getattr(config, "enable_rollout_ipc_fusion", False))
+
+    def _dataset_index_for_update(self, update_index: int, dataset_count: int) -> int:
+        """返回 PPO 更新所属的训练图，支持跨进程恢复时的确定性重建。"""
+        if dataset_count < 1:
+            raise ValueError("训练数据集数量必须大于等于 1")
+        if update_index < 1:
+            raise ValueError("PPO 更新编号必须从 1 开始")
+        interval = max(1, int(getattr(self.config, "switch_dataset_every_updates", 1)))
+        block_index = (int(update_index) - 1) // interval
+        if not bool(getattr(self.config, "random_sample_dataset", True)):
+            return int(block_index % dataset_count)
+
+        # 使用块编号重建伪随机序列，而非依赖进程内 RNG 状态；resume 落在块中间时仍选中同一图。
+        rng = np.random.RandomState(int(self.config.seed))
+        return int(rng.randint(0, dataset_count, size=block_index + 1)[-1])
 
     def _adaptive_batch_for_task_count(self, num_tasks: int) -> tuple[int | None, str]:
         if not bool(getattr(self.config, "adaptive_ppo_batch_by_tasks", False)):
@@ -430,10 +446,7 @@ class APALRolloutService:
 
     def collect(self, update_index: int) -> RolloutUpdate:
         dataset_count = int(self.vector_env.envs[0].dataset_count)
-        if getattr(self.config, "random_sample_dataset", True):
-            dataset_idx = self._rng.randint(0, max(1, dataset_count))
-        else:
-            dataset_idx = (int(update_index) - 1) % max(1, dataset_count)
+        dataset_idx = self._dataset_index_for_update(int(update_index), dataset_count)
 
         if dataset_idx != self._last_dataset_idx:
             self.vector_env.switch_dataset_all(dataset_idx)
