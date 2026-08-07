@@ -192,7 +192,12 @@ def test_batched_action_decoding_preserves_legality_for_every_scope(
 
 @pytest.mark.parametrize(
     "action_scope",
-    ("operation", "operation_station", "operation_station_worker"),
+    (
+        "operation",
+        "operation_station",
+        "operation_station_worker",
+        "operation_station_anchor_proposal_team",
+    ),
 )
 def test_ppo_update_is_finite_for_every_action_scope(action_scope: str) -> None:
     overrides = _small_overrides(policy_action_scope=action_scope, batch_size=1)
@@ -225,6 +230,8 @@ def test_ppo_update_is_finite_for_every_action_scope(action_scope: str) -> None:
         memory.logprobs.append(logprob)
         memory.values.append(value)
         memory.masks.append(masks)
+        if action_scope == "operation_station_anchor_proposal_team":
+            memory.anchor_proposal_traces.append(agent.last_anchor_proposal_trace)
         _obs, reward, done, info = env.step(action)
         assert not info.get("invalid_action", False)
         memory.rewards.append(float(reward))
