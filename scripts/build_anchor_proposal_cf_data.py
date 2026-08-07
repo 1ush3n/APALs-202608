@@ -355,6 +355,10 @@ def _build_state_samples(
         return []
     results: list[tuple[tuple[int, ...], str, float]] = []
     baseline_makespan: float | None = None
+    safe_seed = state_seed.replace("|", "-").replace("_", "-")
+    obs_path = output_dir / "samples" / f"obs_{csv_sha256[:12]}_{safe_seed}.pt"
+    torch.save(obs, obs_path)
+    obs_rel = str(obs_path.relative_to(output_dir))
     for team, source in candidates:
         outcome = _forced_team_full_episode(
             env,
@@ -393,6 +397,7 @@ def _build_state_samples(
             "baseline_makespan": float(baseline_makespan),
             "candidate_makespan": makespan,
             "relative_gain": float(relative_gain),
+            "obs_pt": obs_rel,
             "sample_sha256": "",
             "npz_path": "",
         }
@@ -504,6 +509,7 @@ def _write_manifest(
                 "source": row["source"],
                 "sample_sha256": row["sample_sha256"],
                 "npz": row["npz_path"],
+                "obs_pt": row["obs_pt"],
                 "relative_gain": row["relative_gain"],
             }
         )
