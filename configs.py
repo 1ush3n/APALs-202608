@@ -55,6 +55,15 @@ class Config:
     anchor_proposal_require_difference: bool = True
     anchor_proposal_pretrain_checkpoint_path: str = ""
     anchor_proposal_cf_manifest_path: str = ""
+    # APCF 反事实预训练（独立入口 pretrain_anchor_proposal_cf.py）。
+    apcf_pretrain_lr: float = 1.0e-4          # 预训练学习率
+    apcf_pretrain_epochs: int = 10            # 预训练轮数
+    apcf_pretrain_loss_huber_weight: float = 1.0   # 相对收益 Huber 回归权重
+    apcf_pretrain_loss_bce_weight: float = 1.0     # 排序 BCE 权重
+    apcf_pretrain_loss_gate_weight: float = 1.0    # 门控分支 CE 权重
+    apcf_pretrain_loss_bc_weight: float = 1.0      # 正收益加权 BC 权重
+    apcf_pretrain_device: str = "auto"        # auto|cpu|cuda
+    apcf_pretrain_val_split: str = "frozen_diagnostic"  # 冻结诊断验证集
     # Best-anchor 策略蒸馏仅服务于条件式团队门控实验分支；默认关闭，
     # 不能影响既有主方法、消融或对比算法。
     best_anchor_distill_enabled: bool = False
