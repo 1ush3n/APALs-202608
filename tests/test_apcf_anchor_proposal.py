@@ -395,3 +395,65 @@ def test_apcf_encoder_is_frozen_and_heads_trainable_in_pretrain() -> None:
         assert name.startswith("anchor_team_head") or name.startswith(
             "anchor_proposal_gate"
         ), f"非双头参数 {name} 不得可训练"
+
+
+def test_apcf_pretrain_manifest_sha256_is_recorded_and_verified() -> None:
+    """预训练 checkpoint 必须记录 source manifest 的 SHA-256 供 PPO 侧校验。"""
+    import sys
+
+    from training.cf_pretrain import CFPretrainLightningModule, _sha256_file
+
+    sys.path.insert(0, str(PROJECT_ROOT))
+    manifest_path = PROJECT_ROOT / "data" / "283.csv"
+    expected = _sha256_file(manifest_path)
+    agent, overrides = _make_agent()
+    with temporary_config(configs, overrides):
+        module = CFPretrainLightningModule(
+            agent.policy,
+            configs,
+            manifest_path=str(manifest_path),
+            manifest_sha256="",
+        )
+    assert module.manifest_sha256 == expected
+
+
+def test_apcf_old_scope_checkpoint_is_rejected_for_anchor_proposal_scope() -> None:
+    """无 APCF 双头的旧 scope checkpoint 不得加载进 APCF 模型（strict）。"""
+    from runtime.checkpoints import load_policy_weights
+
+    # 构造旧 scope（operation_station_worker）模型与 APCF 模型各一份。
+    legacy_overrides = {
+        "policy_action_scope": "operation_station_worker",
+        "hidden_dim": 32,
+        "num_gat_layers": 1,
+        "num_heads": 2,
+        "use_shared_trunk": True,
+        "use_schedule_free": False,
+        "use_ema": False,
+        "enable_dynamic_events": False,
+        "randomize_durations": False,
+        "n_w": 80,
+        "batch_size": 4,
+        "accumulation_steps": 1,
+        "k_epochs": 1,
+    }
+    with temporary_config(configs, legacy_overrides):
+        legacy_model = HBGATPN(configs)
+    legacy_state = {
+        key: value
+        for key, value in legacy_model.state_dict().items()
+        if key.startswith("policy.")
+    } or legacy_model.state_dict()
+
+    from dataclasses import dataclass
+
+    @dataclass
+    class _FakeCheckpoint:
+        state_dict: dict
+
+    agent, overrides = _make_agent()
+    apcf_model = agent.policy
+    with pytest.raises(Exception) as exc_info:
+        load_policy_weights(apcf_model, _FakeCheckpoint(legacy_state), strict=True)
+    message = str(exc_info.value)
+    assert "anchor_team_head" in message or "anchor_proposal_gate" in message
