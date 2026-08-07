@@ -45,6 +45,28 @@ class FrozenGatedTeamTrace:
     best_alternative_logit_gap: float
 
 
+@dataclass(frozen=True)
+class FrozenAnchorProposalTrace:
+    """采样时冻结的锚点条件完整团队提议轨迹（APCF full_team_v1）。
+
+    PPO 重算必须在与采样时相同的离散动作空间上进行。本 trace 保存锚点、
+    提议的有序 worker 序列、每步合法 worker ID 集合与门控特征，不保存图张量。
+    即使 z=0 最终执行锚点，提议的完整对数概率也必须参与重算。
+    """
+
+    task_id: int
+    station_id: int
+    anchor_team: tuple[int, ...]
+    proposal_team: tuple[int, ...]
+    proposal_worker_sequence: tuple[int, ...]
+    per_step_worker_ids: tuple[tuple[int, ...], ...]
+    proposal_available: bool
+    selected_branch: int
+    branch_floor: float
+    gate_features: tuple[float, ...]
+    hamming_distance: int
+
+
 class PPOAgent:
     """
     PPO (Proximal Policy Optimization) 鏅鸿兘浣撱€?
@@ -71,6 +93,8 @@ class PPOAgent:
         # 仅供 rollout_service 在同一次批量解码后立即写入 Memory；不参与 checkpoint。
         self.last_gated_team_trace: FrozenGatedTeamTrace | None = None
         self.last_gated_team_traces: list[FrozenGatedTeamTrace | None] = []
+        self.last_anchor_proposal_traces: list[FrozenAnchorProposalTrace | None] = []
+        self._apcf_update_count: int = 0
         
         from utils.gpu_graph_manager import GPUBatchGraphManager
         self.gpu_graph_manager = GPUBatchGraphManager(device, config=self.config)
@@ -468,6 +492,267 @@ class PPOAgent:
             )
         return metrics
 
+    def _select_anchor_proposal_team(
+        self,
+        policy: Any,
+        *,
+        obs: HeteroData,
+        task_id: int,
+        station_id: int,
+        worker_mask: torch.Tensor | None,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        worker_embs: torch.Tensor,
+        deterministic: bool,
+        temperature: float,
+        branch_floor: float,
+    ) -> tuple[list[int], torch.Tensor, FrozenAnchorProposalTrace] | None:
+        """锚点条件完整团队提议 + 反事实门控（APCF full_team_v1）。
+
+        单环境与批量路径共用。流程：(o,s) → H → P → z → T：
+          1) 锚点 H 由 EarliestFinishActionCompleter.complete 确定性生成；
+          2) 提议 P 由 AnchorConditionedTeamPointer 自回归生成 d 人合法团队，
+             首步强制非锚点成员（存在合法替代时），保证 P ≠ H；
+          3) 门控 ℓ_H=0、ℓ_P=−ρ+g·6·tanh(ΔÂ/0.01)，训练按 ε 探索下限采样 z，
+             评估按原始 logits 温度 0 确定性选择；
+          4) 即使 z=0 执行锚点，提议的完整对数概率也计入 team_logprob。
+        """
+        completer = self.action_completer
+        layout = resolve_worker_feature_layout(self.config)
+        anchor = completer.complete(
+            obs,
+            task_id=int(task_id),
+            station_mask=None,
+            worker_mask=worker_mask,
+            selected_station=int(station_id),
+        )
+        if anchor is None:
+            return None
+        anchor_team = tuple(int(worker_id) for worker_id in anchor.team)
+        demand = len(anchor_team)
+        if demand < 1:
+            return None
+
+        worker_feats = obs["worker"].x
+        device = worker_feats.device
+        worker_embs3 = (
+            worker_embs.unsqueeze(0) if worker_embs.ndim == 2 else worker_embs
+        )  # [1, N, H]
+        assert worker_embs3.ndim == 3
+        anchor_emb = worker_embs3[:, list(anchor_team), :].mean(dim=1)  # [1, H]
+
+        # ---- 合法工人掩码（技能 / 锁定 / 环境 / 去重 / 首步非锚点）----
+        worker_skills = worker_feats[:, layout.skill_slice]  # [N, K]
+        task_skill_vec = obs["task"].x[
+            int(task_id), 5 : 5 + worker_skills.size(1)
+        ]
+        skill_idx = int(torch.argmax(task_skill_vec).item())
+        has_skill = worker_skills[:, skill_idx] > 0.5  # [N]
+        locks = torch.argmax(worker_feats[:, layout.lock_slice], dim=1)  # [N]
+        lock_ok = (locks == 0) | (locks == (int(station_id) + 1))
+        illegal = (~has_skill) | (~lock_ok)  # True=非法
+        if worker_mask is not None:
+            wm = worker_mask.to(device=device, dtype=torch.bool).reshape(-1)
+            illegal = illegal | wm
+
+        # ---- 自回归生成提议 P ----
+        proposal_seq: list[int] = []
+        per_step_ids: list[tuple[int, ...]] = []
+        step_logprobs: list[torch.Tensor] = []
+        current_illegal = illegal.clone()
+        require_diff = bool(
+            getattr(self.config, "anchor_proposal_require_difference", True)
+        )
+        available = True
+        for step in range(demand):
+            step_illegal = current_illegal.clone()
+            if step == 0 and require_diff:
+                for worker_id in anchor_team:
+                    step_illegal[worker_id] = True
+            valid_ids = torch.nonzero(~step_illegal).reshape(-1).tolist()
+            if not valid_ids:
+                available = False
+                break
+            per_step_ids.append(tuple(int(worker_id) for worker_id in valid_ids))
+            context = (
+                worker_embs3[0, proposal_seq, :].mean(dim=0, keepdim=True)
+                if proposal_seq
+                else None
+            )
+            with self.autocast_context():
+                scores = policy.anchor_team_head.forward_choice(
+                    task_emb,
+                    station_emb,
+                    anchor_emb,
+                    worker_embs3,
+                    mask=step_illegal.reshape(1, -1),
+                    current_team_emb=context,
+                )
+            scores_float = scores.float()
+            if torch.isnan(scores_float).any():
+                scores_float = torch.nan_to_num(scores_float, nan=-1.0e4)
+            if deterministic or temperature <= 0.0:
+                chosen = int(torch.argmax(scores_float, dim=1).item())
+                step_lp = scores.new_zeros(())
+            else:
+                dist = Categorical(logits=scores_float)
+                sampled = dist.sample()
+                chosen = int(sampled.item())
+                step_lp = dist.log_prob(sampled)
+            proposal_seq.append(chosen)
+            current_illegal[chosen] = True  # 去重
+
+        # ---- 门控分支 ----
+        selected_branch = 0
+        branch_lp = torch.zeros((), device=device)
+        gate_features_flat = (0.0, 0.0, 1.0, 0.0, 0.0)
+        hamming = 0
+        if not available:
+            team = list(anchor_team)
+            trace = FrozenAnchorProposalTrace(
+                task_id=int(task_id),
+                station_id=int(station_id),
+                anchor_team=anchor_team,
+                proposal_team=(),
+                proposal_worker_sequence=(),
+                per_step_worker_ids=(),
+                proposal_available=False,
+                selected_branch=0,
+                branch_floor=float(branch_floor),
+                gate_features=gate_features_flat,
+                hamming_distance=0,
+            )
+            return team, branch_lp, trace
+
+        proposal_emb = worker_embs3[0, proposal_seq, :].mean(dim=0, keepdim=True)  # [1, H]
+        hamming = len(set(proposal_seq) - set(anchor_team))
+        req = completer._extract_task_requirements(obs["task"].x, int(task_id))
+        if req is None:
+            return None
+        _skill_req, _demand_req, task_duration = req
+        num_workers = int(worker_feats.size(0))
+        legal_count = int((~illegal).sum().item())
+        station_wait = torch.expm1(obs["station"].x[:, 4]).clamp_min(0.0)
+        worker_wait = torch.expm1(worker_feats[:, layout.wait_idx]).clamp_min(0.0)
+        scale = max(float(task_duration), 1.0e-6)
+        gate_features = torch.tensor(
+            [
+                float(demand) / max(num_workers, 1),
+                float(legal_count) / max(num_workers, 1),
+                1.0,
+                float(station_wait[int(station_id)]) / scale,
+                float(worker_wait.std(unbiased=False).item()) / scale,
+            ],
+            dtype=torch.float32,
+            device=device,
+        ).reshape(1, -1)
+        gate_features_flat = tuple(float(value) for value in gate_features.reshape(-1).tolist())
+        with self.autocast_context():
+            branch_logits, _delta_a, _gate_val = policy.anchor_proposal_gate(
+                task_emb,
+                station_emb,
+                anchor_emb,
+                proposal_emb,
+                gate_features,
+                torch.tensor([[float(hamming)]], dtype=torch.float32, device=device),
+            )
+        branch_logits = branch_logits.float()
+        if torch.isnan(branch_logits).any():
+            branch_logits = torch.nan_to_num(branch_logits, nan=-1.0e4)
+        if deterministic or temperature <= 0.0:
+            selected_branch = int(torch.argmax(branch_logits, dim=1).item())
+        else:
+            eps = max(float(branch_floor), 0.0)
+            soft = torch.softmax(branch_logits, dim=1)  # [1, 2]
+            mixed = eps + (1.0 - 2.0 * eps) * soft
+            dist = Categorical(probs=mixed)
+            sampled = dist.sample()
+            selected_branch = int(sampled.item())
+            branch_lp = dist.log_prob(sampled)
+        step_sum = torch.zeros((), device=device)
+        for step_lp in step_logprobs:
+            step_sum = step_sum + step_lp.to(device=device)
+        team_logprob = step_sum + branch_lp
+        team = proposal_seq if selected_branch == 1 else list(anchor_team)
+        trace = FrozenAnchorProposalTrace(
+            task_id=int(task_id),
+            station_id=int(station_id),
+            anchor_team=anchor_team,
+            proposal_team=tuple(proposal_seq),
+            proposal_worker_sequence=tuple(proposal_seq),
+            per_step_worker_ids=tuple(per_step_ids),
+            proposal_available=True,
+            selected_branch=selected_branch,
+            branch_floor=float(branch_floor),
+            gate_features=gate_features_flat,
+            hamming_distance=int(hamming),
+        )
+        return team, team_logprob, trace
+
+    @staticmethod
+    def _anchor_proposal_rollout_metrics(memory: Any) -> dict[str, float]:
+        """从冻结轨迹汇总 APCF 采样期诊断指标。"""
+        traces = [
+            trace for trace in getattr(memory, "anchor_proposal_traces", [])
+            if isinstance(trace, FrozenAnchorProposalTrace)
+        ]
+        if not traces:
+            return {
+                "APCF/RolloutDecisionCount": 0.0,
+                "APCF/RolloutProposalAvailableRate": 0.0,
+                "APCF/RolloutHammingDistanceMean": 0.0,
+                "APCF/RolloutTwoWorkerEditRate": 0.0,
+                "APCF/RolloutTrainProposalSelectRate": 0.0,
+                "APCF/RolloutRawProposalSelectRate": 0.0,
+                "APCF/RolloutValidProposalRate": 1.0,
+            }
+        available = [t for t in traces if t.proposal_available]
+        hamming_values = [float(t.hamming_distance) for t in available]
+        raw_select = [
+            float(t.selected_branch)
+            for t in traces
+            if t.proposal_available and t.branch_floor <= 0.0
+        ]
+        return {
+            "APCF/RolloutDecisionCount": float(len(traces)),
+            "APCF/RolloutProposalAvailableRate": float(len(available) / len(traces)),
+            "APCF/RolloutHammingDistanceMean": float(
+                sum(hamming_values) / len(hamming_values) if hamming_values else 0.0
+            ),
+            "APCF/RolloutTwoWorkerEditRate": float(
+                sum(1 for h in hamming_values if h >= 2) / len(hamming_values)
+                if hamming_values
+                else 0.0
+            ),
+            "APCF/RolloutTrainProposalSelectRate": float(
+                sum(t.selected_branch for t in available) / len(available)
+                if available
+                else 0.0
+            ),
+            "APCF/RolloutRawProposalSelectRate": float(
+                sum(raw_select) / len(raw_select) if raw_select else 0.0
+            ),
+            "APCF/RolloutValidProposalRate": 1.0,
+        }
+
+    def _current_anchor_branch_floor(self) -> float:
+        """当前 PPO 更新进度下的训练期探索下限 ε_t（前 decay_fraction 内线性退火）。
+
+        行为策略使用 p_train(z=1)=ε_t+(1−2ε_t)σ(ℓ_P−ℓ_H)；评估/异步选择/最终验证
+        一律用原始 logits、温度 0、无探索。
+        """
+        start = float(self.config.anchor_proposal_train_branch_floor_start)
+        end = float(self.config.anchor_proposal_train_branch_floor_end)
+        frac = float(self.config.anchor_proposal_branch_floor_decay_fraction)
+        total = max(int(getattr(self.config, "max_episodes", 300)) or 1, 1)
+        denominator = max(total * frac, 1.0)
+        progress = min(float(self._apcf_update_count) / denominator, 1.0)
+        return float(start + (end - start) * progress)
+
+    def advance_apcf_update(self) -> None:
+        """训练循环在每次 PPO 参数更新后推进 APCF 探索退火进度。"""
+        self._apcf_update_count += 1
+
     def _recompute_gated_team_logprobs(
         self,
         *,
@@ -643,6 +928,109 @@ class PPOAgent:
             "best_alternative_gap": best_alternative_gap,
         }
         return team_lp, team_entropy, diagnostics
+
+    def _recompute_anchor_proposal_logprobs(
+        self,
+        *,
+        task_embeddings: torch.Tensor,
+        station_embeddings: torch.Tensor,
+        worker_embeddings: torch.Tensor,
+        frozen_traces: list[FrozenAnchorProposalTrace | None],
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        """按冻结轨迹用当前策略重算 APCF 团队对数概率。
+
+        完整对数概率 = Σ_j log q(w_j | w_{<j}, H, o, s) + log π̃(z | H, P, o, s)。
+        即使 z=0 执行锚点，提议的每一步对数概率也必须计入（保证提议器获得 PPO 梯度）。
+        无提议（proposal_available=False）时为确定性锚点，对数概率为 0。
+        """
+        batch_size = task_embeddings.size(0)
+        if self.policy.anchor_team_head is None or self.policy.anchor_proposal_gate is None:
+            raise RuntimeError(
+                "operation_station_anchor_proposal_team 缺少 anchor_team_head / anchor_proposal_gate"
+            )
+        num_workers = worker_embeddings.size(1)
+        team_lp_rows: list[torch.Tensor] = []
+        entropy_rows: list[torch.Tensor] = []
+        for b in range(batch_size):
+            trace = frozen_traces[b]
+            zero_lp = torch.zeros((), device=worker_embeddings.device)
+            if trace is None:
+                team_lp_rows.append(zero_lp)
+                entropy_rows.append(zero_lp)
+                continue
+            task_emb = task_embeddings[b].unsqueeze(0)  # [1, H]
+            station_emb = station_embeddings[b].unsqueeze(0)
+            anchor_emb = worker_embeddings[b, list(trace.anchor_team), :].mean(
+                dim=0, keepdim=True
+            )
+            if not trace.proposal_available:
+                team_lp_rows.append(zero_lp)
+                entropy_rows.append(zero_lp)
+                continue
+            proposal_emb = worker_embeddings[
+                b, list(trace.proposal_worker_sequence), :
+            ].mean(dim=0, keepdim=True)
+            step_lp_sum = zero_lp
+            entropy_sum = zero_lp
+            for j, chosen in enumerate(trace.proposal_worker_sequence):
+                valid_ids = trace.per_step_worker_ids[j]
+                step_mask = torch.full(
+                    (1, num_workers), True, device=worker_embeddings.device, dtype=torch.bool
+                )
+                step_mask[0, list(valid_ids)] = False
+                context = (
+                    worker_embeddings[
+                        b, list(trace.proposal_worker_sequence[:j]), :
+                    ].mean(dim=0, keepdim=True)
+                    if j > 0
+                    else None
+                )
+                with self.autocast_context():
+                    scores = self.policy.anchor_team_head.forward_choice(
+                        task_emb,
+                        station_emb,
+                        anchor_emb,
+                        worker_embeddings[b].unsqueeze(0),
+                        mask=step_mask,
+                        current_team_emb=context,
+                    )
+                scores_float = scores.float()
+                dist = Categorical(logits=scores_float)
+                chosen_t = torch.tensor(
+                    [[chosen]], device=worker_embeddings.device
+                )
+                step_lp_sum = step_lp_sum + dist.log_prob(chosen_t)[0]
+                entropy_sum = entropy_sum + dist.entropy()[0]
+            gate_features = torch.tensor(
+                list(trace.gate_features), dtype=torch.float32,
+                device=worker_embeddings.device,
+            ).reshape(1, -1)
+            hamming = torch.tensor(
+                [[float(trace.hamming_distance)]], dtype=torch.float32,
+                device=worker_embeddings.device,
+            )
+            with self.autocast_context():
+                branch_logits, _delta_a, _g = self.policy.anchor_proposal_gate(
+                    task_emb,
+                    station_emb,
+                    anchor_emb,
+                    proposal_emb,
+                    gate_features,
+                    hamming,
+                )
+            branch_logits = branch_logits.float()
+            eps = max(float(trace.branch_floor), 0.0)
+            soft = torch.softmax(branch_logits, dim=1)
+            mixed = eps + (1.0 - 2.0 * eps) * soft
+            bdist = Categorical(probs=mixed)
+            branch_t = torch.tensor(
+                [[trace.selected_branch]], device=worker_embeddings.device
+            )
+            team_lp_rows.append(step_lp_sum + bdist.log_prob(branch_t)[0])
+            entropy_rows.append(entropy_sum + bdist.entropy()[0])
+        team_lp = torch.stack(team_lp_rows)
+        team_entropy = torch.stack(entropy_rows)
+        return team_lp, team_entropy, {}
 
     def get_memory_snapshot(self) -> Dict[str, float]:
         """返回当前设备显存快照，单位为 GB；CPU 环境返回 0。"""
@@ -937,6 +1325,7 @@ class PPOAgent:
             specific_station_mask: 鐢ㄤ簬 Memory 璁板綍
         """
         self.last_gated_team_trace = None
+        self.last_anchor_proposal_trace = None
         no_mask = self.config.ablation_no_mask
         
         if self.use_schedule_free and manage_optimizer_mode:
@@ -1078,7 +1467,11 @@ class PPOAgent:
                     station_action = station_dist.sample()
                     station_logprob = station_dist.log_prob(station_action)
 
-            if action_scope in {"operation_station", "operation_station_gated_team"}:
+            if action_scope in {
+                "operation_station",
+                "operation_station_gated_team",
+                "operation_station_anchor_proposal_team",
+            }:
                 selected_station_id = int(station_action.item())
                 team_logprob = torch.zeros((), device=self.device)
                 if action_scope == "operation_station_gated_team":
@@ -1098,6 +1491,25 @@ class PPOAgent:
                         return None, 0.0, 0.0, None, True
                     selected_team, team_logprob, gated_trace = gated_team
                     self.last_gated_team_trace = gated_trace
+                    action_station_id = selected_station_id
+                elif action_scope == "operation_station_anchor_proposal_team":
+                    apcf_team = self._select_anchor_proposal_team(
+                        active_policy,
+                        obs=obs,
+                        task_id=t_idx,
+                        station_id=selected_station_id,
+                        worker_mask=mask_worker,
+                        task_emb=selected_task_emb,
+                        station_emb=x_dict["station"][selected_station_id].unsqueeze(0),
+                        worker_embs=x_dict["worker"],
+                        deterministic=deterministic,
+                        temperature=temperature,
+                        branch_floor=self._current_anchor_branch_floor(),
+                    )
+                    if apcf_team is None:
+                        return None, 0.0, 0.0, None, True
+                    selected_team, team_logprob, apcf_trace = apcf_team
+                    self.last_anchor_proposal_trace = apcf_trace
                     action_station_id = selected_station_id
                 else:
                     completed = self.action_completer.complete(
@@ -1313,6 +1725,7 @@ class PPOAgent:
         worker_mask_refs = []
         eval_fail_flags = []
         gated_team_traces: list[FrozenGatedTeamTrace | None] = [None] * batch_size
+        anchor_proposal_traces: list[FrozenAnchorProposalTrace | None] = [None] * batch_size
 
         profile: Dict[str, float] = {}
 
@@ -1495,7 +1908,11 @@ class PPOAgent:
                         station_action = station_dist.sample()
                         station_logprob = station_dist.log_prob(station_action)
 
-                if action_scope in {"operation_station", "operation_station_gated_team"}:
+                if action_scope in {
+                    "operation_station",
+                    "operation_station_gated_team",
+                    "operation_station_anchor_proposal_team",
+                }:
                     selected_station_id = int(station_action.item())
                     team_logprob = torch.zeros((), device=self.device)
                     if action_scope == "operation_station_gated_team":
@@ -1520,6 +1937,30 @@ class PPOAgent:
                             continue
                         selected_team, team_logprob, gated_trace = gated_team
                         gated_team_traces[i] = gated_trace
+                        action_station_id = selected_station_id
+                    elif action_scope == "operation_station_anchor_proposal_team":
+                        apcf_team = self._select_anchor_proposal_team(
+                            active_policy,
+                            obs=obs_list[i],
+                            task_id=t_idx,
+                            station_id=selected_station_id,
+                            worker_mask=mask_worker_list[i],
+                            task_emb=selected_task_emb,
+                            station_emb=station_embs[selected_station_id].unsqueeze(0),
+                            worker_embs=worker_embs,
+                            deterministic=deterministic,
+                            temperature=temperature,
+                            branch_floor=self._current_anchor_branch_floor(),
+                        )
+                        if apcf_team is None:
+                            state_value_tensors.append(torch.tensor(0.0, device=self.device))
+                            decoded_actions.append((0, 1, [], torch.tensor(0.0, device=self.device), None))
+                            task_mask_refs.append(None)
+                            worker_mask_refs.append(None)
+                            eval_fail_flags.append(True)
+                            continue
+                        selected_team, team_logprob, apcf_trace = apcf_team
+                        anchor_proposal_traces[i] = apcf_trace
                         action_station_id = selected_station_id
                     else:
                         completed = self.action_completer.complete(
@@ -1722,6 +2163,7 @@ class PPOAgent:
             profile["action_decode_ms"] = (time.perf_counter() - stage_started) * 1000.0
         self.last_action_profile = profile if profile_breakdown else {}
         self.last_gated_team_traces = gated_team_traces
+        self.last_anchor_proposal_traces = anchor_proposal_traces
 
         return results
 
@@ -1840,6 +2282,13 @@ class PPOAgent:
             if traces is None or len(traces) != len(memory.states):
                 raise RuntimeError(
                     "门控团队 PPO 轨迹未与冻结候选序列一一对齐："
+                    f"states={len(memory.states)} traces={0 if traces is None else len(traces)}"
+                )
+        elif action_scope == "operation_station_anchor_proposal_team":
+            traces = getattr(memory, "anchor_proposal_traces", None)
+            if traces is None or len(traces) != len(memory.states):
+                raise RuntimeError(
+                    "锚点提议 PPO 轨迹未与冻结提议序列一一对齐："
                     f"states={len(memory.states)} traces={0 if traces is None else len(traces)}"
                 )
         
@@ -2218,7 +2667,23 @@ class PPOAgent:
                                 / multi_count
                             ).detach()
                         )
-                                
+
+                    if action_scope == "operation_station_anchor_proposal_team":
+                        memory_indices = batch.y_memory_index.detach().cpu().tolist()
+                        apcf_traces = [
+                            memory.anchor_proposal_traces[int(memory_index)]
+                            for memory_index in memory_indices
+                        ]
+                        apcf_station_embeddings = station_x[
+                            batch_indices, torch.clamp(batch.y_station, min=0)
+                        ]
+                        team_lp, team_entropy, _apcf_diag = self._recompute_anchor_proposal_logprobs(
+                            task_embeddings=sel_task_emb,
+                            station_embeddings=apcf_station_embeddings,
+                            worker_embeddings=worker_x,
+                            frozen_traces=apcf_traces,
+                        )
+
                     if action_scope == "operation":
                         total_lp = task_lp
                         entropy = task_entropy

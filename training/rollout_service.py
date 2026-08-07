@@ -118,6 +118,7 @@ class APALRolloutService:
         value: Any,
         masks: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         gated_team_trace: Any = None,
+        anchor_proposal_trace: Any = None,
     ) -> None:
         memory.states.append(state)
         memory.actions.append(action)
@@ -131,6 +132,7 @@ class APALRolloutService:
         )
         memory.masks.append(masks)
         memory.gated_team_traces.append(gated_team_trace)
+        memory.anchor_proposal_traces.append(anchor_proposal_trace)
 
     def _collect_episode(
         self,
@@ -306,6 +308,7 @@ class APALRolloutService:
                         value=value,
                         masks=masks_list[env_idx],
                         gated_team_trace=self.agent.last_gated_team_traces[result_idx],
+                        anchor_proposal_trace=self.agent.last_anchor_proposal_traces[result_idx],
                     )
 
                 heartbeat.update(

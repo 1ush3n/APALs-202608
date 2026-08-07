@@ -19,6 +19,7 @@ class Memory:
         self.values = []
         # 与每条动作严格对齐；仅门控团队动作保存冻结候选，其他动作为 None。
         self.gated_team_traces = []
+        self.anchor_proposal_traces = []
 
     def clear(self) -> None:
         del self.states[:]
@@ -30,6 +31,7 @@ class Memory:
         del self.masks[:]
         del self.values[:]
         del self.gated_team_traces[:]
+        del self.anchor_proposal_traces[:]
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

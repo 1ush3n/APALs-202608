@@ -45,12 +45,18 @@ STRUCTURAL_FIELDS = {
     "conditional_team_prior_weight", "workforce_binding_mode",
     "workforce_preallocation_ratio", "team_selection_mode",
     "graph_encoder_mode", "actor_context_mode",
+    "anchor_proposal_mode", "anchor_proposal_prior_margin",
+    "anchor_proposal_gate_bias",
+    "anchor_proposal_train_branch_floor_start",
+    "anchor_proposal_train_branch_floor_end",
+    "anchor_proposal_branch_floor_decay_fraction",
+    "anchor_proposal_require_difference",
 }
 
 _VALID_EXPERIMENT_MODES = {
     "policy_action_scope": {
         "operation", "operation_station", "operation_station_worker",
-        "operation_station_gated_team",
+        "operation_station_gated_team", "operation_station_anchor_proposal_team",
     },
     "workforce_binding_mode": {"endogenous", "preallocated"},
     "team_selection_mode": {"autoregressive", "static_topq"},
@@ -60,6 +66,42 @@ _VALID_EXPERIMENT_MODES = {
         "fixed_prior_v1", "relative_heuristic_prior_v1",
     },
 }
+
+
+def _validate_anchor_proposal_config(config: Config) -> None:
+    """APCF scope 专用校验：禁止迁移到重调度，门控先验与探索下限必须合法。"""
+    if bool(getattr(config, "enable_reschedule_mode", False)):
+        raise ValueError(
+            "operation_station_anchor_proposal_team 仅用于初始调度，"
+            "不得与 enable_reschedule_mode=true 同时启用（未经验证不可迁移到重调度）"
+        )
+    mode = str(getattr(config, "anchor_proposal_mode", "full_team_v1"))
+    if mode != "full_team_v1":
+        raise ValueError(f"anchor_proposal_mode 当前仅支持 full_team_v1，收到 {mode!r}")
+    margin = float(getattr(config, "anchor_proposal_prior_margin", 4.0))
+    if not math.isfinite(margin) or margin <= 0.0:
+        raise ValueError("anchor_proposal_prior_margin 必须是大于 0 的有限数")
+    gate_bias = float(getattr(config, "anchor_proposal_gate_bias", -4.0))
+    if not math.isfinite(gate_bias) or gate_bias >= 0.0:
+        raise ValueError("anchor_proposal_gate_bias 必须严格为负，保证初始确定性选择锚点")
+    floor_start = float(getattr(config, "anchor_proposal_train_branch_floor_start", 0.20))
+    floor_end = float(getattr(config, "anchor_proposal_train_branch_floor_end", 0.02))
+    for name, value in (
+        ("anchor_proposal_train_branch_floor_start", floor_start),
+        ("anchor_proposal_train_branch_floor_end", floor_end),
+    ):
+        if not math.isfinite(value) or not 0.0 <= value < 0.5:
+            raise ValueError(f"{name} 必须在 [0, 0.5) 内")
+    if floor_start < floor_end:
+        raise ValueError("anchor_proposal_train_branch_floor_start 不能小于 floor_end")
+    decay_fraction = float(getattr(config, "anchor_proposal_branch_floor_decay_fraction", 0.40))
+    if not math.isfinite(decay_fraction) or not 0.0 < decay_fraction <= 1.0:
+        raise ValueError("anchor_proposal_branch_floor_decay_fraction 必须在 (0, 1] 内")
+    config.anchor_proposal_prior_margin = margin
+    config.anchor_proposal_gate_bias = gate_bias
+    config.anchor_proposal_train_branch_floor_start = floor_start
+    config.anchor_proposal_train_branch_floor_end = floor_end
+    config.anchor_proposal_branch_floor_decay_fraction = decay_fraction
 
 
 def parse_override_value(raw: str) -> Any:
@@ -204,6 +246,8 @@ def validate_runtime_config(config: Config) -> None:
         raise ValueError("conditional_team_prior_margin 必须严格大于 0")
     if config.conditional_team_prior_weight < 0.0:
         raise ValueError("conditional_team_prior_weight 必须大于等于 0")
+    if config.policy_action_scope == "operation_station_anchor_proposal_team":
+        _validate_anchor_proposal_config(config)
     if bool(getattr(config, "best_anchor_distill_enabled", False)):
         if config.policy_action_scope != "operation_station_gated_team":
             raise ValueError(

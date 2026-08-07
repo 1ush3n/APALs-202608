@@ -45,6 +45,16 @@ class Config:
     conditional_team_scoring_mode: str = "fixed_prior_v1"
     conditional_team_prior_margin: float = 4.0
     conditional_team_prior_weight: float = 1.0
+    # 锚点条件式完整团队提议 + 反事实门控（APCF）：仅服务 operation_station_anchor_proposal_team。
+    anchor_proposal_mode: str = "full_team_v1"
+    anchor_proposal_prior_margin: float = 4.0
+    anchor_proposal_gate_bias: float = -4.0
+    anchor_proposal_train_branch_floor_start: float = 0.20
+    anchor_proposal_train_branch_floor_end: float = 0.02
+    anchor_proposal_branch_floor_decay_fraction: float = 0.40
+    anchor_proposal_require_difference: bool = True
+    anchor_proposal_pretrain_checkpoint_path: str = ""
+    anchor_proposal_cf_manifest_path: str = ""
     # Best-anchor 策略蒸馏仅服务于条件式团队门控实验分支；默认关闭，
     # 不能影响既有主方法、消融或对比算法。
     best_anchor_distill_enabled: bool = False

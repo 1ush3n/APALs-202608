@@ -519,6 +519,110 @@ class ConditionalTeamSelector(nn.Module):
             logits = logits.masked_fill(candidate_mask, -1.0e4)
         return logits, gate
 
+
+class AnchorConditionedTeamPointer(nn.Module):
+    """锚点条件完整团队提议器（APCF full_team_v1）。
+
+    自回归生成人数恰为工序需求 d 的完整合法团队。每步查询显式包含：
+      h_o（工序嵌入）、h_s（已选工位嵌入）、h̄_H（锚点团队均值嵌入）、
+      h̄_{w<j}（已生成成员均值嵌入）。
+    相比原 WorkerPointer（查询仅 [h_o, h̄_{w<j}]），本头以锚点为反事实参考，
+    并对工位显式条件化。合法性（技能/锁定/空闲/去重/与锚点差异）由调用方掩码保证。
+    """
+
+    def __init__(self, config) -> None:
+        super().__init__()
+        hidden_dim = int(config.hidden_dim)
+        self.query_proj = nn.Linear(hidden_dim * 4, hidden_dim)
+        self.key_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.attn = nn.Linear(hidden_dim, 1)
+
+    def forward_choice(
+        self,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        anchor_emb: torch.Tensor,
+        worker_embs: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        current_team_emb: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """返回 [B, N] 的合法工人打分（调用方负责掩码）。"""
+        assert task_emb.ndim == station_emb.ndim == anchor_emb.ndim == 2
+        assert worker_embs.ndim == 3
+        context = (
+            current_team_emb
+            if current_team_emb is not None
+            else torch.zeros_like(task_emb)
+        )
+        query = self.query_proj(
+            torch.cat([task_emb, station_emb, anchor_emb, context], dim=-1)
+        ).unsqueeze(1)  # [B, 1, H]
+        keys = self.key_proj(worker_embs)  # [B, N, H]
+        features = torch.tanh(query + keys)
+        scores = self.attn(features).squeeze(-1)  # [B, N]
+        if mask is not None:
+            scores = scores.masked_fill(mask, -1.0e4)
+        return scores
+
+
+class AnchorProposalGate(nn.Module):
+    """锚点 vs 神经提议分支门控（APCF）。
+
+    分支 logits：
+      ℓ_H = 0
+      ℓ_P = −ρ + g · 6·tanh(ΔÂ / 0.01)
+    其中 ΔÂ = A_ψ(x,o,s,P) − A_ψ(x,o,s,H) 是反事实相对价值差，
+    g ∈ [0,1] 为状态条件门控。价值头末层零初始化 + 负门控偏置保证
+    未预训练时温度 0 严格选择锚点。
+    """
+
+    def __init__(self, config) -> None:
+        super().__init__()
+        hidden_dim = int(config.hidden_dim)
+        self.prior_margin = float(config.anchor_proposal_prior_margin)
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim),
+            get_activation(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2 + 6, hidden_dim),
+            get_activation(),
+            nn.Linear(hidden_dim, 1),
+        )
+        nn.init.zeros_(self.value_head[-1].weight)
+        nn.init.zeros_(self.value_head[-1].bias)
+        nn.init.constant_(self.gate[-1].bias, float(config.anchor_proposal_gate_bias))
+
+    def forward(
+        self,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        anchor_emb: torch.Tensor,
+        proposal_emb: torch.Tensor,
+        gate_features: torch.Tensor,
+        hamming_distance: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """返回 (branch_logits [B,2], delta_A [B,1], gate_value [B,1])。"""
+        assert task_emb.ndim == station_emb.ndim == anchor_emb.ndim == proposal_emb.ndim == 2
+        assert gate_features.ndim == 2 and gate_features.size(1) == 5
+        assert hamming_distance.shape == (task_emb.size(0), 1)
+        a_h = self.value_head(
+            torch.cat([task_emb, station_emb, anchor_emb], dim=-1)
+        )
+        a_p = self.value_head(
+            torch.cat([task_emb, station_emb, proposal_emb], dim=-1)
+        )
+        delta_a = a_p - a_h  # [B, 1]
+        gate_input = torch.cat(
+            [task_emb, station_emb, gate_features, hamming_distance], dim=-1
+        )
+        g = torch.sigmoid(self.gate(gate_input))  # [B, 1]
+        proposal_logit = -self.prior_margin + g * 6.0 * torch.tanh(delta_a / 0.01)
+        anchor_logit = torch.zeros_like(proposal_logit)
+        branch_logits = torch.cat([anchor_logit, proposal_logit], dim=-1)  # [B, 2]
+        return branch_logits, delta_a, g
+
 # ---------------------------------------------------------------------------
 # 完整模型: HB-GAT-PN (Heterogeneous Graph Attention Pointer Network)
 # ---------------------------------------------------------------------------
@@ -536,6 +640,8 @@ class HBGATPN(nn.Module):
         self.station_head = StationSelector(config)
         self.worker_head = WorkerPointer(config)
         self.conditional_team_head = None
+        self.anchor_team_head = None
+        self.anchor_proposal_gate = None
 
         action_scope = str(
             getattr(config, "policy_action_scope", "operation_station_worker")
@@ -548,6 +654,10 @@ class HBGATPN(nn.Module):
         elif action_scope == "operation_station_gated_team":
             self.worker_head.requires_grad_(False)
             self.conditional_team_head = ConditionalTeamSelector(config)
+        elif action_scope == "operation_station_anchor_proposal_team":
+            self.worker_head.requires_grad_(False)
+            self.anchor_team_head = AnchorConditionedTeamPointer(config)
+            self.anchor_proposal_gate = AnchorProposalGate(config)
         if str(getattr(config, "team_selection_mode", "autoregressive")) == "static_topq":
             self.worker_head.ar_query_proj.requires_grad_(False)
         
