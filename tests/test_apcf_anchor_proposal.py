@@ -282,6 +282,61 @@ def test_apcf_z0_recompute_includes_full_proposal_chain() -> None:
     assert torch.allclose(recomputed[0], manual_lp, atol=1.0e-4)
 
 
+def test_apcf_sampled_proposal_logprob_matches_ppo_recompute() -> None:
+    """采样期必须把完整 proposal 链与门控分支共同写入旧对数概率。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+
+    # 先用确定性 operation/station 决策取得一个可行的二元动作；随后只检验
+    # APCF 团队分支的行为策略对数概率，不混入 operation/station 的概率项。
+    with temporary_config(configs, overrides):
+        action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=True,
+            temperature=0.0,
+        )
+    assert action is not None and not invalid
+    task_id, station_id = int(action[0]), int(action[1])
+
+    model = agent.policy
+    encoded, _context = model(obs)
+    task_emb = encoded["task"][task_id].unsqueeze(0)
+    station_emb = encoded["station"][station_id].unsqueeze(0)
+    worker_embs = encoded["worker"]
+    with temporary_config(configs, overrides):
+        sampled = agent._select_anchor_proposal_team(
+            model,
+            obs=obs,
+            task_id=task_id,
+            station_id=station_id,
+            worker_mask=masks[2],
+            task_emb=task_emb,
+            station_emb=station_emb,
+            worker_embs=worker_embs,
+            deterministic=False,
+            temperature=1.0,
+            branch_floor=agent._current_anchor_branch_floor(),
+        )
+    assert sampled is not None
+    _team, sampled_team_logprob, trace = sampled
+    assert trace.proposal_available
+
+    recomputed, _entropy, _diagnostics = agent._recompute_anchor_proposal_logprobs(
+        task_embeddings=task_emb,
+        station_embeddings=station_emb,
+        worker_embeddings=worker_embs.unsqueeze(0),
+        frozen_traces=[trace],
+    )
+    assert torch.allclose(
+        sampled_team_logprob.reshape(()), recomputed[0], atol=1.0e-5
+    )
+
+
 def test_apcf_single_and_batch_paths_agree() -> None:
     """单环境 select_action 与批量 select_actions_batch 生成一致。"""
     seed_everything(42)

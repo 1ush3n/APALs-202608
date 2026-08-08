@@ -600,6 +600,7 @@ class PPOAgent:
                 sampled = dist.sample()
                 chosen = int(sampled.item())
                 step_lp = dist.log_prob(sampled)
+            step_logprobs.append(step_lp.reshape(()))
             proposal_seq.append(chosen)
             current_illegal[chosen] = True  # 去重
 
