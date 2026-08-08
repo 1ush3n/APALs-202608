@@ -49,6 +49,7 @@ class ModelSpec:
     worker_skill_feature_slots: int | None = None
     worker_feature_layout_version: str | None = None
     # APCF（锚点条件完整团队提议与反事实门控）语义。
+    anchor_proposal_mode: str | None = None
     anchor_proposal_prior_margin: float | None = None
     anchor_proposal_gate_bias: float | None = None
     anchor_proposal_train_branch_floor_start: float | None = None
@@ -85,6 +86,7 @@ def build_model_spec(config: Config) -> ModelSpec:
     apcf_fields: dict[str, Any] = {}
     if str(config.policy_action_scope) == "operation_station_anchor_proposal_team":
         apcf_fields = {
+            "anchor_proposal_mode": str(config.anchor_proposal_mode),
             "anchor_proposal_prior_margin": float(config.anchor_proposal_prior_margin),
             "anchor_proposal_gate_bias": float(config.anchor_proposal_gate_bias),
             "anchor_proposal_train_branch_floor_start": float(
@@ -143,6 +145,12 @@ def build_checkpoint_metadata(config: Config, **extra: Any) -> dict[str, Any]:
         "config": config.to_flat_dict(),
         "experiment_name": config.experiment_name,
     }
+    if str(config.policy_action_scope) == "operation_station_anchor_proposal_team":
+        source_sha256 = str(
+            getattr(config, "anchor_proposal_pretrain_source_sha256", "") or ""
+        ).strip()
+        if source_sha256:
+            metadata["apcf_pretrain_source_sha256"] = source_sha256
     metadata.update(extra)
     return metadata
 
@@ -296,6 +304,7 @@ def apply_checkpoint_model_spec(
     }
     if spec.policy_action_scope == "operation_station_anchor_proposal_team":
         for key in (
+            "anchor_proposal_mode",
             "anchor_proposal_prior_margin",
             "anchor_proposal_gate_bias",
             "anchor_proposal_train_branch_floor_start",

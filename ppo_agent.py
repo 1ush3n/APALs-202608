@@ -66,6 +66,11 @@ class FrozenAnchorProposalTrace:
     branch_floor: float
     gate_features: tuple[float, ...]
     hamming_distance: int
+    proposal_pointer_logprob: float
+    proposal_pointer_entropy_mean: float
+    predicted_delta_a: float
+    gate_value: float
+    raw_branch_logit_gap: float
 
 
 class PPOAgent:
@@ -560,6 +565,7 @@ class PPOAgent:
         proposal_seq: list[int] = []
         per_step_ids: list[tuple[int, ...]] = []
         step_logprobs: list[torch.Tensor] = []
+        step_entropies: list[torch.Tensor] = []
         current_illegal = illegal.clone()
         require_diff = bool(
             getattr(self.config, "anchor_proposal_require_difference", True)
@@ -595,12 +601,15 @@ class PPOAgent:
             if deterministic or temperature <= 0.0:
                 chosen = int(torch.argmax(scores_float, dim=1).item())
                 step_lp = scores.new_zeros(())
+                step_entropy = scores.new_zeros(())
             else:
                 dist = Categorical(logits=scores_float)
                 sampled = dist.sample()
                 chosen = int(sampled.item())
                 step_lp = dist.log_prob(sampled)
+                step_entropy = dist.entropy()
             step_logprobs.append(step_lp.reshape(()))
+            step_entropies.append(step_entropy.reshape(()))
             proposal_seq.append(chosen)
             current_illegal[chosen] = True  # 去重
 
@@ -624,6 +633,11 @@ class PPOAgent:
                 branch_floor=float(branch_floor),
                 gate_features=gate_features_flat,
                 hamming_distance=0,
+                proposal_pointer_logprob=0.0,
+                proposal_pointer_entropy_mean=0.0,
+                predicted_delta_a=0.0,
+                gate_value=0.0,
+                raw_branch_logit_gap=0.0,
             )
             return team, branch_lp, trace
 
@@ -676,8 +690,12 @@ class PPOAgent:
         step_sum = torch.zeros((), device=device)
         for step_lp in step_logprobs:
             step_sum = step_sum + step_lp.to(device=device)
+        entropy_sum = torch.zeros((), device=device)
+        for step_entropy in step_entropies:
+            entropy_sum = entropy_sum + step_entropy.to(device=device)
         team_logprob = step_sum + branch_lp
         team = proposal_seq if selected_branch == 1 else list(anchor_team)
+        pointer_entropy_mean = entropy_sum / max(len(step_entropies), 1)
         trace = FrozenAnchorProposalTrace(
             task_id=int(task_id),
             station_id=int(station_id),
@@ -691,6 +709,11 @@ class PPOAgent:
             branch_floor=float(branch_floor),
             gate_features=gate_features_flat,
             hamming_distance=int(hamming),
+            proposal_pointer_logprob=float(step_sum.detach().item()),
+            proposal_pointer_entropy_mean=float(pointer_entropy_mean.detach().item()),
+            predicted_delta_a=float(_delta_a.detach().reshape(-1)[0].item()),
+            gate_value=float(_gate_val.detach().reshape(-1)[0].item()),
+            raw_branch_logit_gap=float((branch_logits[0, 1] - branch_logits[0, 0]).detach().item()),
         )
         return team, team_logprob, trace
 
@@ -710,6 +733,11 @@ class PPOAgent:
                 "APCF/RolloutTrainProposalSelectRate": 0.0,
                 "APCF/RolloutRawProposalSelectRate": 0.0,
                 "APCF/RolloutValidProposalRate": 1.0,
+                "APCF/RolloutProposalPointerLogprobMean": 0.0,
+                "APCF/RolloutProposalPointerEntropyMean": 0.0,
+                "APCF/RolloutPredictedDeltaAMean": 0.0,
+                "APCF/RolloutGateValueMean": 0.0,
+                "APCF/RolloutRawBranchLogitGapMean": 0.0,
             }
         available = [t for t in traces if t.proposal_available]
         hamming_values = [float(t.hamming_distance) for t in available]
@@ -717,6 +745,9 @@ class PPOAgent:
             float(t.raw_argmax_branch)
             for t in available
         ]
+        def _available_mean(field_name: str) -> float:
+            values = [float(getattr(trace, field_name)) for trace in available]
+            return float(sum(values) / len(values)) if values else 0.0
         return {
             "APCF/RolloutDecisionCount": float(len(traces)),
             "APCF/RolloutProposalAvailableRate": float(len(available) / len(traces)),
@@ -737,6 +768,19 @@ class PPOAgent:
                 sum(raw_select) / len(raw_select) if raw_select else 0.0
             ),
             "APCF/RolloutValidProposalRate": 1.0,
+            "APCF/RolloutProposalPointerLogprobMean": _available_mean(
+                "proposal_pointer_logprob"
+            ),
+            "APCF/RolloutProposalPointerEntropyMean": _available_mean(
+                "proposal_pointer_entropy_mean"
+            ),
+            "APCF/RolloutPredictedDeltaAMean": _available_mean(
+                "predicted_delta_a"
+            ),
+            "APCF/RolloutGateValueMean": _available_mean("gate_value"),
+            "APCF/RolloutRawBranchLogitGapMean": _available_mean(
+                "raw_branch_logit_gap"
+            ),
         }
 
     def _current_anchor_branch_floor(self) -> float:

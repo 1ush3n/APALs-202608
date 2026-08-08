@@ -239,6 +239,8 @@ class CFPretrainLightningModule(pl.LightningModule):
         bce_total = torch.zeros((), device=device)
         gate_total = torch.zeros((), device=device)
         bc_total = torch.zeros((), device=device)
+        delta_sign_correct = torch.zeros((), device=device)
+        gate_branch_correct = torch.zeros((), device=device)
         count = 0
         for candidate in group["candidates"]:
             team = candidate["team"]
@@ -267,6 +269,15 @@ class CFPretrainLightningModule(pl.LightningModule):
                 torch.tensor([[hamming]], dtype=torch.float32, device=device),
             )
             delta_a = delta_a.float()  # [1, 1]
+            positive_label = float(candidate["relative_gain"] > 0.0)
+            delta_sign_correct = delta_sign_correct + (
+                (delta_a.reshape(()) > 0.0).to(torch.float32)
+                == torch.tensor(positive_label, device=device)
+            ).to(torch.float32)
+            gate_branch_correct = gate_branch_correct + (
+                torch.argmax(branch_logits.float(), dim=1).reshape(())
+                == int(positive_label)
+            ).to(torch.float32)
 
             w_huber = float(self.config.apcf_pretrain_loss_huber_weight)
             w_bce = float(self.config.apcf_pretrain_loss_bce_weight)
@@ -323,6 +334,8 @@ class CFPretrainLightningModule(pl.LightningModule):
             "gate": gate,
             "bc": bc,
             "count": torch.tensor(float(count), device=device),
+            "delta_sign_accuracy": delta_sign_correct / count,
+            "gate_branch_accuracy": gate_branch_correct / count,
         }
 
     def _proposal_team_logprob(
@@ -383,6 +396,14 @@ class CFPretrainLightningModule(pl.LightningModule):
                 on_epoch=True,
                 prog_bar=(prefix == "train/" and name == "loss"),
                 batch_size=1,
+            )
+        for name in ("delta_sign_accuracy", "gate_branch_accuracy"):
+            self.log(
+                f"{prefix}{name}",
+                float(metrics[name].item()),
+                on_step=False,
+                on_epoch=True,
+                batch_size=int(metrics["count"].item()),
             )
 
     def training_step(self, batch: dict[str, Any], batch_idx: int):

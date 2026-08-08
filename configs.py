@@ -55,6 +55,7 @@ class Config:
     anchor_proposal_require_difference: bool = True
     anchor_proposal_pretrain_checkpoint_path: str = ""
     anchor_proposal_cf_manifest_path: str = ""
+    anchor_proposal_pretrain_source_sha256: str = ""
     # APCF 反事实预训练（独立入口 pretrain_anchor_proposal_cf.py）。
     apcf_pretrain_lr: float = 1.0e-4          # 预训练学习率
     apcf_pretrain_epochs: int = 10            # 预训练轮数

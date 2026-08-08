@@ -13,8 +13,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -121,6 +124,35 @@ def _proposal_masks_from_obs(
     if worker_mask is not None:
         illegal = illegal | worker_mask.to(device=illegal.device, dtype=torch.bool)
     return illegal
+
+
+def _write_apcf_pretrain_checkpoint(
+    path: Path,
+    *,
+    model: HBGATPN,
+    config: Config,
+    manifest_sha256: str | None,
+) -> None:
+    """写入满足 runtime checkpoint 格式的最小 APCF 预训练 checkpoint。"""
+    from runtime.checkpoints import build_checkpoint_metadata
+
+    payload = {
+        "state_dict": model.state_dict(),
+        "apal_metadata": build_checkpoint_metadata(config),
+        "apal_pretrain_metadata": {},
+    }
+    if manifest_sha256 is not None:
+        payload["apal_pretrain_metadata"]["manifest_sha256"] = manifest_sha256
+    torch.save(payload, path)
+
+
+def _write_cf_manifest(path: Path) -> str:
+    """写入 APCF 运行时可识别的最小反事实 manifest，并返回文件 SHA-256。"""
+    path.write_text(
+        json.dumps({"kind": "initial_anchor_proposal_counterfactual_v1"}),
+        encoding="utf-8",
+    )
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 @pytest.mark.parametrize("temperature", (0.0, 1.0))
@@ -337,6 +369,47 @@ def test_apcf_sampled_proposal_logprob_matches_ppo_recompute() -> None:
     )
 
 
+def test_apcf_rollout_trace_exposes_finite_learning_diagnostics() -> None:
+    """APCF rollout trace 只保存轻量标量，但必须足够判断提议器与门控是否学习。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        _action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=False,
+            temperature=1.0,
+        )
+    assert not invalid
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    for field_name in (
+        "proposal_pointer_logprob",
+        "proposal_pointer_entropy_mean",
+        "predicted_delta_a",
+        "gate_value",
+        "raw_branch_logit_gap",
+    ):
+        assert torch.isfinite(torch.tensor(getattr(trace, field_name)))
+
+    memory = Memory()
+    memory.anchor_proposal_traces.append(trace)
+    metrics = PPOAgent._anchor_proposal_rollout_metrics(memory)
+    for metric_name in (
+        "APCF/RolloutProposalPointerLogprobMean",
+        "APCF/RolloutProposalPointerEntropyMean",
+        "APCF/RolloutPredictedDeltaAMean",
+        "APCF/RolloutGateValueMean",
+        "APCF/RolloutRawBranchLogitGapMean",
+    ):
+        assert metric_name in metrics
+        assert torch.isfinite(torch.tensor(metrics[metric_name]))
+
+
 def test_apcf_single_and_batch_paths_agree() -> None:
     """单环境 select_action 与批量 select_actions_batch 生成一致。"""
     seed_everything(42)
@@ -452,6 +525,62 @@ def test_apcf_encoder_is_frozen_and_heads_trainable_in_pretrain() -> None:
         ), f"非双头参数 {name} 不得可训练"
 
 
+def test_apcf_pretrain_reports_sign_and_gate_accuracy(tmp_path: Path) -> None:
+    """反事实预训练的验证指标必须区分收益预测与门控分支是否可判定。"""
+    from training.cf_pretrain import CFPretrainLightningModule
+
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=False,
+            temperature=1.0,
+        )
+    assert action is not None and not invalid
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    assert trace.proposal_available
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    torch.save(obs, tmp_path / "obs.pt")
+    np.savez(tmp_path / "masks.npz", worker_mask=masks[2].numpy())
+    group = {
+        "obs_pt": "obs.pt",
+        "npz": "masks.npz",
+        "task_id": int(action[0]),
+        "station_id": int(action[1]),
+        "anchor_team": tuple(trace.anchor_team),
+        "candidates": [
+            {
+                "team": tuple(trace.proposal_worker_sequence),
+                "source": "test",
+                "relative_gain": 0.01,
+            }
+        ],
+    }
+    with temporary_config(
+        configs,
+        {**overrides, "anchor_proposal_cf_manifest_path": str(manifest_path)},
+    ):
+        module = CFPretrainLightningModule(
+            agent.policy,
+            configs,
+            manifest_path=manifest_path,
+        )
+        metrics = module._compute_group_losses(group, torch.device("cpu"))
+    for metric_name in ("delta_sign_accuracy", "gate_branch_accuracy"):
+        assert metric_name in metrics
+        assert torch.isfinite(metrics[metric_name])
+        assert 0.0 <= float(metrics[metric_name].item()) <= 1.0
+
+
 def test_apcf_pretrain_manifest_sha256_is_recorded_and_verified() -> None:
     """预训练 checkpoint 必须记录 source manifest 的 SHA-256 供 PPO 侧校验。"""
     import sys
@@ -470,6 +599,85 @@ def test_apcf_pretrain_manifest_sha256_is_recorded_and_verified() -> None:
             manifest_sha256="",
         )
     assert module.manifest_sha256 == expected
+
+
+def test_apcf_cold_start_rejects_pretrain_checkpoint_without_manifest_sha(
+    tmp_path: Path,
+) -> None:
+    """冷启动不得加载缺失反事实 manifest SHA-256 的预训练 checkpoint。"""
+    from train_lightning import _maybe_load_apcf_pretrain
+
+    manifest_path = tmp_path / "manifest.json"
+    _write_cf_manifest(manifest_path)
+    checkpoint_path = tmp_path / "pretrain.ckpt"
+    agent, overrides = _make_agent()
+    with temporary_config(
+        configs,
+        {
+            **overrides,
+            "anchor_proposal_cf_manifest_path": str(manifest_path),
+            "anchor_proposal_pretrain_checkpoint_path": str(checkpoint_path),
+        },
+    ):
+        _write_apcf_pretrain_checkpoint(
+            checkpoint_path,
+            model=agent.policy,
+            config=configs,
+            manifest_sha256=None,
+        )
+        target = HBGATPN(configs)
+        with pytest.raises(RuntimeError, match="manifest_sha256"):
+            _maybe_load_apcf_pretrain(target, torch.device("cpu"), resume=False)
+
+
+def test_apcf_cold_start_records_exact_pretrain_checkpoint_sha(
+    tmp_path: Path,
+) -> None:
+    """成功冷启动必须把实际加载的预训练文件哈希写入运行时 checkpoint 元数据。"""
+    from runtime.checkpoints import build_checkpoint_metadata
+    from train_lightning import _maybe_load_apcf_pretrain
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_sha = _write_cf_manifest(manifest_path)
+    checkpoint_path = tmp_path / "pretrain.ckpt"
+    agent, overrides = _make_agent()
+    with temporary_config(
+        configs,
+        {
+            **overrides,
+            "anchor_proposal_cf_manifest_path": str(manifest_path),
+            "anchor_proposal_pretrain_checkpoint_path": str(checkpoint_path),
+        },
+    ):
+        _write_apcf_pretrain_checkpoint(
+            checkpoint_path,
+            model=agent.policy,
+            config=configs,
+            manifest_sha256=manifest_sha,
+        )
+        target = HBGATPN(configs)
+        _maybe_load_apcf_pretrain(target, torch.device("cpu"), resume=False)
+        expected = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        metadata = build_checkpoint_metadata(configs)
+        assert metadata["apcf_pretrain_source_sha256"] == expected
+
+
+def test_apcf_experiment_pins_counterfactual_asset_paths() -> None:
+    """正式 APCF YAML 必须明确指定反事实 manifest 与预训练 checkpoint。"""
+    import yaml
+
+    payload = yaml.safe_load(
+        (PROJECT_ROOT / "conf" / "experiment" / "initial_anchor_proposal_cf_v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    model = payload["model"]
+    assert model["anchor_proposal_cf_manifest_path"] == (
+        "data/initial_anchor_proposal_cf_v1/manifest.json"
+    )
+    assert model["anchor_proposal_pretrain_checkpoint_path"] == (
+        "checkpoints/apcf_pretrain_v1.ckpt"
+    )
 
 
 def test_apcf_old_scope_checkpoint_is_rejected_for_anchor_proposal_scope() -> None:
@@ -577,7 +785,7 @@ def test_apcf_bc_team_is_canonical_non_anchor_first() -> None:
     assert _canonical_bc_team(team3, anchor) == (5, 9, 3, 11)
 
 
-def test_apcf_resume_guard_rejects_legacy_scope_checkpoint() -> None:
+def test_apcf_resume_guard_rejects_legacy_scope_checkpoint(tmp_path: Path) -> None:
     """resume 时旧 scope checkpoint 不得静默降级 APCF 配置。"""
     from runtime.checkpoints import ModelSpec
 
@@ -587,7 +795,15 @@ def test_apcf_resume_guard_rejects_legacy_scope_checkpoint() -> None:
         resource_graph_mode="skill_hub_bidirectional",
         policy_action_scope="operation_station_worker",
     )
-    with temporary_config(configs, overrides):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_sha = _write_cf_manifest(manifest_path)
+    with temporary_config(
+        configs,
+        {
+            **overrides,
+            "anchor_proposal_cf_manifest_path": str(manifest_path),
+        },
+    ):
         with pytest.raises(RuntimeError, match="APCF 配置不兼容"):
             from train_lightning import _guard_resume_scope_against_apcf
 
@@ -595,14 +811,44 @@ def test_apcf_resume_guard_rejects_legacy_scope_checkpoint() -> None:
         apcf_spec = ModelSpec(
             resource_graph_mode="skill_hub_bidirectional",
             policy_action_scope="operation_station_anchor_proposal_team",
+            anchor_proposal_mode="full_team_v1",
             anchor_proposal_prior_margin=4.0,
             anchor_proposal_gate_bias=-4.0,
             anchor_proposal_train_branch_floor_start=0.20,
             anchor_proposal_train_branch_floor_end=0.02,
             anchor_proposal_branch_floor_decay_fraction=0.40,
             anchor_proposal_require_difference=True,
+            anchor_proposal_cf_manifest_sha256=manifest_sha,
         )
         _guard_resume_scope_against_apcf(apcf_spec)  # 不报错
+
+
+def test_apcf_resume_guard_rejects_counterfactual_manifest_mismatch(
+    tmp_path: Path,
+) -> None:
+    """APCF resume 不得混用不同反事实 manifest 的 PPO checkpoint。"""
+    from runtime.checkpoints import ModelSpec
+    from train_lightning import _guard_resume_scope_against_apcf
+
+    manifest_path = tmp_path / "manifest.json"
+    _write_cf_manifest(manifest_path)
+    _agent, overrides = _make_agent()
+    mismatched_spec = ModelSpec(
+        resource_graph_mode="skill_hub_bidirectional",
+        policy_action_scope="operation_station_anchor_proposal_team",
+        anchor_proposal_mode="full_team_v1",
+        anchor_proposal_require_difference=True,
+        anchor_proposal_cf_manifest_sha256="0" * 64,
+    )
+    with temporary_config(
+        configs,
+        {
+            **overrides,
+            "anchor_proposal_cf_manifest_path": str(manifest_path),
+        },
+    ):
+        with pytest.raises(RuntimeError, match="manifest SHA-256 不一致"):
+            _guard_resume_scope_against_apcf(mismatched_spec)
 
 
 def test_apcf_model_spec_records_anchor_proposal_semantics() -> None:
@@ -614,6 +860,7 @@ def test_apcf_model_spec_records_anchor_proposal_semantics() -> None:
     with temporary_config(configs, overrides):
         spec = build_model_spec(configs)
     assert spec.policy_action_scope == "operation_station_anchor_proposal_team"
+    assert spec.anchor_proposal_mode == "full_team_v1"
     assert spec.anchor_proposal_prior_margin == 4.0
     assert spec.anchor_proposal_gate_bias == -4.0
     assert spec.anchor_proposal_train_branch_floor_start == 0.20

@@ -5,8 +5,10 @@ import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import copy
+import json
 import math
 import platform
+import re
 from pathlib import Path
 
 import lightning.pytorch as pl
@@ -50,6 +52,8 @@ from runtime.schedulefree_checkpoint import save_checkpoint_with_schedulefree_ev
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+_APCF_SCOPE = "operation_station_anchor_proposal_team"
+_APCF_MANIFEST_KIND = "initial_anchor_proposal_counterfactual_v1"
 
 
 def _sha256_file(path: Path) -> str:
@@ -61,6 +65,83 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _require_apcf_regular_file(field_name: str) -> Path:
+    """解析 APCF 必填文件；空值、目录和空文件均立即拒绝。"""
+    raw_path = str(getattr(configs, field_name, "") or "").strip()
+    if not raw_path:
+        raise ValueError(f"APCF 必须显式配置 {field_name}，不得为空")
+    path = resolve_workspace_path(raw_path)
+    if not path.exists():
+        raise FileNotFoundError(f"APCF 配置 {field_name} 指向的文件不存在：{path}")
+    if not path.is_file():
+        raise ValueError(f"APCF 配置 {field_name} 必须指向普通文件，实际为：{path}")
+    if path.stat().st_size <= 0:
+        raise ValueError(f"APCF 配置 {field_name} 指向零字节文件：{path}")
+    return path
+
+
+def _load_apcf_manifest_semantics() -> tuple[Path, str]:
+    """读取并校验本次 APCF 训练唯一允许使用的反事实 manifest。"""
+    manifest_path = _require_apcf_regular_file("anchor_proposal_cf_manifest_path")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"APCF 反事实 manifest 无法解析：{manifest_path}") from exc
+    if not isinstance(payload, dict) or payload.get("kind") != _APCF_MANIFEST_KIND:
+        raise ValueError(
+            "APCF 反事实 manifest 类型不兼容："
+            f"要求 kind={_APCF_MANIFEST_KIND!r}，文件={manifest_path}"
+        )
+    return manifest_path, _sha256_file(manifest_path)
+
+
+def _require_sha256(value: object, *, label: str) -> str:
+    digest = str(value or "").strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise RuntimeError(f"APCF {label} 缺少合法 manifest_sha256")
+    return digest
+
+
+def _validate_apcf_model_spec(model_spec: Any, *, manifest_sha256: str, phase: str) -> None:
+    """APCF 冷启动或续训均使用同一组不可降级的模型语义校验。"""
+    checkpoint_scope = str(getattr(model_spec, "policy_action_scope", ""))
+    if checkpoint_scope != _APCF_SCOPE:
+        raise RuntimeError(
+            f"APCF {phase} scope 不兼容：checkpoint={checkpoint_scope}，要求={_APCF_SCOPE}"
+        )
+    checkpoint_mode = str(getattr(model_spec, "anchor_proposal_mode", "") or "")
+    configured_mode = str(getattr(configs, "anchor_proposal_mode", "") or "")
+    if checkpoint_mode != "full_team_v1" or checkpoint_mode != configured_mode:
+        raise RuntimeError(
+            "APCF proposal mode 不兼容："
+            f"checkpoint={checkpoint_mode!r}，config={configured_mode!r}"
+        )
+    checkpoint_require_difference = getattr(
+        model_spec, "anchor_proposal_require_difference", None
+    )
+    configured_require_difference = bool(
+        getattr(configs, "anchor_proposal_require_difference", True)
+    )
+    if (
+        checkpoint_require_difference is None
+        or bool(checkpoint_require_difference) != configured_require_difference
+    ):
+        raise RuntimeError(
+            "APCF require_difference 语义不兼容："
+            f"checkpoint={checkpoint_require_difference!r}，"
+            f"config={configured_require_difference!r}"
+        )
+    checkpoint_manifest_sha256 = _require_sha256(
+        getattr(model_spec, "anchor_proposal_cf_manifest_sha256", None),
+        label=f"{phase} checkpoint",
+    )
+    if checkpoint_manifest_sha256 != manifest_sha256:
+        raise RuntimeError(
+            "APCF 反事实 manifest SHA-256 不一致："
+            f"checkpoint={checkpoint_manifest_sha256}，config={manifest_sha256}"
+        )
 
 
 def _save_rollout_checkpoint(
@@ -148,15 +229,21 @@ def _guard_resume_scope_against_apcf(model_spec: Any) -> None:
     同为 APCF scope；否则立即报错（防"静默降级 + 随机双头继续训练"）。
     """
     configured_scope = str(getattr(configs, "policy_action_scope", ""))
-    if configured_scope != "operation_station_anchor_proposal_team":
+    if configured_scope != _APCF_SCOPE:
         return
     checkpoint_scope = str(getattr(model_spec, "policy_action_scope", ""))
-    if checkpoint_scope != "operation_station_anchor_proposal_team":
+    if checkpoint_scope != _APCF_SCOPE:
         raise RuntimeError(
             "resume 时检测到 checkpoint scope 与当前 APCF 配置不兼容："
             f"checkpoint={checkpoint_scope}，config={configured_scope}。"
             "APCF 实验必须续训 APCF scope 的 checkpoint；请勿混用旧 scope checkpoint。"
         )
+    _manifest_path, manifest_sha256 = _load_apcf_manifest_semantics()
+    _validate_apcf_model_spec(
+        model_spec,
+        manifest_sha256=manifest_sha256,
+        phase="resume",
+    )
 
 
 def _maybe_load_apcf_pretrain(model: torch.nn.Module, device: torch.device, *, resume: bool) -> None:
@@ -170,46 +257,39 @@ def _maybe_load_apcf_pretrain(model: torch.nn.Module, device: torch.device, *, r
     if resume:
         return
     scope = str(getattr(configs, "policy_action_scope", ""))
-    if scope != "operation_station_anchor_proposal_team":
+    if scope != _APCF_SCOPE:
         return
-    pretrain_path = resolve_workspace_path(
-        getattr(
-            configs,
-            "anchor_proposal_pretrain_checkpoint_path",
-            "checkpoints/apcf_pretrain_v1.ckpt",
-        )
+    manifest_path, manifest_sha256 = _load_apcf_manifest_semantics()
+    pretrain_path = _require_apcf_regular_file(
+        "anchor_proposal_pretrain_checkpoint_path"
     )
-    if not pretrain_path.exists():
-        raise FileNotFoundError(
-            f"APCF scope 必须从反事实预训练 checkpoint 冷启动，但找不到: {pretrain_path}"
-        )
     checkpoint = load_checkpoint(pretrain_path)
-    spec_scope = str(checkpoint.model_spec.policy_action_scope)
-    if spec_scope != "operation_station_anchor_proposal_team":
-        raise RuntimeError(
-            f"APCF 预训练 checkpoint scope 不匹配："
-            f"checkpoint={spec_scope}，要求=operation_station_anchor_proposal_team"
-        )
+    _validate_apcf_model_spec(
+        checkpoint.model_spec,
+        manifest_sha256=manifest_sha256,
+        phase="预训练",
+    )
     pretrain_metadata = (
         checkpoint.payload.get("apal_pretrain_metadata", {})
         if isinstance(checkpoint.payload, dict)
         else {}
     )
-    manifest_path = resolve_workspace_path(
-        getattr(configs, "anchor_proposal_cf_manifest_path", "")
+    if not isinstance(pretrain_metadata, dict):
+        raise RuntimeError("APCF 预训练 checkpoint 缺少 apal_pretrain_metadata")
+    recorded_manifest_sha256 = _require_sha256(
+        pretrain_metadata.get("manifest_sha256"),
+        label="预训练 checkpoint",
     )
-    if manifest_path.exists():
-        recorded = str(pretrain_metadata.get("manifest_sha256", ""))
-        actual = _sha256_file(manifest_path)
-        if recorded and recorded != actual:
-            raise RuntimeError(
-                f"APCF 预训练 checkpoint 的反事实 manifest SHA-256 不一致："
-                f"checkpoint={recorded}，当前配置={actual}（{manifest_path}）"
-            )
+    if recorded_manifest_sha256 != manifest_sha256:
+        raise RuntimeError(
+            "APCF 预训练 checkpoint 的反事实 manifest SHA-256 不一致："
+            f"checkpoint={recorded_manifest_sha256}，当前配置={manifest_sha256}（{manifest_path}）"
+        )
     load_policy_weights(model, checkpoint, strict=True)
+    configs.anchor_proposal_pretrain_source_sha256 = _sha256_file(pretrain_path)
     print(
         f"[APCF-Pretrain] 已加载预训练 checkpoint {pretrain_path} "
-        f"(manifest_sha256={pretrain_metadata.get('manifest_sha256', '')[:12]}...)，"
+        f"(manifest_sha256={recorded_manifest_sha256[:12]}...)，"
         "正式 PPO 从预训练权重微调。",
         flush=True,
     )

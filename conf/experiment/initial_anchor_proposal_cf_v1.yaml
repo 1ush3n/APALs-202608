@@ -29,6 +29,8 @@ model:
   anchor_proposal_train_branch_floor_end: 0.02
   anchor_proposal_branch_floor_decay_fraction: 0.40
   anchor_proposal_require_difference: true
+  anchor_proposal_cf_manifest_path: data/initial_anchor_proposal_cf_v1/manifest.json
+  anchor_proposal_pretrain_checkpoint_path: checkpoints/apcf_pretrain_v1.ckpt
 
 train:
   eval_freq: 1
