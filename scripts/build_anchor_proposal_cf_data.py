@@ -25,7 +25,11 @@ import gc
 import hashlib
 import json
 import math
+import multiprocessing
+import shutil
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -62,6 +66,38 @@ TWO_SWAP_TOP_K = 2
 TWO_SWAP_POOL = 24
 
 
+@dataclass(frozen=True)
+class GraphBuildJob:
+    """单个训练图的确定性反事实数据构建任务。"""
+
+    index: int
+    split: str
+    file_name: str
+    csv_sha256: str
+    worker_dir: Path = Path()
+
+
+@dataclass(frozen=True)
+class GraphBuildRequest:
+    """传入 spawn worker 的不可变构建参数。"""
+
+    job: GraphBuildJob
+    csv_path: Path
+    data_file_path: Path
+    manifest_sha256: str
+    max_episode_steps: int
+    max_candidates: int
+    torch_threads: int
+
+
+@dataclass(frozen=True)
+class GraphBuildResult:
+    """单图 worker 成功完成后交回主进程的原始样本条目。"""
+
+    job: GraphBuildJob
+    rows: list[dict[str, Any]]
+
+
 def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -81,6 +117,103 @@ def _split_by_sha256(files: list[dict[str, Any]]) -> dict[str, list[dict[str, An
         SPLIT_FROZEN_DIAGNOSTIC: ordered[n_pretrain : n_pretrain + n_frozen],
         SPLIT_PPO_ONLY: ordered[n_pretrain + n_frozen :],
     }
+
+
+def _plan_graph_jobs(
+    split: dict[str, list[dict[str, Any]]],
+    *,
+    max_graphs: int,
+) -> list[GraphBuildJob]:
+    """生成唯一、稳定的构建任务序列；PPO-only 图不生成反事实样本。"""
+    if max_graphs < 0:
+        raise ValueError(f"max_graphs 必须非负，收到：{max_graphs}")
+    jobs: list[GraphBuildJob] = []
+    for split_name in (SPLIT_PRETRAIN, SPLIT_FROZEN_DIAGNOSTIC):
+        for item in split.get(split_name, []):
+            if max_graphs > 0 and len(jobs) >= max_graphs:
+                return jobs
+            jobs.append(
+                GraphBuildJob(
+                    index=len(jobs),
+                    split=split_name,
+                    file_name=str(item["file"]),
+                    csv_sha256=str(item["sha256"]),
+                )
+            )
+    return jobs
+
+
+def _sha256_file(path: Path) -> str:
+    """分块计算文件 SHA-256，避免大 CSV 校验时占用额外内存。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _build_graph_worker(request: GraphBuildRequest) -> GraphBuildResult:
+    """spawn 子进程中的单图构建入口；只写入该任务私有目录。"""
+    if request.torch_threads < 1:
+        raise ValueError(f"worker torch 线程数必须至少为 1，收到：{request.torch_threads}")
+    torch.set_num_threads(request.torch_threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # 该 worker 若已初始化互操作线程池，保留 PyTorch 当前安全设置。
+        pass
+    _configure_global(request.data_file_path)
+    worker_dir = request.job.worker_dir
+    worker_dir.mkdir(parents=True, exist_ok=False)
+    (worker_dir / "samples").mkdir(exist_ok=False)
+    actual_sha = _sha256_file(request.csv_path)
+    if actual_sha != request.job.csv_sha256:
+        raise RuntimeError(
+            "训练 CSV 哈希不匹配："
+            f"{request.job.file_name} manifest={request.job.csv_sha256} 实际={actual_sha}"
+        )
+    completer = EarliestFinishActionCompleter(configs)
+    rows = _build_graph_samples(
+        request.csv_path,
+        csv_sha256=request.job.csv_sha256,
+        manifest_sha256=request.manifest_sha256,
+        output_dir=worker_dir,
+        completer=completer,
+        max_episode_steps=request.max_episode_steps,
+        max_candidates=request.max_candidates,
+    )
+    return GraphBuildResult(job=request.job, rows=rows)
+
+
+def _merge_graph_artifacts(
+    output_dir: Path,
+    results: list[GraphBuildResult],
+) -> list[dict[str, Any]]:
+    """按任务计划序号合并 worker 产物，确保 manifest 不受完成顺序影响。"""
+    destination_samples = output_dir / "samples"
+    if not destination_samples.is_dir():
+        raise FileNotFoundError(f"正式样本目录缺失：{destination_samples}")
+    merged_rows: list[dict[str, Any]] = []
+    for result in sorted(results, key=lambda item: item.job.index):
+        for source_row in result.rows:
+            row = dict(source_row)
+            for field_name in ("obs_pt", "npz_path"):
+                relative_path = Path(str(row[field_name]))
+                source_path = result.job.worker_dir / relative_path
+                destination_path = output_dir / relative_path
+                if not destination_path.is_file():
+                    if not source_path.is_file():
+                        raise FileNotFoundError(
+                            f"worker 产物缺失：{source_path}（字段 {field_name}）"
+                        )
+                    destination_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(source_path), str(destination_path))
+                row[field_name] = destination_path.relative_to(output_dir).as_posix()
+            row["csv_sha256"] = result.job.csv_sha256
+            row["split"] = result.job.split
+            merged_rows.append(row)
+        shutil.rmtree(result.job.worker_dir)
+    return merged_rows
 
 
 def _state_key(task_id: int, station_id: int, decision_count: int) -> str:
@@ -563,61 +696,102 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
     if not files:
         raise ValueError("manifest 无文件条目")
     split = _split_by_sha256(files)
-    _configure_global(_workspace_path(args.data_file))
-    completer = EarliestFinishActionCompleter(configs)
+    if int(args.workers) < 1:
+        raise ValueError(f"workers 必须至少为 1，收到：{args.workers}")
+    if int(args.worker_torch_threads) < 1:
+        raise ValueError(
+            "worker_torch_threads 必须至少为 1，"
+            f"收到：{args.worker_torch_threads}"
+        )
+    data_file_path = _workspace_path(args.data_file)
+    if not data_file_path.is_file():
+        raise FileNotFoundError(f"工人映射参考数据不存在：{data_file_path}")
 
     output_dir = _workspace_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=False)
     (output_dir / "samples").mkdir(exist_ok=False)
+    workers_root = output_dir / ".workers"
+    workers_root.mkdir(exist_ok=False)
 
     command_args = {
         "manifest": args.manifest,
         "data_file": args.data_file,
         "output_dir": args.output_dir,
         "max_graphs": args.max_graphs,
+        "max_episode_steps": args.max_episode_steps,
+        "max_candidates": args.max_candidates,
+        "workers": args.workers,
+        "worker_torch_threads": args.worker_torch_threads,
         "seed": args.seed,
     }
-    sample_rows: list[dict[str, Any]] = []
-    built_graphs = 0
-    for split_name, group in split.items():
-        if split_name == SPLIT_PPO_ONLY:
-            continue  # 仅 PPO 的图不生成反事实样本
-        for item in group:
-            if args.max_graphs > 0 and built_graphs >= args.max_graphs:
-                break
-            csv_sha256 = str(item["sha256"])
-            if csv_sha256 in REAL_FOUR_INSTANCES or Path(item["file"]).name in REAL_FOUR_INSTANCES:
-                raise ValueError(f"四真实实例禁止进入反事实集：{item['file']}")
-            csv_path = _workspace_path(
-                f"data/scale_400_800_datasets/{item['file']}"
+    jobs: list[GraphBuildJob] = []
+    for planned_job in _plan_graph_jobs(split, max_graphs=int(args.max_graphs)):
+        if (
+            planned_job.csv_sha256 in REAL_FOUR_INSTANCES
+            or Path(planned_job.file_name).name in REAL_FOUR_INSTANCES
+        ):
+            raise ValueError(f"四真实实例禁止进入反事实集：{planned_job.file_name}")
+        csv_path = _workspace_path(
+            f"data/scale_400_800_datasets/{planned_job.file_name}"
+        )
+        if not csv_path.is_file():
+            raise FileNotFoundError(f"训练 CSV 缺失：{csv_path}")
+        jobs.append(
+            GraphBuildJob(
+                index=planned_job.index,
+                split=planned_job.split,
+                file_name=planned_job.file_name,
+                csv_sha256=planned_job.csv_sha256,
+                worker_dir=workers_root / f"graph_{planned_job.index:03d}_{planned_job.csv_sha256[:12]}",
             )
-            if not csv_path.exists():
-                raise FileNotFoundError(f"训练 CSV 缺失：{csv_path}")
-            actual_sha = _sha256_bytes(csv_path.read_bytes())
-            if actual_sha != csv_sha256:
-                raise RuntimeError(
-                    f"训练 CSV 哈希不匹配：{item['file']} manifest={csv_sha256} 实际={actual_sha}"
-                )
-            rows = _build_graph_samples(
-                csv_path,
-                csv_sha256=csv_sha256,
-                manifest_sha256=manifest_sha,
-                output_dir=output_dir,
-                completer=completer,
-                max_episode_steps=int(args.max_episode_steps),
-                max_candidates=int(args.max_candidates),
-            )
-            for row in rows:
-                row["csv_sha256"] = csv_sha256
-                row["split"] = split_name
-            sample_rows.extend(rows)
-            built_graphs += 1
+        )
+    requests = [
+        GraphBuildRequest(
+            job=job,
+            csv_path=_workspace_path(f"data/scale_400_800_datasets/{job.file_name}"),
+            data_file_path=data_file_path,
+            manifest_sha256=manifest_sha,
+            max_episode_steps=int(args.max_episode_steps),
+            max_candidates=int(args.max_candidates),
+            torch_threads=int(args.worker_torch_threads),
+        )
+        for job in jobs
+    ]
+    print(
+        f"[cf] 计划构建图数={len(requests)} workers={int(args.workers)} "
+        f"每 worker torch_threads={int(args.worker_torch_threads)}",
+        flush=True,
+    )
+    graph_results: list[GraphBuildResult] = []
+    if int(args.workers) == 1:
+        for request in requests:
+            result = _build_graph_worker(request)
+            graph_results.append(result)
             print(
-                f"[cf] {split_name} {item['file']} 样本 {len(rows)} "
-                f"(累计 {len(sample_rows)})", flush=True
+                f"[cf] 完成 {result.job.split} {result.job.file_name} "
+                f"样本 {len(result.rows)}",
+                flush=True,
             )
-            if args.max_graphs > 0 and built_graphs >= args.max_graphs:
-                break
+    else:
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=int(args.workers),
+            mp_context=context,
+        ) as executor:
+            futures = {
+                executor.submit(_build_graph_worker, request): request.job
+                for request in requests
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                graph_results.append(result)
+                print(
+                    f"[cf] 完成 {result.job.split} {result.job.file_name} "
+                    f"样本 {len(result.rows)}",
+                    flush=True,
+                )
+    sample_rows = _merge_graph_artifacts(output_dir, graph_results)
+    workers_root.rmdir()
     manifest_out = _write_manifest(
         output_dir,
         manifest_sha256=manifest_sha,
@@ -638,6 +812,18 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-graphs", type=int, default=0, help="0=全部；>0 限制图数（smoke 用）")
     parser.add_argument("--max-episode-steps", type=int, default=1200)
     parser.add_argument("--max-candidates", type=int, default=4)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="图级 spawn 进程数；1 保持单进程构建语义",
+    )
+    parser.add_argument(
+        "--worker-torch-threads",
+        type=int,
+        default=1,
+        help="每个图级 worker 的 PyTorch 线程数，避免多进程线程过度订阅",
+    )
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args(argv)
 

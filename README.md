@@ -80,11 +80,15 @@ APCF（Anchor-Conditioned Full Team Proposal with Counterfactual Gating）是初
 反事实数据构建（分位状态采样 + 候选预算：锚点/单换/双换/哈希代表）：
 
 ```powershell
-python -X utf8 scripts/build_anchor_proposal_cf_data.py
+python -X utf8 scripts/build_anchor_proposal_cf_data.py `
+  --workers 6 `
+  --worker-torch-threads 1
 ```
 
 产物为 `data/initial_anchor_proposal_cf_v1/`：manifest.json（split 96/24/40、
 候选预算、每样本 SHA-256、obs_pt 路径）+ 样本 npz/obs.pt。
+
+`--workers` 以跨平台 `spawn` 方式按训练图并行构建；每个 worker 仅写私有临时目录，主进程按 manifest 固定顺序合并并生成唯一 manifest。`--workers=1` 保持单进程语义。建议在 16GB 内存设备上使用 6 个 worker，并固定 `--worker-torch-threads=1`，避免多进程下 PyTorch/OpenMP 线程过度订阅。
 
 反事实预训练（Huber 相对收益回归 + 排序 BCE + 门控 CE + 正收益加权 BC，
 仅训练双头、冻结编码器）：
