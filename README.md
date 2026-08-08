@@ -90,6 +90,18 @@ python -X utf8 scripts/build_anchor_proposal_cf_data.py
 仅训练双头、冻结编码器）：
 
 ```powershell
+Generated APCF assets (staging directories, manifests, NPZ/PT samples, integrity reports, and pretraining checkpoints) are local/server artifacts and are never committed to Git. Before pretraining, independently validate the formal asset:
+
+```powershell
+python -X utf8 scripts/validate_anchor_proposal_cf_data.py `
+  --dataset-dir data/initial_anchor_proposal_cf_v1 `
+  --source-manifest data/scale_400_800_datasets/manifest_ctg_160_explicit_fiveskill_v1.json `
+  --write-report data/initial_anchor_proposal_cf_v1/integrity_check.json
+```
+
+`--data-file data/680.csv` only applies the existing 100-worker initial-scheduling mapping; it is never a counterfactual sample source. Samples may only originate from the 160-graph manifest. `--max-candidates=4` limits anchor-trajectory candidate enumeration, while the independent label budget is anchor + at most two single swaps + at most two double swaps + one hash-selected double-swap representative (at most six teams after deduplication).
+
+```powershell
 python -X utf8 scripts/pretrain_anchor_proposal_cf.py `
   --manifest data/initial_anchor_proposal_cf_v1/manifest.json `
   --experiment conf/experiment/initial_anchor_proposal_cf_v1.yaml `
