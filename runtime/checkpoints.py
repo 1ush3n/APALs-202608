@@ -14,6 +14,17 @@ FORMAT_VERSION = 2
 WORKER_FEATURE_LAYOUT_VERSION = "five_skill_v2"
 
 
+def _sha256_of(path: Path) -> str:
+    """计算文件 SHA-256（APCF 反事实 manifest 可追溯校验）。"""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     resource_graph_mode: str
@@ -37,6 +48,14 @@ class ModelSpec:
     num_skill_types: int | None = None
     worker_skill_feature_slots: int | None = None
     worker_feature_layout_version: str | None = None
+    # APCF（锚点条件完整团队提议与反事实门控）语义。
+    anchor_proposal_prior_margin: float | None = None
+    anchor_proposal_gate_bias: float | None = None
+    anchor_proposal_train_branch_floor_start: float | None = None
+    anchor_proposal_train_branch_floor_end: float | None = None
+    anchor_proposal_branch_floor_decay_fraction: float | None = None
+    anchor_proposal_require_difference: bool | None = None
+    anchor_proposal_cf_manifest_sha256: str | None = None
 
     @property
     def use_skill_hub(self) -> bool:
@@ -63,6 +82,33 @@ def build_model_spec(config: Config) -> ModelSpec:
         else "skill_hub_forward"
     )
     worker_layout = resolve_worker_feature_layout(config)
+    apcf_fields: dict[str, Any] = {}
+    if str(config.policy_action_scope) == "operation_station_anchor_proposal_team":
+        apcf_fields = {
+            "anchor_proposal_prior_margin": float(config.anchor_proposal_prior_margin),
+            "anchor_proposal_gate_bias": float(config.anchor_proposal_gate_bias),
+            "anchor_proposal_train_branch_floor_start": float(
+                config.anchor_proposal_train_branch_floor_start
+            ),
+            "anchor_proposal_train_branch_floor_end": float(
+                config.anchor_proposal_train_branch_floor_end
+            ),
+            "anchor_proposal_branch_floor_decay_fraction": float(
+                config.anchor_proposal_branch_floor_decay_fraction
+            ),
+            "anchor_proposal_require_difference": bool(
+                config.anchor_proposal_require_difference
+            ),
+        }
+        manifest_path = str(
+            getattr(config, "anchor_proposal_cf_manifest_path", "") or ""
+        ).strip()
+        if manifest_path:
+            path = Path(manifest_path)
+            if path.exists():
+                apcf_fields["anchor_proposal_cf_manifest_sha256"] = _sha256_of(
+                    path
+                )
     return ModelSpec(
         resource_graph_mode=mode,
         policy_action_scope=str(config.policy_action_scope),
@@ -85,6 +131,7 @@ def build_model_spec(config: Config) -> ModelSpec:
         num_skill_types=worker_layout.num_skill_types,
         worker_skill_feature_slots=worker_layout.skill_slots,
         worker_feature_layout_version=WORKER_FEATURE_LAYOUT_VERSION,
+        **apcf_fields,
     )
 
 
@@ -247,6 +294,18 @@ def apply_checkpoint_model_spec(
         "graph_encoder_mode": spec.graph_encoder_mode,
         "actor_context_mode": spec.actor_context_mode,
     }
+    if spec.policy_action_scope == "operation_station_anchor_proposal_team":
+        for key in (
+            "anchor_proposal_prior_margin",
+            "anchor_proposal_gate_bias",
+            "anchor_proposal_train_branch_floor_start",
+            "anchor_proposal_train_branch_floor_end",
+            "anchor_proposal_branch_floor_decay_fraction",
+            "anchor_proposal_require_difference",
+        ):
+            value = getattr(spec, key)
+            if value is not None:
+                inferred[key] = value
     for key in (
         "hidden_dim",
         "num_gat_layers",

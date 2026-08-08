@@ -457,3 +457,138 @@ def test_apcf_old_scope_checkpoint_is_rejected_for_anchor_proposal_scope() -> No
         load_policy_weights(apcf_model, _FakeCheckpoint(legacy_state), strict=True)
     message = str(exc_info.value)
     assert "anchor_team_head" in message or "anchor_proposal_gate" in message
+
+
+def test_apcf_trace_alignment_failfast_on_mismatch() -> None:
+    """PPO 重算前必须对 trace 与实际 task/station/团队逐项比对，错位立即报错。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=True,
+            temperature=0.0,
+        )
+    assert action is not None and not invalid
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    actual_tasks = [int(action[0])]
+    actual_stations = [int(action[1])]
+    actual_teams = [[int(w) for w in action[2]]]
+    # 一致时通过。
+    agent._validate_apcf_trace_alignment(
+        [trace],
+        actual_tasks=actual_tasks,
+        actual_stations=actual_stations,
+        actual_teams=actual_teams,
+    )
+    # 错位 task：必须报错。
+    with pytest.raises(RuntimeError, match="错位"):
+        agent._validate_apcf_trace_alignment(
+            [trace],
+            actual_tasks=[actual_tasks[0] + 1],
+            actual_stations=actual_stations,
+            actual_teams=actual_teams,
+        )
+    # 错位团队：必须报错。
+    bad_team = actual_teams[0].copy()
+    bad_team[0] = (bad_team[0] + 1) % env.num_workers
+    with pytest.raises(RuntimeError, match="执行团队"):
+        agent._validate_apcf_trace_alignment(
+            [trace],
+            actual_tasks=actual_tasks,
+            actual_stations=actual_stations,
+            actual_teams=[bad_team],
+        )
+
+
+def test_apcf_bc_team_is_canonical_non_anchor_first() -> None:
+    """BC 目标顺序规范：非锚点成员优先、其余按锚点顺序（与运行期首步非锚点一致）。"""
+    from scripts.build_anchor_proposal_cf_data import _canonical_bc_team
+
+    anchor = (3, 7, 11)
+    # 非锚点 9 优先，其余锚点成员按锚点顺序 (3, 11)。
+    team = (3, 9, 11)
+    assert _canonical_bc_team(team, anchor) == (9, 3, 11)
+    # 全部为锚点成员时保持锚点顺序。
+    assert _canonical_bc_team(anchor, anchor) == (3, 7, 11)
+    # 两个非锚点按原相对顺序优先，再按锚点顺序。
+    team3 = (11, 5, 9, 3)
+    assert _canonical_bc_team(team3, anchor) == (5, 9, 3, 11)
+
+
+def test_apcf_resume_guard_rejects_legacy_scope_checkpoint() -> None:
+    """resume 时旧 scope checkpoint 不得静默降级 APCF 配置。"""
+    from runtime.checkpoints import ModelSpec
+
+    agent, overrides = _make_agent()
+    _ = agent
+    legacy_spec = ModelSpec(
+        resource_graph_mode="skill_hub_bidirectional",
+        policy_action_scope="operation_station_worker",
+    )
+    with temporary_config(configs, overrides):
+        with pytest.raises(RuntimeError, match="APCF 配置不兼容"):
+            from train_lightning import _guard_resume_scope_against_apcf
+
+            _guard_resume_scope_against_apcf(legacy_spec)
+        apcf_spec = ModelSpec(
+            resource_graph_mode="skill_hub_bidirectional",
+            policy_action_scope="operation_station_anchor_proposal_team",
+            anchor_proposal_prior_margin=4.0,
+            anchor_proposal_gate_bias=-4.0,
+            anchor_proposal_train_branch_floor_start=0.20,
+            anchor_proposal_train_branch_floor_end=0.02,
+            anchor_proposal_branch_floor_decay_fraction=0.40,
+            anchor_proposal_require_difference=True,
+        )
+        _guard_resume_scope_against_apcf(apcf_spec)  # 不报错
+
+
+def test_apcf_model_spec_records_anchor_proposal_semantics() -> None:
+    """ModelSpec 必须记录 APCF 先验/门控/强制差异/探索退火语义。"""
+    from runtime.checkpoints import build_model_spec
+
+    agent, overrides = _make_agent()
+    _ = agent
+    with temporary_config(configs, overrides):
+        spec = build_model_spec(configs)
+    assert spec.policy_action_scope == "operation_station_anchor_proposal_team"
+    assert spec.anchor_proposal_prior_margin == 4.0
+    assert spec.anchor_proposal_gate_bias == -4.0
+    assert spec.anchor_proposal_train_branch_floor_start == 0.20
+    assert spec.anchor_proposal_train_branch_floor_end == 0.02
+    assert spec.anchor_proposal_branch_floor_decay_fraction == 0.40
+    assert spec.anchor_proposal_require_difference is True
+
+
+def test_apcf_raw_proposal_select_rate_uses_raw_argmax() -> None:
+    """RolloutRawProposalSelectRate 必须基于 raw argmax 分支（不再恒为 0）。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        _action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=False,
+            temperature=1.0,
+        )
+    assert not invalid
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    assert trace.raw_argmax_branch in (0, 1)
+    from training.memory import Memory
+
+    memory = Memory()
+    memory.anchor_proposal_traces.append(trace)
+    metrics = PPOAgent._anchor_proposal_rollout_metrics(memory)
+    assert "APCF/RolloutRawProposalSelectRate" in metrics

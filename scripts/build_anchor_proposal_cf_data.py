@@ -134,6 +134,22 @@ def _hash_two_swap_representative(
     return [candidates[digest % len(candidates)]]
 
 
+def _canonical_bc_team(
+    team: tuple[int, ...] | list[int],
+    anchor_team: tuple[int, ...] | list[int],
+) -> tuple[int, ...]:
+    """BC 目标团队顺序规范化：非锚点成员优先、其余按锚点顺序。
+
+    运行期提议自回归首步强制非锚点（require_difference），因此候选团队必须
+    以"非锚点成员在前"的顺序才能被生成；锚点成员按锚点团队中的顺序排列，
+    保证与采样期掩码语义完全一致（避免 BC 目标与可生成序列错位）。
+    """
+    anchor_set = set(anchor_team)
+    non_anchor = tuple(worker_id for worker_id in team if worker_id not in anchor_set)
+    anchor_order = tuple(worker_id for worker_id in anchor_team if worker_id in set(team))
+    return non_anchor + anchor_order
+
+
 def _candidate_sources(
     base_team: tuple[int, ...],
     legal_workers: list[int],
@@ -387,12 +403,16 @@ def _build_state_samples(
             if baseline_makespan > 0.0
             else 0.0
         )
+        # BC 目标顺序规范化：非锚点成员优先、其余按锚点顺序。
+        # 运行期提议首步强制非锚点（anchor_proposal_require_difference），
+        # 因此只有该顺序保证候选团队可被自回归生成，避免掩码错位。
+        canonical_team = _canonical_bc_team(team, anchor_team)
         row = {
             "task_id": int(task_id),
             "station_id": int(station_id),
             "state_seed": state_seed,
             "anchor_team": list(anchor_team),
-            "candidate_team": list(team),
+            "candidate_team": list(canonical_team),
             "source": source,
             "baseline_makespan": float(baseline_makespan),
             "candidate_makespan": makespan,

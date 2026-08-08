@@ -62,6 +62,7 @@ class FrozenAnchorProposalTrace:
     per_step_worker_ids: tuple[tuple[int, ...], ...]
     proposal_available: bool
     selected_branch: int
+    raw_argmax_branch: int
     branch_floor: float
     gate_features: tuple[float, ...]
     hamming_distance: int
@@ -618,6 +619,7 @@ class PPOAgent:
                 per_step_worker_ids=(),
                 proposal_available=False,
                 selected_branch=0,
+                raw_argmax_branch=0,
                 branch_floor=float(branch_floor),
                 gate_features=gate_features_flat,
                 hamming_distance=0,
@@ -659,8 +661,9 @@ class PPOAgent:
         branch_logits = branch_logits.float()
         if torch.isnan(branch_logits).any():
             branch_logits = torch.nan_to_num(branch_logits, nan=-1.0e4)
+        raw_argmax_branch = int(torch.argmax(branch_logits, dim=1).item())
         if deterministic or temperature <= 0.0:
-            selected_branch = int(torch.argmax(branch_logits, dim=1).item())
+            selected_branch = raw_argmax_branch
         else:
             eps = max(float(branch_floor), 0.0)
             soft = torch.softmax(branch_logits, dim=1)  # [1, 2]
@@ -683,6 +686,7 @@ class PPOAgent:
             per_step_worker_ids=tuple(per_step_ids),
             proposal_available=True,
             selected_branch=selected_branch,
+            raw_argmax_branch=raw_argmax_branch,
             branch_floor=float(branch_floor),
             gate_features=gate_features_flat,
             hamming_distance=int(hamming),
@@ -709,9 +713,8 @@ class PPOAgent:
         available = [t for t in traces if t.proposal_available]
         hamming_values = [float(t.hamming_distance) for t in available]
         raw_select = [
-            float(t.selected_branch)
-            for t in traces
-            if t.proposal_available and t.branch_floor <= 0.0
+            float(t.raw_argmax_branch)
+            for t in available
         ]
         return {
             "APCF/RolloutDecisionCount": float(len(traces)),
@@ -928,6 +931,50 @@ class PPOAgent:
             "best_alternative_gap": best_alternative_gap,
         }
         return team_lp, team_entropy, diagnostics
+
+    def _validate_apcf_trace_alignment(
+        self,
+        traces: list[FrozenAnchorProposalTrace | None],
+        *,
+        actual_tasks: list[int],
+        actual_stations: list[int],
+        actual_teams: list[list[int]],
+    ) -> None:
+        """fail-fast：冻结 trace 必须与 PPO batch 中实际执行的动作逐项一致。
+
+        任何错位（task/station 不匹配、执行团队与 trace 记录的锚点/提议团队不一致、
+        提议成员不在对应步骤合法集合内）立即抛错，防止"静默错位 + 错误对数概率"。
+        """
+        for b, trace in enumerate(traces):
+            if trace is None:
+                continue
+            task_id = int(actual_tasks[b])
+            station_id = int(actual_stations[b])
+            if int(trace.task_id) != task_id or int(trace.station_id) != station_id:
+                raise RuntimeError(
+                    f"APCF trace 与 batch 动作错位（index={b}）："
+                    f"trace=({trace.task_id},{trace.station_id}) "
+                    f"实际=({task_id},{station_id})"
+                )
+            executed = (
+                list(trace.proposal_worker_sequence)
+                if trace.selected_branch == 1
+                else list(trace.anchor_team)
+            )
+            actual = actual_teams[b]
+            if executed != actual:
+                raise RuntimeError(
+                    f"APCF 执行团队与 trace 不一致（index={b}, branch={trace.selected_branch}）："
+                    f"trace={executed} 实际={actual}"
+                )
+            if trace.proposal_available:
+                for j, chosen in enumerate(trace.proposal_worker_sequence):
+                    valid_ids = trace.per_step_worker_ids[j]
+                    if int(chosen) not in valid_ids:
+                        raise RuntimeError(
+                            f"APCF 提议成员不在步骤合法集合内（index={b}, step={j}）："
+                            f"chosen={chosen} valid={valid_ids}"
+                        )
 
     def _recompute_anchor_proposal_logprobs(
         self,
@@ -2678,6 +2725,19 @@ class PPOAgent:
                             memory.anchor_proposal_traces[int(memory_index)]
                             for memory_index in memory_indices
                         ]
+                        self._validate_apcf_trace_alignment(
+                            apcf_traces,
+                            actual_tasks=batch.y_task.detach().cpu().tolist(),
+                            actual_stations=batch.y_station.detach().cpu().tolist(),
+                            actual_teams=[
+                                [
+                                    int(w)
+                                    for w in row
+                                    if int(w) >= 0
+                                ]
+                                for row in batch.y_team.detach().cpu().tolist()
+                            ],
+                        )
                         apcf_station_embeddings = station_x[
                             batch_indices, torch.clamp(batch.y_station, min=0)
                         ]

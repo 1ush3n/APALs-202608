@@ -300,6 +300,7 @@ class CFPretrainLightningModule(pl.LightningModule):
                     worker_embs,
                     team,
                     illegal,
+                    anchor_team,
                 )
                 bc_total = bc_total + weight * (-team_logprob)
             count += 1
@@ -332,16 +333,26 @@ class CFPretrainLightningModule(pl.LightningModule):
         worker_embs: torch.Tensor,
         team: tuple[int, ...],
         illegal: torch.Tensor,
+        anchor_team: tuple[int, ...],
     ) -> torch.Tensor:
         """提议器自回归生成候选团队的对数概率（掩码 = 合法性 + 去重）。
 
-        自回归过程与 PPO 提议分支一致：每步查询含已生成成员均值嵌入
-        h̄_{w<j}（current_team_emb），掩码排除非法与已选成员。
+        自回归过程与 PPO 提议分支一致：首步强制非锚点（require_difference），
+        每步查询含已生成成员均值嵌入 h̄_{w<j}（current_team_emb），掩码排除
+        非法与已选成员。候选团队顺序已由数据构建规范为
+        "非锚点成员优先、其余按锚点顺序"，保证与运行期掩码语义一致。
         """
+        require_diff = bool(
+            getattr(self.config, "anchor_proposal_require_difference", True)
+        )
         current_illegal = illegal.clone()
         logprob = torch.zeros((), device=worker_embs.device)
         chosen_ids: list[int] = []
-        for chosen in team:
+        for step, chosen in enumerate(team):
+            step_illegal = current_illegal.clone()
+            if step == 0 and require_diff:
+                for worker_id in anchor_team:
+                    step_illegal[int(worker_id)] = True
             context = (
                 worker_embs[0, chosen_ids, :].mean(dim=0, keepdim=True)
                 if chosen_ids
@@ -352,7 +363,7 @@ class CFPretrainLightningModule(pl.LightningModule):
                 station_emb,
                 anchor_emb,
                 worker_embs,
-                mask=current_illegal.clone().reshape(1, -1),
+                mask=step_illegal.clone().reshape(1, -1),
                 current_team_emb=context,
             )
             scores_float = scores.float()
@@ -377,10 +388,11 @@ class CFPretrainLightningModule(pl.LightningModule):
     def training_step(self, batch: dict[str, Any], batch_idx: int):
         device = self._trainable_params[0].device
         metrics = self._compute_group_losses(batch, device)
-        self._optimizer.zero_grad()
-        metrics["loss"].backward()
+        opt = self.optimizers()
+        opt.zero_grad()
+        self.manual_backward(metrics["loss"])
         torch.nn.utils.clip_grad_norm_(self._trainable_params, max_norm=10.0)
-        self._optimizer.step()
+        opt.step()
         self._step += 1
         self._log_scalars("train/", metrics)
         self.log(

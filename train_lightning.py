@@ -43,13 +43,24 @@ from training.rollout_service import APALRolloutService
 from training.async_evaluation import AsyncEvaluationManager
 from utils.vector_env import EnvCreator, VectorEnv
 from runtime.artifacts import run_context as create_run_context, uses_runs_layout, write_run_context_files, write_run_manifest
-from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
+from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint, load_policy_weights
 from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
 from runtime.initial_worker_mapping import apply_initial_worker_mapping
 from runtime.schedulefree_checkpoint import save_checkpoint_with_schedulefree_eval_parameters
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def _sha256_file(path: Path) -> str:
+    """计算文件 SHA-256（供 APCF 预训练 manifest 可追溯校验）。"""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _save_rollout_checkpoint(
@@ -126,6 +137,80 @@ def _apply_reschedule_eval_manifest_override() -> None:
         f"[Reschedule] eval_instance={entry.instance_id} "
         f"data={entry.data_path} baseline={entry.baseline_schedule_path} "
         f"scenarios={entry.scenario_path}",
+        flush=True,
+    )
+
+
+def _guard_resume_scope_against_apcf(model_spec: Any) -> None:
+    """resume 时禁止旧 scope checkpoint 静默把 APCF 配置降级为旧 scope。
+
+    配置显式要求 operation_station_anchor_proposal_team 时，续训 checkpoint 必须
+    同为 APCF scope；否则立即报错（防"静默降级 + 随机双头继续训练"）。
+    """
+    configured_scope = str(getattr(configs, "policy_action_scope", ""))
+    if configured_scope != "operation_station_anchor_proposal_team":
+        return
+    checkpoint_scope = str(getattr(model_spec, "policy_action_scope", ""))
+    if checkpoint_scope != "operation_station_anchor_proposal_team":
+        raise RuntimeError(
+            "resume 时检测到 checkpoint scope 与当前 APCF 配置不兼容："
+            f"checkpoint={checkpoint_scope}，config={configured_scope}。"
+            "APCF 实验必须续训 APCF scope 的 checkpoint；请勿混用旧 scope checkpoint。"
+        )
+
+
+def _maybe_load_apcf_pretrain(model: torch.nn.Module, device: torch.device, *, resume: bool) -> None:
+    """APCF 正式训练必须从反事实预训练 checkpoint 冷启动。
+
+    - resume=True 时由 Lightning checkpoint 恢复，不重复加载；
+    - 校验 checkpoint 的 model_spec 必须为 APCF scope；
+    - 校验 apal_pretrain_metadata.manifest_sha256 与当前配置指向的
+      反事实 manifest 实际 SHA-256 一致（可追溯闭环的安全约束）。
+    """
+    if resume:
+        return
+    scope = str(getattr(configs, "policy_action_scope", ""))
+    if scope != "operation_station_anchor_proposal_team":
+        return
+    pretrain_path = resolve_workspace_path(
+        getattr(
+            configs,
+            "anchor_proposal_pretrain_checkpoint_path",
+            "checkpoints/apcf_pretrain_v1.ckpt",
+        )
+    )
+    if not pretrain_path.exists():
+        raise FileNotFoundError(
+            f"APCF scope 必须从反事实预训练 checkpoint 冷启动，但找不到: {pretrain_path}"
+        )
+    checkpoint = load_checkpoint(pretrain_path)
+    spec_scope = str(checkpoint.model_spec.policy_action_scope)
+    if spec_scope != "operation_station_anchor_proposal_team":
+        raise RuntimeError(
+            f"APCF 预训练 checkpoint scope 不匹配："
+            f"checkpoint={spec_scope}，要求=operation_station_anchor_proposal_team"
+        )
+    pretrain_metadata = (
+        checkpoint.payload.get("apal_pretrain_metadata", {})
+        if isinstance(checkpoint.payload, dict)
+        else {}
+    )
+    manifest_path = resolve_workspace_path(
+        getattr(configs, "anchor_proposal_cf_manifest_path", "")
+    )
+    if manifest_path.exists():
+        recorded = str(pretrain_metadata.get("manifest_sha256", ""))
+        actual = _sha256_file(manifest_path)
+        if recorded and recorded != actual:
+            raise RuntimeError(
+                f"APCF 预训练 checkpoint 的反事实 manifest SHA-256 不一致："
+                f"checkpoint={recorded}，当前配置={actual}（{manifest_path}）"
+            )
+    load_policy_weights(model, checkpoint, strict=True)
+    print(
+        f"[APCF-Pretrain] 已加载预训练 checkpoint {pretrain_path} "
+        f"(manifest_sha256={pretrain_metadata.get('manifest_sha256', '')[:12]}...)，"
+        "正式 PPO 从预训练权重微调。",
         flush=True,
     )
 
@@ -356,6 +441,7 @@ def run(args, *, config_initialized: bool = False) -> None:
         if not resume_path.exists():
             raise FileNotFoundError(f"找不到可恢复的 Lightning checkpoint: {resume_path}")
         resume_checkpoint = load_checkpoint(resume_path)
+        _guard_resume_scope_against_apcf(resume_checkpoint.model_spec)
         apply_checkpoint_model_spec(
             configs,
             resume_checkpoint.model_spec,
@@ -423,6 +509,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     eval_env = AirLineEnv_Graph(eval_path, seed=int(configs.seed))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = HBGATPN(configs).to(device)
+    _maybe_load_apcf_pretrain(model, device, resume=bool(args.resume))
     _maybe_load_reschedule_warm_start(model, device, resume=bool(args.resume))
     if getattr(configs, 'use_compile', False):
         try:

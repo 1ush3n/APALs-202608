@@ -63,6 +63,57 @@ python train.py experiment=initial_schedule_283 train.batch_size=24 parallel.num
 
 配置优先级为：代码默认值 `<` 实验 YAML `<` 平台硬件 YAML `<` Hydra 命令行 `key=value`。
 
+### APCF：锚点条件完整团队提议与反事实门控（初始调度）
+
+APCF（Anchor-Conditioned Full Team Proposal with Counterfactual Gating）是初始
+调度的主方法扩展，动作链为 `(o, s, H, P, z, T)`：锚点团队 `H` 由启发式生成，
+提议器自回归生成完整合法团队 `P`，反事实门控 `z` 在两者间选择，随后执行
+`T`（换人序列）。三大组件：
+
+1. **反事实预训练数据**：确定性轨迹上采样决策点，强制替换候选团队后完整续排，
+   记录相对收益 `y = (C(H) − C(P)) / max(C(H), ε)`；
+2. **双头模型**：`AnchorConditionedTeamPointer`（自回归完整团队提议）与
+   `AnchorProposalGate`（价值头 + 门控，未预训练时零初始化保证温度 0 必选锚点）；
+3. **可追溯 PPO 微调**：`FrozenAnchorProposalTrace` 冻结决策点，重算对数概率必须
+   与 rollout 期完全一致，且 z=0 时提议链仍计入 `log π`。
+
+反事实数据构建（分位状态采样 + 候选预算：锚点/单换/双换/哈希代表）：
+
+```powershell
+python -X utf8 scripts/build_anchor_proposal_cf_data.py
+```
+
+产物为 `data/initial_anchor_proposal_cf_v1/`：manifest.json（split 96/24/40、
+候选预算、每样本 SHA-256、obs_pt 路径）+ 样本 npz/obs.pt。
+
+反事实预训练（Huber 相对收益回归 + 排序 BCE + 门控 CE + 正收益加权 BC，
+仅训练双头、冻结编码器）：
+
+```powershell
+python -X utf8 scripts/pretrain_anchor_proposal_cf.py `
+  --manifest data/initial_anchor_proposal_cf_v1/manifest.json `
+  --experiment conf/experiment/initial_anchor_proposal_cf_v1.yaml `
+  --output checkpoints/apcf_pretrain_v1.ckpt
+```
+
+正式 PPO 微调必须显式提供预训练 checkpoint 与反事实 manifest，启动时会核验
+checkpoint 的 model spec 为 APCF scope 且 manifest SHA-256 与当前配置一致：
+
+```powershell
+python train.py `
+  experiment=initial_anchor_proposal_cf_v1 `
+  anchor_proposal_pretrain_checkpoint_path=checkpoints/apcf_pretrain_v1.ckpt `
+  anchor_proposal_cf_manifest_path=data/initial_anchor_proposal_cf_v1/manifest.json `
+  train.num_envs=16 `
+  train.max_episodes=300
+```
+
+探索下限按 `branch_floor_decay_fraction` 进度从 `0.20` 线性退火至 `0.02`；
+每次成功 PPO 更新后推进（OOM 跳过时不推进）。Rollout 指标含
+`APCF/DecisionCount`、`ProposalAvailableRate`、`HammingDistanceMean`、
+`RawProposalSelectRate`（基于 raw argmax 分支）等，可作为筛选验收证据。
+
+
 ### 初始调度异步验证
 
 Lightning 初始调度可将逐 episode 验证与 GPU 训练分离。单实例模式固定在 `async_eval_initial_data_path` 的 Standard 场景上按 Makespan 选择 best，且只有完整排程可以覆盖 best：

@@ -418,6 +418,11 @@ class APALRolloutService:
             extra_metrics["Rollout/Profile/SampleCount"] = float(
                 detailed_profile_samples
             )
+        if str(self.config.policy_action_scope) == "operation_station_anchor_proposal_team":
+            merged = Memory()
+            self._merge_memories(merged, memories)
+            apcf_metrics = self.agent._anchor_proposal_rollout_metrics(merged)
+            extra_metrics.update(apcf_metrics)
         metrics = RolloutMetrics(
             episode=int(episode),
             average_reward=float(np.mean([sum(memory.rewards) for memory in memories])),

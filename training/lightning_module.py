@@ -201,7 +201,9 @@ class APALLightningModule(pl.LightningModule):
                 "不记录本轮 rollout/loss/eval，下一轮继续使用原 batch_size。"
             )
             return None
-        _scope = str(getattr(getattr(self, "config", None), "policy_action_scope", ""))
+        _scope = str(
+            getattr(getattr(self.rollout_service, "config", None), "policy_action_scope", "")
+        )
         if _scope == "operation_station_anchor_proposal_team":
             self.agent.advance_apcf_update()
 
