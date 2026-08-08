@@ -109,9 +109,13 @@ python train.py `
 ```
 
 探索下限按 `branch_floor_decay_fraction` 进度从 `0.20` 线性退火至 `0.02`；
-每次成功 PPO 更新后推进（OOM 跳过时不推进）。Rollout 指标含
-`APCF/DecisionCount`、`ProposalAvailableRate`、`HammingDistanceMean`、
-`RawProposalSelectRate`（基于 raw argmax 分支）等，可作为筛选验收证据。
+每次成功 PPO 更新后推进（OOM 跳过时不推进）。APCF 冷启动会严格校验
+反事实 manifest、预训练 checkpoint 的动作语义与 manifest SHA-256；续训只校验
+latest PPO checkpoint 的 APCF 语义与 manifest，不重新加载预训练文件。Rollout 指标含
+`APCF/RolloutDecisionCount`、`APCF/RolloutProposalAvailableRate`、
+`APCF/RolloutHammingDistanceMean`、`APCF/RolloutRawProposalSelectRate`，以及
+proposal pointer 对数概率/熵、预测反事实收益、gate 值和 raw 分支 logit 差，
+可作为短轮筛选的诊断证据。
 
 
 ### 初始调度异步验证
