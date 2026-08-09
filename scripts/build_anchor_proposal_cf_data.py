@@ -28,6 +28,7 @@ import math
 import multiprocessing
 import shutil
 import sys
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,10 +78,18 @@ class GraphBuildJob:
     worker_dir: Path = Path()
 
 
+GraphStateKey = tuple[str, int, int, int, tuple[int, ...]]
+
+
+@dataclass(frozen=True)
+class GraphPreflightResult:
+    job: GraphBuildJob
+    state_keys: tuple[GraphStateKey, ...]
+    trajectory_steps: int
+
+
 @dataclass(frozen=True)
 class GraphBuildRequest:
-    """传入 spawn worker 的不可变构建参数。"""
-
     job: GraphBuildJob
     csv_path: Path
     data_file_path: Path
@@ -88,6 +97,7 @@ class GraphBuildRequest:
     max_episode_steps: int
     max_candidates: int
     torch_threads: int
+    target_state_keys: tuple[GraphStateKey, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -181,8 +191,137 @@ def _build_graph_worker(request: GraphBuildRequest) -> GraphBuildResult:
         completer=completer,
         max_episode_steps=request.max_episode_steps,
         max_candidates=request.max_candidates,
+        target_state_keys=request.target_state_keys,
     )
     return GraphBuildResult(job=request.job, rows=rows)
+
+
+def _make_state_key(csv_sha256: str, state: dict[str, Any]) -> GraphStateKey:
+    return (
+        str(csv_sha256),
+        int(state["decision_count"]),
+        int(state["task_id"]),
+        int(state["station_id"]),
+        tuple(int(worker) for worker in state["base_team"]),
+    )
+
+
+def _assert_state_key_matches(
+    expected: GraphStateKey,
+    actual: GraphStateKey,
+) -> None:
+    if expected != actual:
+        raise RuntimeError(
+            "formal replay state does not match preflight: "
+            f"expected={expected!r} actual={actual!r}"
+        )
+
+
+def _collect_decision_states(
+    csv_path: Path,
+    completer: EarliestFinishActionCompleter,
+    *,
+    max_episode_steps: int,
+    max_candidates: int,
+) -> tuple[list[dict[str, Any]], int]:
+    env = AirLineEnv_Graph(data_path_or_dir=str(csv_path), seed=42)
+    obs = env.reset(randomize_duration=False, randomize_workers=False, seed=42)
+    collected: list[dict[str, Any]] = []
+    decision_count = 0
+    step = 0
+    done = False
+    while not done and step < max_episode_steps:
+        selected = _select_pair(env, obs, completer, max_candidates=max_candidates)
+        if selected is None:
+            if not env.try_wait_for_resources():
+                break
+            obs = env._get_observation()
+            continue
+        decision_count += 1
+        if len(selected.candidates.teams) > 1:
+            collected.append(
+                {
+                    "task_id": int(selected.task_id),
+                    "station_id": int(selected.station_id),
+                    "base_team": tuple(sorted(selected.candidates.teams[0])),
+                    "decision_count": decision_count,
+                }
+            )
+        obs, _reward, done, info = env.step(
+            (selected.task_id, selected.station_id, list(selected.candidates.teams[0]))
+        )
+        if "error" in info:
+            raise RuntimeError(f"anchor trajectory action rejected: {info['error']}")
+        step += 1
+    del env
+    gc.collect()
+    return collected, step
+
+
+def _preflight_graph_worker(request: GraphBuildRequest) -> GraphPreflightResult:
+    if request.torch_threads < 1:
+        raise ValueError("worker torch threads must be positive")
+    torch.set_num_threads(request.torch_threads)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    _configure_global(request.data_file_path)
+    actual_sha = _sha256_file(request.csv_path)
+    if actual_sha != request.job.csv_sha256:
+        raise RuntimeError(
+            "training CSV hash mismatch: "
+            f"{request.job.file_name} expected={request.job.csv_sha256} actual={actual_sha}"
+        )
+    completer = EarliestFinishActionCompleter(configs)
+    decision_states, trajectory_steps = _collect_decision_states(
+        request.csv_path,
+        completer,
+        max_episode_steps=request.max_episode_steps,
+        max_candidates=request.max_candidates,
+    )
+    targets = _select_sample_states(decision_states)
+    state_keys = tuple(_make_state_key(request.job.csv_sha256, state) for state in targets)
+    return GraphPreflightResult(
+        job=request.job,
+        state_keys=state_keys,
+        trajectory_steps=trajectory_steps,
+    )
+
+
+def _run_graph_preflight(
+    requests: list[GraphBuildRequest],
+    workers: int,
+) -> list[GraphPreflightResult]:
+    if workers == 1:
+        return [_preflight_graph_worker(request) for request in requests]
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
+        futures = [executor.submit(_preflight_graph_worker, request) for request in requests]
+        return [future.result() for future in as_completed(futures)]
+
+
+def _validate_preflight_results(
+    results: list[GraphPreflightResult],
+) -> list[GraphPreflightResult]:
+    failures: list[str] = []
+    ordered = sorted(results, key=lambda item: item.job.index)
+    for result in ordered:
+        if len(result.state_keys) != 4:
+            failures.append(
+                f"{result.job.file_name} sha256={result.job.csv_sha256} "
+                f"states={len(result.state_keys)} trajectory_steps={result.trajectory_steps}"
+            )
+        if len(set(result.state_keys)) != len(result.state_keys):
+            failures.append(
+                f"{result.job.file_name} sha256={result.job.csv_sha256} duplicate state keys"
+            )
+    if failures:
+        raise ValueError(
+            "APCF preflight requires exactly 4 distinct states per sample-bearing graph: "
+            + "; ".join(failures)
+        )
+    return ordered
 
 
 def _merge_graph_artifacts(
@@ -340,69 +479,13 @@ def _build_graph_samples(
     *,
     max_episode_steps: int,
     max_candidates: int,
+    target_state_keys: tuple[GraphStateKey, ...],
 ) -> list[dict[str, Any]]:
-    """单图：两遍确定性轨迹。第一遍收集"有合法替代"的决策点并取分位目标；
-    第二遍在目标状态（env 正处于该决策点）构建候选反事实样本。"""
-    decisions: list[dict[str, Any]] = []
-
-    def _walk(collect_only: bool) -> list[dict[str, Any]]:
-        env = AirLineEnv_Graph(data_path_or_dir=str(csv_path), seed=42)
-        obs = env.reset(randomize_duration=False, randomize_workers=False, seed=42)
-        collected: list[dict[str, Any]] = []
-        decision_count = 0
-        step = 0
-        done = False
-        while not done and step < max_episode_steps:
-            selected = _select_pair(env, obs, completer, max_candidates=max_candidates)
-            if selected is None:
-                if not env.try_wait_for_resources():
-                    break
-                obs = env._get_observation()
-                continue
-            decision_count += 1
-            if len(selected.candidates.teams) > 1:  # 存在合法替代团队
-                record = {
-                    "task_id": int(selected.task_id),
-                    "station_id": int(selected.station_id),
-                    "base_team": tuple(sorted(selected.candidates.teams[0])),
-                    "decision_count": decision_count,
-                }
-                if collect_only:
-                    collected.append(record)
-                else:
-                    record["obs"] = copy.deepcopy(obs)
-                    record["masks"] = env.get_masks()
-                    rows = _build_state_samples(
-                        env,
-                        record,
-                        csv_path=csv_path,
-                        csv_sha256=csv_sha256,
-                        manifest_sha256=manifest_sha256,
-                        output_dir=output_dir,
-                        completer=completer,
-                        max_episode_steps=max_episode_steps,
-                        max_candidates=max_candidates,
-                    )
-                    collected.extend(rows)
-            obs, _reward, done, info = env.step(
-                (selected.task_id, selected.station_id, list(selected.candidates.teams[0]))
-            )
-            if "error" in info:
-                raise RuntimeError(f"锚点轨迹动作被拒绝：{info['error']}")
-            step += 1
-            if done:
-                break
-        del env
-        gc.collect()
-        return collected
-
-    decision_states = _walk(collect_only=True)
-    targets = _select_sample_states(decision_states)
-    if not targets:
+    if not target_state_keys:
         return []
-    target_counts = {int(target["decision_count"]) for target in targets}
-    # 第二遍：环境确定性重放，决策点顺序与第一遍完全一致
+    expected_by_decision = {int(key[1]): key for key in target_state_keys}
     sample_rows: list[dict[str, Any]] = []
+    seen_keys: list[GraphStateKey] = []
     decision_count = 0
     env = AirLineEnv_Graph(data_path_or_dir=str(csv_path), seed=42)
     obs = env.reset(randomize_duration=False, randomize_workers=False, seed=42)
@@ -416,10 +499,7 @@ def _build_graph_samples(
             obs = env._get_observation()
             continue
         decision_count += 1
-        if (
-            decision_count in target_counts
-            and len(selected.candidates.teams) > 1
-        ):
+        if decision_count in expected_by_decision and len(selected.candidates.teams) > 1:
             record = {
                 "task_id": int(selected.task_id),
                 "station_id": int(selected.station_id),
@@ -428,30 +508,36 @@ def _build_graph_samples(
                 "obs": copy.deepcopy(obs),
                 "masks": env.get_masks(),
             }
-            rows = _build_state_samples(
-                env,
-                record,
-                csv_path=csv_path,
-                csv_sha256=csv_sha256,
-                manifest_sha256=manifest_sha256,
-                output_dir=output_dir,
-                completer=completer,
-                max_episode_steps=max_episode_steps,
-                max_candidates=max_candidates,
+            actual_key = _make_state_key(csv_sha256, record)
+            _assert_state_key_matches(expected_by_decision[decision_count], actual_key)
+            seen_keys.append(actual_key)
+            sample_rows.extend(
+                _build_state_samples(
+                    env,
+                    record,
+                    csv_path=csv_path,
+                    csv_sha256=csv_sha256,
+                    manifest_sha256=manifest_sha256,
+                    output_dir=output_dir,
+                    completer=completer,
+                    max_episode_steps=max_episode_steps,
+                    max_candidates=max_candidates,
+                )
             )
-            sample_rows.extend(rows)
         obs, _reward, done, info = env.step(
             (selected.task_id, selected.station_id, list(selected.candidates.teams[0]))
         )
         if "error" in info:
-            raise RuntimeError(f"锚点轨迹动作被拒绝：{info['error']}")
+            raise RuntimeError(f"anchor trajectory action rejected: {info['error']}")
         step += 1
-        if done:
-            break
     del env
     gc.collect()
+    if len(seen_keys) != len(target_state_keys) or set(seen_keys) != set(target_state_keys):
+        raise RuntimeError(
+            "formal replay did not encounter exactly the preflight states: "
+            f"expected={target_state_keys!r} actual={tuple(seen_keys)!r}"
+        )
     return sample_rows
-
 
 def _build_state_samples(
     env: AirLineEnv_Graph,
@@ -502,7 +588,7 @@ def _build_state_samples(
     )
     if len(candidates) < 2:
         return []
-    results: list[tuple[tuple[int, ...], str, float]] = []
+    results: list[tuple[tuple[int, ...], str, float, int, bool]] = []
     baseline_makespan: float | None = None
     safe_seed = state_seed.replace("|", "-").replace("_", "-")
     obs_path = output_dir / "samples" / f"obs_{csv_sha256[:12]}_{safe_seed}.pt"
@@ -523,14 +609,17 @@ def _build_state_samples(
                 f"反事实续排未完成：{csv_path.name} 状态 {state_seed} 候选 {team}"
             )
         makespan = float(outcome["makespan"])
-        results.append((team, source, makespan))
+        results.append(
+            (team, source, makespan, int(outcome["steps"]), bool(outcome["done"]))
+        )
         if source == "anchor":
             baseline_makespan = makespan
     if baseline_makespan is None or not math.isfinite(baseline_makespan):
         return []
     anchor_team = candidates[0][0]
     rows: list[dict[str, Any]] = []
-    for team, source, makespan in results:
+    obs_pt_sha256 = _sha256_file(obs_path)
+    for team, source, makespan, episode_steps, terminal_done in results:
         relative_gain = (
             (baseline_makespan - makespan) / max(baseline_makespan, 1.0e-6)
             if baseline_makespan > 0.0
@@ -550,7 +639,10 @@ def _build_state_samples(
             "baseline_makespan": float(baseline_makespan),
             "candidate_makespan": makespan,
             "relative_gain": float(relative_gain),
+            "episode_steps": int(episode_steps),
+            "terminal_done": bool(terminal_done),
             "obs_pt": obs_rel,
+            "obs_pt_sha256": obs_pt_sha256,
             "sample_sha256": "",
             "npz_path": "",
         }
@@ -600,6 +692,8 @@ def _save_sample_npz(
             "baseline_makespan": row["baseline_makespan"],
             "candidate_makespan": row["candidate_makespan"],
             "relative_gain": row["relative_gain"],
+            "episode_steps": row["episode_steps"],
+            "terminal_done": row["terminal_done"],
         },
         sort_keys=True,
     ).encode("utf-8")
@@ -614,6 +708,7 @@ def _save_sample_npz(
     npz_path = output_dir / "samples" / f"{key}.npz"
     np.savez_compressed(npz_path, meta=payload, **arrays)
     row["npz_path"] = str(npz_path.relative_to(output_dir))
+    row["npz_sha256"] = _sha256_file(npz_path)
     return row
 
 
@@ -668,6 +763,10 @@ def _write_manifest(
                 "npz": row["npz_path"],
                 "obs_pt": row["obs_pt"],
                 "relative_gain": row["relative_gain"],
+                "episode_steps": row["episode_steps"],
+                "terminal_done": row["terminal_done"],
+                "npz_sha256": row["npz_sha256"],
+                "obs_pt_sha256": row["obs_pt_sha256"],
             }
         )
     manifest_bytes = json.dumps(manifest, sort_keys=True, ensure_ascii=False).encode("utf-8")
@@ -686,33 +785,35 @@ def _configure_global(data_path: Path) -> None:
 
 def run_build(args: argparse.Namespace) -> dict[str, Any]:
     manifest_path = _workspace_path(args.manifest)
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"manifest 不存在：{manifest_path}")
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"manifest not found: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest_sha = _sha256_bytes(manifest_path.read_bytes())
     if str(manifest.get("protocol")) != "explicit_fiveskill_v1":
-        raise ValueError("仅支持 explicit_fiveskill_v1（五技能）manifest")
+        raise ValueError("only explicit_fiveskill_v1 manifest is supported")
     files = manifest.get("files", [])
     if not files:
-        raise ValueError("manifest 无文件条目")
+        raise ValueError("manifest files is empty")
     split = _split_by_sha256(files)
     if int(args.workers) < 1:
-        raise ValueError(f"workers 必须至少为 1，收到：{args.workers}")
+        raise ValueError("workers must be positive")
     if int(args.worker_torch_threads) < 1:
-        raise ValueError(
-            "worker_torch_threads 必须至少为 1，"
-            f"收到：{args.worker_torch_threads}"
-        )
+        raise ValueError("worker_torch_threads must be positive")
     data_file_path = _workspace_path(args.data_file)
     if not data_file_path.is_file():
-        raise FileNotFoundError(f"工人映射参考数据不存在：{data_file_path}")
+        raise FileNotFoundError(f"worker mapping file not found: {data_file_path}")
 
     output_dir = _workspace_path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=False)
-    (output_dir / "samples").mkdir(exist_ok=False)
-    workers_root = output_dir / ".workers"
-    workers_root.mkdir(exist_ok=False)
+    if output_dir.exists():
+        if not output_dir.is_dir():
+            raise FileExistsError(f"APCF output path is not a directory: {output_dir}")
+        if any(output_dir.iterdir()):
+            raise FileExistsError(f"APCF output directory must be empty: {output_dir}")
+    else:
+        output_dir.mkdir(parents=True)
+    (output_dir / "samples").mkdir()
 
+    workers_root = Path(tempfile.mkdtemp(prefix="apcf_cf_workers_"))
     command_args = {
         "manifest": args.manifest,
         "data_file": args.data_file,
@@ -722,76 +823,124 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
         "max_candidates": args.max_candidates,
         "workers": args.workers,
         "worker_torch_threads": args.worker_torch_threads,
+        "worker_tmp_dir": str(workers_root),
         "seed": args.seed,
     }
-    jobs: list[GraphBuildJob] = []
-    for planned_job in _plan_graph_jobs(split, max_graphs=int(args.max_graphs)):
-        if (
-            planned_job.csv_sha256 in REAL_FOUR_INSTANCES
-            or Path(planned_job.file_name).name in REAL_FOUR_INSTANCES
-        ):
-            raise ValueError(f"四真实实例禁止进入反事实集：{planned_job.file_name}")
-        csv_path = _workspace_path(
-            f"data/scale_400_800_datasets/{planned_job.file_name}"
-        )
-        if not csv_path.is_file():
-            raise FileNotFoundError(f"训练 CSV 缺失：{csv_path}")
-        jobs.append(
-            GraphBuildJob(
-                index=planned_job.index,
-                split=planned_job.split,
-                file_name=planned_job.file_name,
-                csv_sha256=planned_job.csv_sha256,
-                worker_dir=workers_root / f"graph_{planned_job.index:03d}_{planned_job.csv_sha256[:12]}",
+    build_error: BaseException | None = None
+    try:
+        jobs: list[GraphBuildJob] = []
+        for planned_job in _plan_graph_jobs(split, max_graphs=int(args.max_graphs)):
+            if (
+                planned_job.csv_sha256 in REAL_FOUR_INSTANCES
+                or Path(planned_job.file_name).name in REAL_FOUR_INSTANCES
+            ):
+                raise ValueError(
+                    f"real instance is forbidden in APCF dataset: {planned_job.file_name}"
+                )
+            csv_path = _workspace_path(
+                f"data/scale_400_800_datasets/{planned_job.file_name}"
             )
-        )
-    requests = [
-        GraphBuildRequest(
-            job=job,
-            csv_path=_workspace_path(f"data/scale_400_800_datasets/{job.file_name}"),
-            data_file_path=data_file_path,
-            manifest_sha256=manifest_sha,
-            max_episode_steps=int(args.max_episode_steps),
-            max_candidates=int(args.max_candidates),
-            torch_threads=int(args.worker_torch_threads),
-        )
-        for job in jobs
-    ]
-    print(
-        f"[cf] 计划构建图数={len(requests)} workers={int(args.workers)} "
-        f"每 worker torch_threads={int(args.worker_torch_threads)}",
-        flush=True,
-    )
-    graph_results: list[GraphBuildResult] = []
-    if int(args.workers) == 1:
-        for request in requests:
-            result = _build_graph_worker(request)
-            graph_results.append(result)
-            print(
-                f"[cf] 完成 {result.job.split} {result.job.file_name} "
-                f"样本 {len(result.rows)}",
-                flush=True,
+            if not csv_path.is_file():
+                raise FileNotFoundError(f"training CSV not found: {csv_path}")
+            jobs.append(
+                GraphBuildJob(
+                    index=planned_job.index,
+                    split=planned_job.split,
+                    file_name=planned_job.file_name,
+                    csv_sha256=planned_job.csv_sha256,
+                    worker_dir=workers_root
+                    / f"graph_{planned_job.index:03d}_{planned_job.csv_sha256[:12]}",
+                )
             )
-    else:
-        context = multiprocessing.get_context("spawn")
-        with ProcessPoolExecutor(
-            max_workers=int(args.workers),
-            mp_context=context,
-        ) as executor:
-            futures = {
-                executor.submit(_build_graph_worker, request): request.job
-                for request in requests
-            }
-            for future in as_completed(futures):
-                result = future.result()
+        requests = [
+            GraphBuildRequest(
+                job=job,
+                csv_path=_workspace_path(
+                    f"data/scale_400_800_datasets/{job.file_name}"
+                ),
+                data_file_path=data_file_path,
+                manifest_sha256=manifest_sha,
+                max_episode_steps=int(args.max_episode_steps),
+                max_candidates=int(args.max_candidates),
+                torch_threads=int(args.worker_torch_threads),
+            )
+            for job in jobs
+        ]
+        print(
+            f"[cf] preflight graphs={len(requests)} workers={int(args.workers)}",
+            flush=True,
+        )
+        preflight_results = _validate_preflight_results(
+            _run_graph_preflight(requests, int(args.workers))
+        )
+        by_index = {result.job.index: result for result in preflight_results}
+        if set(by_index) != {job.index for job in jobs}:
+            raise RuntimeError("preflight result set does not match graph job set")
+        requests = [
+            GraphBuildRequest(
+                job=request.job,
+                csv_path=request.csv_path,
+                data_file_path=request.data_file_path,
+                manifest_sha256=request.manifest_sha256,
+                max_episode_steps=request.max_episode_steps,
+                max_candidates=request.max_candidates,
+                torch_threads=request.torch_threads,
+                target_state_keys=by_index[request.job.index].state_keys,
+            )
+            for request in requests
+        ]
+        print(
+            f"[cf] formal build graphs={len(requests)} workers={int(args.workers)}",
+            flush=True,
+        )
+        graph_results: list[GraphBuildResult] = []
+        if int(args.workers) == 1:
+            for request in requests:
+                result = _build_graph_worker(request)
                 graph_results.append(result)
                 print(
-                    f"[cf] 完成 {result.job.split} {result.job.file_name} "
-                    f"样本 {len(result.rows)}",
+                    f"[cf] completed {result.job.split} {result.job.file_name} "
+                    f"samples={len(result.rows)}",
                     flush=True,
                 )
-    sample_rows = _merge_graph_artifacts(output_dir, graph_results)
-    workers_root.rmdir()
+        else:
+            context = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=int(args.workers),
+                mp_context=context,
+            ) as executor:
+                futures = {
+                    executor.submit(_build_graph_worker, request): request.job
+                    for request in requests
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    graph_results.append(result)
+                    print(
+                        f"[cf] completed {result.job.split} {result.job.file_name} "
+                        f"samples={len(result.rows)}",
+                        flush=True,
+                    )
+        sample_rows = _merge_graph_artifacts(output_dir, graph_results)
+    except BaseException as exc:
+        build_error = exc
+        raise
+    finally:
+        cleanup_error: RuntimeError | None = None
+        if workers_root.is_dir():
+            try:
+                shutil.rmtree(workers_root)
+            except OSError as exc:
+                cleanup_error = RuntimeError(
+                    f"worker temporary directory cleanup failed: {workers_root}: {exc}"
+                )
+        if cleanup_error is not None:
+            if build_error is not None:
+                raise BaseExceptionGroup(
+                    "APCF build and cleanup both failed",
+                    [build_error, cleanup_error],
+                ) from cleanup_error
+            raise cleanup_error
     manifest_out = _write_manifest(
         output_dir,
         manifest_sha256=manifest_sha,
@@ -800,9 +949,8 @@ def run_build(args: argparse.Namespace) -> dict[str, Any]:
         sample_rows=sample_rows,
         command_args=command_args,
     )
-    print(f"[cf] 完成：{len(sample_rows)} 个样本，manifest {manifest_out}", flush=True)
+    print(f"[cf] completed samples={len(sample_rows)} manifest={manifest_out}", flush=True)
     return {"samples": len(sample_rows), "manifest": str(manifest_out)}
-
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="APCF 反事实预训练数据构建")

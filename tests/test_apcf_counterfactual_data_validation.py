@@ -50,6 +50,10 @@ def _write_asset(
     manifest_gain: float = 0.0,
     tamper_sample_digest: bool = False,
     include_anchor: bool = True,
+    terminal_done: bool = True,
+    source: str = "anchor",
+    candidate_team: list[int] | None = None,
+    worker_mask: np.ndarray | None = None,
 ) -> Path:
     root = tmp_path / "asset"
     samples = root / "samples"
@@ -60,7 +64,13 @@ def _write_asset(
     station_x = np.asarray([[0.0, 1.0]], dtype=np.float32)
     task_mask = np.asarray([False], dtype=np.bool_)
     station_mask = np.asarray([[False]], dtype=np.bool_)
-    worker_mask = np.asarray([False, False], dtype=np.bool_)
+    worker_mask = (
+        np.asarray([False, False], dtype=np.bool_)
+        if worker_mask is None
+        else np.asarray(worker_mask, dtype=np.bool_)
+    )
+    if candidate_team is None:
+        candidate_team = [0]
     arrays = {
         "task_x": task_x,
         "worker_x": worker_x,
@@ -77,11 +87,13 @@ def _write_asset(
         "task_id": 0,
         "station_id": 0,
         "anchor_team": [0],
-        "candidate_team": [0],
-        "source": "anchor" if include_anchor else "one_swap",
+        "candidate_team": candidate_team,
+        "source": source if include_anchor else "one_swap",
         "baseline_makespan": 10.0,
         "candidate_makespan": 10.0,
         "relative_gain": 0.0,
+        "episode_steps": 3,
+        "terminal_done": terminal_done,
     }
     meta_bytes = json.dumps(meta, sort_keys=True).encode("utf-8")
     digest = hashlib.sha256()
@@ -100,6 +112,8 @@ def _write_asset(
     }
     obs_path = samples / "obs.pt"
     torch.save(obs, obs_path)
+    npz_sha256 = _sha256(npz)
+    obs_pt_sha256 = _sha256(obs_path)
     entry = {
         "csv_sha256": graph_sha,
         "split": "pretrain",
@@ -107,12 +121,16 @@ def _write_asset(
         "task_id": 0,
         "station_id": 0,
         "anchor_team": [0],
-        "candidate_team": [0],
+        "candidate_team": candidate_team,
         "source": meta["source"],
         "sample_sha256": sample_sha,
         "npz": "samples/sample.npz",
         "obs_pt": "samples/obs.pt",
+        "npz_sha256": npz_sha256,
+        "obs_pt_sha256": obs_pt_sha256,
         "relative_gain": manifest_gain,
+        "episode_steps": 3,
+        "terminal_done": terminal_done,
     }
     asset = {
         "version": 1,
@@ -124,7 +142,7 @@ def _write_asset(
         "sample_counts": {"pretrain": 1, "frozen_diagnostic": 0, "ppo_only": 0},
         "candidate_budget": {"one_swap_top_k": 2, "two_swap_top_k": 2, "two_swap_pool": 24, "hash_two_swap_representative": 1},
         "state_fractions": [0.125, 0.375, 0.625, 0.875],
-        "command_args": {},
+        "command_args": {"max_graphs": 1, "max_episode_steps": 1200},
         "files": [entry],
     }
     asset["manifest_sha256"] = hashlib.sha256(
@@ -194,4 +212,76 @@ def test_validator_rejects_state_without_anchor_row(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="anchor"):
+        validate_counterfactual_asset(asset_dir, source_path)
+
+
+def test_validator_rejects_tampered_npz_file_hash(tmp_path: Path) -> None:
+    from scripts.validate_anchor_proposal_cf_data import validate_counterfactual_asset
+
+    source_path, split = _source_manifest(tmp_path)
+    asset_dir = _write_asset(tmp_path, source_path=source_path, split=split)
+    manifest_path = asset_dir / "manifest.json"
+    asset = json.loads(manifest_path.read_text(encoding="utf-8"))
+    asset["files"][0]["npz_sha256"] = "0" * 64
+    canonical = dict(asset)
+    canonical.pop("manifest_sha256", None)
+    asset["manifest_sha256"] = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(asset, sort_keys=True, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="npz_sha256"):
+        validate_counterfactual_asset(asset_dir, source_path)
+
+
+def test_validator_rejects_terminal_false(tmp_path: Path) -> None:
+    from scripts.validate_anchor_proposal_cf_data import validate_counterfactual_asset
+
+    source_path, split = _source_manifest(tmp_path)
+    asset_dir = _write_asset(
+        tmp_path, source_path=source_path, split=split, terminal_done=False
+    )
+
+    with pytest.raises(ValueError, match="terminal_done"):
+        validate_counterfactual_asset(asset_dir, source_path)
+
+
+def test_validator_rejects_anchor_team_mismatch(tmp_path: Path) -> None:
+    from scripts.validate_anchor_proposal_cf_data import validate_counterfactual_asset
+
+    source_path, split = _source_manifest(tmp_path)
+    asset_dir = _write_asset(
+        tmp_path, source_path=source_path, split=split, candidate_team=[1]
+    )
+
+    with pytest.raises(ValueError, match="anchor"):
+        validate_counterfactual_asset(asset_dir, source_path)
+
+
+def test_validator_rejects_unknown_source(tmp_path: Path) -> None:
+    from scripts.validate_anchor_proposal_cf_data import validate_counterfactual_asset
+
+    source_path, split = _source_manifest(tmp_path)
+    asset_dir = _write_asset(
+        tmp_path, source_path=source_path, split=split, source="unknown"
+    )
+
+    with pytest.raises(ValueError, match="source"):
+        validate_counterfactual_asset(asset_dir, source_path)
+
+
+def test_validator_rejects_masked_candidate_worker(tmp_path: Path) -> None:
+    from scripts.validate_anchor_proposal_cf_data import validate_counterfactual_asset
+
+    source_path, split = _source_manifest(tmp_path)
+    asset_dir = _write_asset(
+        tmp_path,
+        source_path=source_path,
+        split=split,
+        candidate_team=[1],
+        source="one_swap",
+        worker_mask=np.asarray([False, True], dtype=np.bool_),
+    )
+
+    with pytest.raises(ValueError, match="worker_mask"):
         validate_counterfactual_asset(asset_dir, source_path)

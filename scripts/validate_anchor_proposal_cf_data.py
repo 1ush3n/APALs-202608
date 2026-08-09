@@ -39,7 +39,10 @@ META_FIELDS = {
     "baseline_makespan",
     "candidate_makespan",
     "relative_gain",
+    "episode_steps",
+    "terminal_done",
 }
+ALLOWED_SOURCES = {"anchor", "one_swap", "two_swap", "two_swap_hash"}
 EXPECTED_SPLIT_COUNTS = {"pretrain": 96, "frozen_diagnostic": 24, "ppo_only": 40}
 GAIN_TOLERANCE = 1.0e-12
 
@@ -220,7 +223,12 @@ def validate_counterfactual_asset(
     if asset.get("split_counts") != EXPECTED_SPLIT_COUNTS:
         raise ValueError("资产 split_counts 必须是 96/24/40")
     if asset.get("split") != expected_split:
-        raise ValueError("资产 split 与源 manifest 的确定性 SHA-256 切分不一致")
+        raise ValueError("asset split does not match source split")
+    command_args = asset.get("command_args")
+    if not isinstance(command_args, dict):
+        command_args = {}
+    max_episode_steps = int(command_args.get("max_episode_steps", 1200))
+    formal_asset = int(command_args.get("max_graphs", 0)) == 0
 
     entries = asset.get("files")
     if not isinstance(entries, list) or not entries:
@@ -237,7 +245,17 @@ def validate_counterfactual_asset(
             raise ValueError("资产 files 条目必须是对象")
         split_name = str(entry.get("split", ""))
         if split_name not in SAMPLE_SPLITS:
-            raise ValueError(f"样本不得位于 {split_name!r} split")
+            raise ValueError(f"sample is not in a supported split: {split_name!r}")
+        source_name = str(entry.get("source", ""))
+        if source_name not in ALLOWED_SOURCES:
+            raise ValueError(f"source is not allowed: {source_name!r}")
+        entry_steps = entry.get("episode_steps")
+        if isinstance(entry_steps, bool) or not isinstance(entry_steps, int) or entry_steps <= 0:
+            raise ValueError("episode_steps must be a positive integer")
+        if entry_steps > max_episode_steps:
+            raise ValueError("episode_steps exceeds max_episode_steps")
+        if entry.get("terminal_done") is not True:
+            raise ValueError("terminal_done must be true")
         graph_sha = str(entry.get("csv_sha256", ""))
         if graph_sha not in expected_split[split_name]:
             raise ValueError("样本 CSV SHA-256 与所属 split 不一致")
@@ -254,6 +272,12 @@ def validate_counterfactual_asset(
         seen_sample_hashes.add(sample_sha)
         npz_path = _resolve_inside(root, entry.get("npz"), label="npz")
         obs_path = _resolve_inside(root, entry.get("obs_pt"), label="obs_pt")
+        expected_npz_sha = str(entry.get("npz_sha256", ""))
+        expected_obs_sha = str(entry.get("obs_pt_sha256", ""))
+        if expected_npz_sha != _sha256_file(npz_path):
+            raise ValueError("npz_sha256 does not match file bytes")
+        if expected_obs_sha != _sha256_file(obs_path):
+            raise ValueError("obs_pt_sha256 does not match file bytes")
 
         with np.load(npz_path, allow_pickle=False) as data:
             if "meta" not in data.files:
@@ -263,9 +287,13 @@ def validate_counterfactual_asset(
         missing_fields = META_FIELDS - set(meta)
         if missing_fields:
             raise ValueError(f"NPZ meta 缺少字段：{sorted(missing_fields)}")
-        for name in ("csv_sha256", "state_seed", "task_id", "station_id", "anchor_team", "candidate_team", "source"):
+        for name in ("csv_sha256", "state_seed", "task_id", "station_id", "anchor_team", "candidate_team", "source", "episode_steps", "terminal_done"):
             if meta[name] != entry.get(name):
-                raise ValueError(f"NPZ meta.{name} 与 manifest 条目不一致")
+                raise ValueError(f"NPZ meta.{name} does not match manifest entry")
+        if meta["terminal_done"] is not True:
+            raise ValueError("terminal_done must be true in NPZ meta")
+        if isinstance(meta["episode_steps"], bool) or not isinstance(meta["episode_steps"], int):
+            raise ValueError("episode_steps must be an integer in NPZ meta")
         if meta["manifest_sha256"] != source_sha:
             raise ValueError("NPZ meta.manifest_sha256 与源 manifest 不一致")
         baseline = _as_finite_float(meta["baseline_makespan"], label="baseline_makespan")
@@ -288,12 +316,35 @@ def validate_counterfactual_asset(
         anchor = tuple(int(worker) for worker in entry["anchor_team"])
         team = tuple(int(worker) for worker in entry["candidate_team"])
         if not anchor or len(anchor) != len(team):
-            raise ValueError("candidate_team 必须与 anchor_team 具有相同非零人数")
+            raise ValueError("candidate_team must have the same nonzero size as anchor_team")
         if len(set(anchor)) != len(anchor) or len(set(team)) != len(team):
-            raise ValueError("团队存在重复工人")
+            raise ValueError("team contains duplicate workers")
+        worker_count = int(arrays["worker_x"].shape[0])
+        for label, members in (("anchor_team", anchor), ("candidate_team", team)):
+            for worker in members:
+                if worker < 0 or worker >= worker_count:
+                    raise ValueError(f"{label} worker id is out of range")
+                if bool(arrays["worker_mask"][worker]):
+                    raise ValueError(f"{label} worker violates worker_mask")
+        if source_name == "anchor":
+            if team != anchor:
+                raise ValueError("anchor candidate_team must equal anchor_team")
+            if abs(expected_gain) > GAIN_TOLERANCE:
+                raise ValueError("anchor relative_gain must be zero")
+        elif team == anchor:
+            raise ValueError("non-anchor candidate_team must differ from anchor_team")
         state_key = (graph_sha, str(entry["state_seed"]), int(entry["task_id"]), int(entry["station_id"]))
-        state_rows[state_key].append({"source": str(entry["source"]), "gain": expected_gain, "anchor": anchor, "team": team})
-        source_counts[str(entry["source"])] += 1
+        state_rows[state_key].append(
+            {
+                "source": source_name,
+                "gain": expected_gain,
+                "anchor": anchor,
+                "team": team,
+                "episode_steps": entry_steps,
+                "terminal_done": True,
+            }
+        )
+        source_counts[source_name] += 1
         split_counts[split_name] += 1
         if expected_gain > 0.0:
             positive_gains.append(expected_gain)
@@ -301,16 +352,39 @@ def validate_counterfactual_asset(
             differing_candidates += 1
 
     positive_states = 0
+    candidate_counts: list[int] = []
+    episode_steps_values: list[int] = []
+    graph_state_counts: Counter[str] = Counter()
     for state_key, rows in state_rows.items():
         anchors = [row for row in rows if row["source"] == "anchor"]
         if len(anchors) != 1:
-            raise ValueError(f"状态 {state_key} 必须恰好有一条 anchor 行")
+            raise ValueError(f"state {state_key} must contain exactly one anchor row")
         if abs(float(anchors[0]["gain"])) > GAIN_TOLERANCE:
-            raise ValueError(f"状态 {state_key} 的 anchor relative_gain 必须为 0")
+            raise ValueError(f"state {state_key} anchor relative_gain must be zero")
+        candidate_teams = [tuple(row["team"]) for row in rows]
+        if len(set(candidate_teams)) != len(candidate_teams):
+            raise ValueError(f"state {state_key} contains duplicate candidate_team")
+        if formal_asset and not 2 <= len(rows) <= 6:
+            raise ValueError(f"state {state_key} candidate count must be in [2, 6]")
+        candidate_counts.append(len(rows))
+        episode_steps_values.extend(int(row["episode_steps"]) for row in rows)
+        graph_state_counts[state_key[0]] += 1
         if any(float(row["gain"]) > 0.0 for row in rows):
             positive_states += 1
 
+    if formal_asset:
+        expected_graphs = set(expected_split["pretrain"] + expected_split["frozen_diagnostic"])
+        observed_graphs = set(graph_state_counts)
+        if observed_graphs != expected_graphs:
+            raise ValueError("all 120 sample-bearing graphs must appear in samples")
+        bad_graphs = {
+            graph_sha for graph_sha in expected_graphs if graph_state_counts[graph_sha] != 4
+        }
+        if bad_graphs:
+            raise ValueError("each sample-bearing graph must contain exactly four states")
     actual_sample_counts = {name: int(split_counts[name]) for name in SPLIT_NAMES}
+    if actual_sample_counts["ppo_only"] != 0:
+        raise ValueError("ppo_only must contain zero samples")
     if asset.get("sample_counts") != actual_sample_counts:
         raise ValueError("资产 sample_counts 与 files 实际计数不一致")
     return {
@@ -323,6 +397,19 @@ def validate_counterfactual_asset(
         "positive_gain_quantiles": _quantiles(positive_gains),
         "states_with_positive_candidate": positive_states,
         "candidate_differs_from_anchor_fraction": float(differing_candidates / len(entries)),
+        "sample_graph_count": len(graph_state_counts),
+        "sample_graph_counts_by_split": {
+            name: len(
+                set(graph_sha for graph_sha in graph_state_counts if graph_sha in expected_split[name])
+            )
+            for name in SAMPLE_SPLITS
+        },
+        "candidate_count_summary": {
+            "min": int(min(candidate_counts)),
+            "max": int(max(candidate_counts)),
+            "total": int(sum(candidate_counts)),
+        },
+        "episode_steps_summary": _quantiles([float(value) for value in episode_steps_values]),
         "source_manifest_sha256": source_sha,
         "asset_manifest_sha256": str(asset["manifest_sha256"]),
         "worker_mapping_reference": "data/680.csv configures the 100-worker initial scheduling universe only; samples come from source manifest CSVs.",

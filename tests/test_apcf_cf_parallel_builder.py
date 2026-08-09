@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 def test_plan_graph_jobs_preserves_split_and_manifest_order() -> None:
@@ -98,3 +103,260 @@ def test_merge_graph_artifacts_reuses_shared_observation_file(tmp_path: Path) ->
     assert all(row["obs_pt"] == "samples/obs_shared.pt" for row in rows)
     assert (output_dir / "samples" / "obs_shared.pt").is_file()
     assert not worker_dir.exists()
+
+
+def _run_build_args(tmp_path: Path) -> SimpleNamespace:
+    """构造 run_build 所需的参数；源 manifest 与映射数据均为临时文件。"""
+    manifest = tmp_path / "source_manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "protocol": "explicit_fiveskill_v1",
+                "files": [
+                    {"file": "syn_x.csv", "sha256": hashlib.sha256(b"x").hexdigest()}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    data_file = tmp_path / "ref.csv"
+    data_file.write_bytes(b"ref")
+    return SimpleNamespace(
+        manifest=str(manifest),
+        data_file=str(data_file),
+        output_dir=str(tmp_path / "asset"),
+        max_graphs=0,
+        max_episode_steps=1200,
+        max_candidates=4,
+        workers=1,
+        worker_torch_threads=1,
+        seed=42,
+    )
+
+
+def test_run_build_workers_tmp_outside_asset_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worker 临时分片必须位于系统临时目录，而不是正式资产目录内。"""
+    import scripts.build_anchor_proposal_cf_data as build_mod
+
+    workers_tmp = tmp_path / "workers_tmp"
+    workers_tmp.mkdir()
+    monkeypatch.setattr(
+        build_mod,
+        "tempfile",
+        SimpleNamespace(mkdtemp=lambda prefix: str(workers_tmp)),
+    )
+    # 空任务计划：跳过真实 CSV 构建，只验证临时目录位置与清理。
+    monkeypatch.setattr(build_mod, "_plan_graph_jobs", lambda split, max_graphs: [])
+
+    result = build_mod.run_build(_run_build_args(tmp_path))
+
+    assert result["samples"] == 0
+    output_dir = tmp_path / "asset"
+    assert not (output_dir / ".workers").exists()
+    assert not workers_tmp.exists(), "构建结束后 worker 临时目录必须被清理"
+    assert sorted(path.name for path in output_dir.iterdir()) == [
+        "manifest.json",
+        "samples",
+    ]
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["command_args"]["worker_tmp_dir"] == str(workers_tmp)
+    assert str(workers_tmp) not in str(output_dir)
+
+
+def test_run_build_worker_exception_cleans_tmp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worker 异常时，主进程 finally 必须仍清理系统临时目录并传播异常。"""
+    import scripts.build_anchor_proposal_cf_data as build_mod
+
+    workers_tmp = tmp_path / "workers_tmp"
+    workers_tmp.mkdir()
+    monkeypatch.setattr(
+        build_mod,
+        "tempfile",
+        SimpleNamespace(mkdtemp=lambda prefix: str(workers_tmp)),
+    )
+    job = build_mod.GraphBuildJob(
+        index=0,
+        split="pretrain",
+        file_name="syn_x.csv",
+        csv_sha256="x" * 64,
+    )
+    monkeypatch.setattr(build_mod, "_plan_graph_jobs", lambda split, max_graphs: [job])
+
+    # 让 run_build 的 CSV 存在性检查通过：把 data/scale_400_800_datasets/ 下
+    # 不存在的路径重定向到临时假文件，从而真正执行到被 monkeypatch 的 worker。
+    real_workspace_path = build_mod._workspace_path
+    fake_csv = tmp_path / "syn_x.csv"
+    fake_csv.write_bytes(b"csv")
+
+    def _fake_workspace_path(value: str | Path) -> Path:
+        path = real_workspace_path(value)
+        if "scale_400_800_datasets" in str(path) and not path.is_file():
+            return fake_csv
+        return path
+
+    monkeypatch.setattr(build_mod, "_workspace_path", _fake_workspace_path)
+
+    def _boom(request: build_mod.GraphBuildRequest) -> None:
+        raise RuntimeError("worker boom")
+
+    monkeypatch.setattr(build_mod, "_build_graph_worker", _boom)
+    monkeypatch.setattr(
+        build_mod,
+        "_run_graph_preflight",
+        lambda requests, workers: [
+            build_mod.GraphPreflightResult(requests[0].job, (), 0)
+        ],
+    )
+    monkeypatch.setattr(build_mod, "_validate_preflight_results", lambda results: results)
+
+    with pytest.raises(RuntimeError, match="worker boom"):
+        build_mod.run_build(_run_build_args(tmp_path))
+
+    output_dir = tmp_path / "asset"
+    assert not (output_dir / ".workers").exists()
+    assert not workers_tmp.exists(), "异常路径也必须清理 worker 临时目录"
+
+
+def test_run_build_parallel_pool_empty_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """workers>1 时 spawn 池正常启停；空任务计划下不产生任何正式残留。"""
+    import scripts.build_anchor_proposal_cf_data as build_mod
+
+    workers_tmp = tmp_path / "workers_tmp"
+    workers_tmp.mkdir()
+    monkeypatch.setattr(
+        build_mod,
+        "tempfile",
+        SimpleNamespace(mkdtemp=lambda prefix: str(workers_tmp)),
+    )
+    monkeypatch.setattr(build_mod, "_plan_graph_jobs", lambda split, max_graphs: [])
+    args = _run_build_args(tmp_path)
+    args.workers = 2
+
+    result = build_mod.run_build(args)
+
+    assert result["samples"] == 0
+    assert not workers_tmp.exists()
+    assert not (tmp_path / "asset" / ".workers").exists()
+
+
+def test_run_build_reuses_existing_empty_output_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.build_anchor_proposal_cf_data as build_mod
+
+    output_dir = tmp_path / "asset"
+    output_dir.mkdir()
+    monkeypatch.setattr(build_mod, "_plan_graph_jobs", lambda split, max_graphs: [])
+    result = build_mod.run_build(_run_build_args(tmp_path))
+    assert result["samples"] == 0
+    assert (output_dir / "manifest.json").is_file()
+
+
+def test_run_build_rejects_nonempty_output_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import scripts.build_anchor_proposal_cf_data as build_mod
+
+    output_dir = tmp_path / "asset"
+    output_dir.mkdir()
+    (output_dir / "existing.txt").write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(build_mod, "_plan_graph_jobs", lambda split, max_graphs: [])
+    with pytest.raises(FileExistsError, match="empty"):
+        build_mod.run_build(_run_build_args(tmp_path))
+
+
+def test_run_build_preserves_worker_and_cleanup_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.build_anchor_proposal_cf_data as build_mod
+
+    workers_tmp = tmp_path / "workers_tmp"
+    workers_tmp.mkdir()
+    monkeypatch.setattr(
+        build_mod,
+        "tempfile",
+        SimpleNamespace(mkdtemp=lambda prefix: str(workers_tmp)),
+    )
+    job = build_mod.GraphBuildJob(0, "pretrain", "syn_x.csv", "x" * 64)
+    monkeypatch.setattr(build_mod, "_plan_graph_jobs", lambda split, max_graphs: [job])
+    real_workspace_path = build_mod._workspace_path
+    fake_csv = tmp_path / "syn_x.csv"
+    fake_csv.write_bytes(b"csv")
+
+    def fake_workspace_path(value: str | Path) -> Path:
+        path = real_workspace_path(value)
+        if "scale_400_800_datasets" in str(path) and not path.is_file():
+            return fake_csv
+        return path
+
+    monkeypatch.setattr(build_mod, "_workspace_path", fake_workspace_path)
+    monkeypatch.setattr(
+        build_mod,
+        "_run_graph_preflight",
+        lambda requests, workers: [
+            build_mod.GraphPreflightResult(requests[0].job, (), 0)
+        ],
+    )
+    monkeypatch.setattr(build_mod, "_validate_preflight_results", lambda results: results)
+    monkeypatch.setattr(
+        build_mod,
+        "_build_graph_worker",
+        lambda request: (_ for _ in ()).throw(RuntimeError("worker boom")),
+    )
+    monkeypatch.setattr(
+        build_mod.shutil,
+        "rmtree",
+        lambda path: (_ for _ in ()).throw(OSError("cleanup boom")),
+    )
+
+    with pytest.raises(BaseExceptionGroup) as captured:
+        build_mod.run_build(_run_build_args(tmp_path))
+    message = " ".join(str(exc) for exc in captured.value.exceptions)
+    assert "worker boom" in message
+    assert "cleanup boom" in message
+    assert str(workers_tmp) in message
+
+
+def test_run_build_raises_cleanup_error_without_worker_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.build_anchor_proposal_cf_data as build_mod
+
+    workers_tmp = tmp_path / "workers_tmp"
+    workers_tmp.mkdir()
+    monkeypatch.setattr(
+        build_mod,
+        "tempfile",
+        SimpleNamespace(mkdtemp=lambda prefix: str(workers_tmp)),
+    )
+    monkeypatch.setattr(build_mod, "_plan_graph_jobs", lambda split, max_graphs: [])
+    monkeypatch.setattr(
+        build_mod.shutil,
+        "rmtree",
+        lambda path: (_ for _ in ()).throw(OSError("cleanup boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup boom"):
+        build_mod.run_build(_run_build_args(tmp_path))
+
+
+def test_preflight_rejects_graph_without_four_distinct_states() -> None:
+    from scripts.build_anchor_proposal_cf_data import (
+        GraphBuildJob,
+        GraphPreflightResult,
+        _validate_preflight_results,
+    )
+
+    job = GraphBuildJob(0, "pretrain", "syn_x.csv", "x" * 64)
+    result = GraphPreflightResult(job, (("x" * 64, 1, 0, 0, (0,)),), 7)
+    with pytest.raises(ValueError, match="4"):
+        _validate_preflight_results([result])
+
+
+def test_replayed_state_must_match_preflight_key() -> None:
+    from scripts.build_anchor_proposal_cf_data import _assert_state_key_matches
+
+    expected = ("x" * 64, 3, 0, 0, (0,))
+    actual = ("x" * 64, 3, 0, 0, (1,))
+    with pytest.raises(RuntimeError, match="preflight"):
+        _assert_state_key_matches(expected, actual)
