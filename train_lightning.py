@@ -150,12 +150,15 @@ def _save_rollout_checkpoint(
     path: Path,
 ) -> None:
     """以与训练期评估一致的参数态保存 Lightning checkpoint。"""
+    def _save(target: Path) -> None:
+        trainer.save_checkpoint(str(target))
+        _ensure_checkpoint_metadata(Path(target), pl_module)
     agent = getattr(pl_module, "agent", None)
     if agent is None:
-        trainer.save_checkpoint(str(path))
+        _save(path)
         return
     state = save_checkpoint_with_schedulefree_eval_parameters(
-        save_checkpoint=lambda target: trainer.save_checkpoint(str(target)),
+        save_checkpoint=_save,
         path=Path(path),
         optimizer=agent.optimizer,
         schedulefree_enabled=bool(getattr(agent, "use_schedule_free", False)),
@@ -168,6 +171,23 @@ def _save_rollout_checkpoint(
         )
 
 
+def _ensure_checkpoint_metadata(path: Path, pl_module: APALLightningModule) -> None:
+    """?? callback ??????????? Lightning/APAL metadata?"""
+    checkpoint_path = Path(path)
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    metadata = payload.get("apal_metadata") if isinstance(payload, dict) else None
+    model_spec = metadata.get("model_spec") if isinstance(metadata, dict) else None
+    if isinstance(metadata, dict) and isinstance(model_spec, dict):
+        return
+    if not isinstance(payload, dict):
+        raise TypeError(f"Lightning checkpoint payload ??? dict: {checkpoint_path}")
+    pl_module.on_save_checkpoint(payload)
+    repaired_metadata = payload.get("apal_metadata")
+    if not isinstance(repaired_metadata, dict) or not isinstance(
+        repaired_metadata.get("model_spec"), dict
+    ):
+        raise RuntimeError(f"???? APAL checkpoint metadata: {checkpoint_path}")
+    torch.save(payload, checkpoint_path)
 def _resume_start_episode(checkpoint_payload: object) -> int:
     """校验已保存 PPO episode 与 Lightning 循环进度，并返回下一轮绝对 episode。"""
     if not isinstance(checkpoint_payload, dict):
@@ -286,6 +306,7 @@ def _maybe_load_apcf_pretrain(model: torch.nn.Module, device: torch.device, *, r
             f"checkpoint={recorded_manifest_sha256}，当前配置={manifest_sha256}（{manifest_path}）"
         )
     load_policy_weights(model, checkpoint, strict=True)
+    configs.apcf_pretrain_loaded_model_key_count = len(checkpoint.state_dict)
     configs.anchor_proposal_pretrain_source_sha256 = _sha256_file(pretrain_path)
     print(
         f"[APCF-Pretrain] 已加载预训练 checkpoint {pretrain_path} "
@@ -506,6 +527,44 @@ class RolloutCheckpoint(Callback):
             self.async_manager.terminate_for_exception()
 
 
+def record_apcf_pretrain_load(
+    manifest_path: Path,
+    *,
+    source_sha256: str,
+    loaded_model_key_count: int,
+) -> None:
+    if not str(source_sha256).strip():
+        raise ValueError("source_sha256 ?????APCF ??????????")
+    if int(loaded_model_key_count) <= 0:
+        raise ValueError("loaded_model_key_count ??????APCF ??????????")
+    payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"run_manifest ??? JSON ???{manifest_path}")
+    payload["apcf_pretrain_loaded"] = True
+    payload["apcf_pretrain_source_sha256"] = str(source_sha256)
+    payload["apcf_pretrain_loaded_model_key_count"] = int(loaded_model_key_count)
+    Path(manifest_path).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _validate_apcf_smoke_output_paths(checkpoint_paths: dict[str, Path]) -> None:
+    raw_root = str(getattr(configs, "apcf_smoke_guard_root", "") or "").strip()
+    if not raw_root:
+        return
+    root = resolve_workspace_path(raw_root).resolve()
+    if root.parent.name != ".pytest_tmp" or not root.name.startswith("apcf_ppo_smoke_s42_"):
+        raise ValueError(f"APCF smoke ??????? .pytest_tmp ??{root}")
+    from runtime.artifacts import assert_apcf_smoke_output_isolated
+    log_root = resolve_tensorboard_log_root(configs).resolve()
+    output_paths = [
+        Path(checkpoint_paths["model_dir"]),
+        Path(checkpoint_paths["lightning_dir"]),
+        Path(checkpoint_paths["lightning_latest"]),
+        log_root,
+    ]
+    assert_apcf_smoke_output_isolated(root, output_paths)
 def run(args, *, config_initialized: bool = False) -> None:
     if not config_initialized:
         initialize_training_config(args)
@@ -514,6 +573,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     _validate_async_eval_target()
 
     checkpoint_paths = resolve_checkpoint_paths(configs)
+    _validate_apcf_smoke_output_paths(checkpoint_paths)
     checkpoint_dir = checkpoint_paths["lightning_dir"]
     start_episode = 1
     if args.resume:
@@ -576,7 +636,7 @@ def run(args, *, config_initialized: bool = False) -> None:
         if not initial_manifest_path:
             raise ValueError("正式初始调度训练必须配置 explicit_fiveskill_v1 training_manifest_path")
         train_paths = resolve_explicit_five_skill_initial_training_paths(initial_manifest_path, train_path)
-        print(f"[Initial] 已通过五技能协议及训练文件精确绑定: {initial_manifest_path}", flush=True)
+        print(f"[Initial] 已通过五技能协议及 manifest 权威绑定: {initial_manifest_path}", flush=True)
     vector_data_source = tuple(str(path) for path in train_paths)
     vector_env = VectorEnv(
         EnvCreator(vector_data_source, seed_offset=int(configs.seed)),
@@ -590,6 +650,15 @@ def run(args, *, config_initialized: bool = False) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = HBGATPN(configs).to(device)
     _maybe_load_apcf_pretrain(model, device, resume=bool(args.resume))
+    if (
+        not bool(args.resume)
+        and str(getattr(configs, "policy_action_scope", "")) == _APCF_SCOPE
+    ):
+        record_apcf_pretrain_load(
+            checkpoint_dir / "run_manifest.json",
+            source_sha256=str(configs.anchor_proposal_pretrain_source_sha256),
+            loaded_model_key_count=int(configs.apcf_pretrain_loaded_model_key_count),
+        )
     _maybe_load_reschedule_warm_start(model, device, resume=bool(args.resume))
     if getattr(configs, 'use_compile', False):
         try:

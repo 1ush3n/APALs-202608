@@ -12,6 +12,7 @@ from torch_geometric.nn import (
     global_mean_pool,
 )
 from configs import configs
+from models.worker_pointer_context import WorkerPointerV2State, WorkerPressureContext
 
 # ---------------------------------------------------------------------------
 # 辅助函数: 动态获取激活函数 (防止 ReLU 死亡)
@@ -378,6 +379,25 @@ class WorkerPointer(nn.Module):
         # Stop Head: 预测是否停止选人 [Logit_Continue, Logit_Stop]
         self.stop_head = nn.Linear(config.hidden_dim * 2, 2) 
 
+        if str(getattr(config, "team_selection_mode", "autoregressive")) == "autoregressive_pressure_v2":
+            # v2 专属参数使用局部确定性种子；退出后恢复全局 RNG，避免改变共享模块初始化序列。
+            local_seed = int(getattr(config, "seed", 42)) + int(
+                getattr(config, "worker_pointer_v2_init_seed_offset", 1009)
+            )
+            with torch.random.fork_rng(devices=[], enabled=True):
+                torch.manual_seed(local_seed)
+                hidden_dim = int(config.hidden_dim)
+                self.v2_member_proj = nn.Linear(hidden_dim, hidden_dim)
+                self.v2_team_proj = nn.Sequential(
+                    nn.Linear(hidden_dim * 3, hidden_dim),
+                    get_activation(),
+                )
+                # query shape: task H + station H + global 3H + team H + pressure/team/progress 17
+                self.v2_query_proj = nn.Linear(hidden_dim * 6 + 17, hidden_dim)
+                # key shape: worker H + long/near exposure 10 + two maximum exposures
+                self.v2_key_proj = nn.Linear(hidden_dim + 12, hidden_dim)
+                self.v2_attn = nn.Linear(hidden_dim, 1)
+
     def forward_choice(self, task_emb, worker_embs, mask=None, current_team_emb=None):
         """选择下一个工人"""
         if (
@@ -419,6 +439,133 @@ class WorkerPointer(nn.Module):
         cat_feat = torch.cat([task_emb, current_team_emb], dim=1)
         logits = self.stop_head(cat_feat) 
         return logits
+
+    def initialize_v2_state(
+        self,
+        *,
+        batch_size: int,
+        device: torch.device,
+    ) -> WorkerPointerV2State:
+        """创建空团队状态；仅允许 v2 模式调用。"""
+
+        if not hasattr(self, "v2_member_proj"):
+            raise RuntimeError("legacy WorkerPointer 不支持 v2 团队状态")
+        hidden_dim = int(self.config.hidden_dim)
+        dtype = self.v2_member_proj.weight.dtype
+        return WorkerPointerV2State(
+            mapped_sum=torch.zeros((batch_size, hidden_dim), device=device, dtype=dtype),
+            mapped_max=torch.zeros((batch_size, hidden_dim), device=device, dtype=dtype),
+            count=torch.zeros((batch_size, 1), device=device, dtype=dtype),
+            selected_skill_sum=torch.zeros(
+                (batch_size, 5), device=device, dtype=torch.float32
+            ),
+        )
+
+    def advance_v2_state(
+        self,
+        state: WorkerPointerV2State,
+        selected_worker_emb: torch.Tensor,
+        selected_worker_skills: torch.Tensor,
+        valid: torch.Tensor | None = None,
+    ) -> WorkerPointerV2State:
+        """以一个自回归选择增量更新 sum/max/count 和技能消耗。"""
+
+        assert selected_worker_emb.ndim == 2
+        assert selected_worker_skills.ndim == 2 and selected_worker_skills.size(-1) == 5
+        batch_size = selected_worker_emb.size(0)
+        assert state.count.shape == (batch_size, 1)
+        valid_mask = (
+            torch.ones((batch_size, 1), dtype=torch.bool, device=selected_worker_emb.device)
+            if valid is None
+            else valid.to(device=selected_worker_emb.device, dtype=torch.bool).reshape(batch_size, 1)
+        )
+        mapped = self.v2_member_proj(selected_worker_emb)  # [B,H] -> [B,H]
+        mapped_for_state = mapped.to(state.mapped_sum.dtype)
+        next_sum = state.mapped_sum + mapped_for_state * valid_mask.to(mapped_for_state.dtype)
+        first_member = state.count <= 0
+        candidate_max = torch.where(
+            first_member,
+            mapped_for_state,
+            torch.maximum(state.mapped_max, mapped_for_state),
+        )
+        next_max = torch.where(valid_mask, candidate_max, state.mapped_max)
+        next_count = state.count + valid_mask.to(state.count.dtype)
+        next_skills = state.selected_skill_sum + (
+            selected_worker_skills.float() * valid_mask.float()
+        )
+        return WorkerPointerV2State(next_sum, next_max, next_count, next_skills)
+
+    def v2_team_representation(self, state: WorkerPointerV2State) -> torch.Tensor:
+        """返回顺序不敏感的 sum+mean+max 团队表示。"""
+
+        nonempty = state.count > 0
+        mean = state.mapped_sum / state.count.clamp_min(1.0)
+        maximum = torch.where(nonempty, state.mapped_max, torch.zeros_like(state.mapped_max))
+        # input shape: [B,H] * 3 -> [B,3H] -> [B,H]
+        return self.v2_team_proj(torch.cat([state.mapped_sum, mean, maximum], dim=-1))
+
+    def forward_choice_v2(
+        self,
+        *,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        global_context: torch.Tensor,
+        worker_embs: torch.Tensor,
+        pressure_context: WorkerPressureContext,
+        team_state: WorkerPointerV2State,
+        demand: torch.Tensor,
+        mask: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """以增强状态表达执行原始 ``tanh(query + key)`` pointer 打分。"""
+
+        batch_size, num_workers, hidden_dim = worker_embs.shape
+        assert task_emb.shape == station_emb.shape == (batch_size, hidden_dim)
+        assert global_context.shape == (batch_size, hidden_dim * 3)
+        assert pressure_context.pressure_all.shape == (batch_size, 5)
+        assert pressure_context.candidate_exposure.shape == (batch_size, num_workers, 10)
+        assert demand.reshape(-1).shape == (batch_size,)
+        dtype = task_emb.dtype
+        team_repr = self.v2_team_representation(team_state).to(dtype=dtype)
+        epsilon = float(getattr(self.config, "worker_pointer_supply_epsilon", 1.0e-6))
+        consumption = (
+            team_state.selected_skill_sum
+            / pressure_context.supply_all.clamp_min(epsilon)
+        ).to(dtype=dtype)
+        demand_f = demand.to(device=task_emb.device, dtype=torch.float32).reshape(-1).clamp_min(1.0)
+        selected_count = team_state.count.float().reshape(-1)
+        progress = torch.stack(
+            [selected_count / demand_f, (demand_f - selected_count).clamp_min(0.0) / demand_f],
+            dim=-1,
+        ).to(dtype=dtype)
+        query_features = torch.cat(
+            [
+                task_emb,
+                station_emb,
+                global_context,
+                team_repr,
+                pressure_context.pressure_all.to(device=task_emb.device, dtype=dtype),
+                pressure_context.pressure_near.to(device=task_emb.device, dtype=dtype),
+                consumption,
+                progress,
+            ],
+            dim=-1,
+        )  # [B,6H+17]
+        candidate_features = torch.cat(
+            [
+                worker_embs,
+                pressure_context.candidate_exposure.to(device=worker_embs.device, dtype=worker_embs.dtype),
+                pressure_context.candidate_max_exposure.to(device=worker_embs.device, dtype=worker_embs.dtype),
+            ],
+            dim=-1,
+        )  # [B,N,H+12]
+        query = self.v2_query_proj(query_features).unsqueeze(1)  # [B,1,H]
+        keys = self.v2_key_proj(candidate_features)  # [B,N,H]
+        scores = self.v2_attn(torch.tanh(query + keys)).squeeze(-1)  # [B,N]
+        # 后续可控消融可比较 query-candidate 交互 MLP 或 legacy score+压力残差；本轮不实现。
+        if mask is not None:
+            assert mask.shape == (batch_size, num_workers)
+            scores = scores.masked_fill(mask, -1.0e4)
+        return scores
 
 
 class ConditionalTeamSelector(nn.Module):

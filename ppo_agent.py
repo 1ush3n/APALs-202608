@@ -11,14 +11,16 @@ import gc
 import random
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Tuple, List, Dict, Optional, Any
 from torch_geometric.data import HeteroData
 from torch_geometric.utils import to_dense_batch
 from configs import configs
 from core.action_completion import EarliestFinishActionCompleter, TeamCandidates
+from models.worker_pointer_context import WorkerPressureContext, build_worker_pressure_context
 from worker_feature_layout import resolve_worker_feature_layout
 from training.best_anchor_teacher import BestAnchorTeacherManager
+from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
 try:
     from schedulefree import AdamWScheduleFree
 except ImportError:
@@ -71,6 +73,10 @@ class FrozenAnchorProposalTrace:
     predicted_delta_a: float
     gate_value: float
     raw_branch_logit_gap: float
+    sampled_proposal_branch_logprob: float = 0.0
+    sampled_task_embedding: torch.Tensor | None = field(default=None, repr=False, compare=False)
+    sampled_station_embedding: torch.Tensor | None = field(default=None, repr=False, compare=False)
+    sampled_worker_embeddings: torch.Tensor | None = field(default=None, repr=False, compare=False)
 
 
 class PPOAgent:
@@ -99,6 +105,8 @@ class PPOAgent:
         # 仅供 rollout_service 在同一次批量解码后立即写入 Memory；不参与 checkpoint。
         self.last_gated_team_trace: FrozenGatedTeamTrace | None = None
         self.last_gated_team_traces: list[FrozenGatedTeamTrace | None] = []
+        self.worker_pointer_v2_diagnostics = WorkerPointerV2Diagnostics(num_skills=5)
+        self.worker_pointer_v2_coverage_checked = False
         self.last_anchor_proposal_traces: list[FrozenAnchorProposalTrace | None] = []
         self._apcf_update_count: int = 0
         
@@ -180,8 +188,15 @@ class PPOAgent:
         self.total_timesteps = max(1, total_timesteps)
         self.current_step = 0
         self.amp_device_type = self.device.type if isinstance(self.device, torch.device) else str(self.device)
-        self.amp_enabled = self.amp_device_type == "cuda"
-        self.scaler = torch.amp.GradScaler(self.amp_device_type, enabled=self.amp_enabled)
+        (
+            self.amp_enabled,
+            self.amp_dtype,
+            scaler_enabled,
+        ) = self.resolve_amp_settings(
+            str(getattr(self.config, "lightning_precision", "16-mixed")),
+            self.amp_device_type,
+        )
+        self.scaler = torch.amp.GradScaler(self.amp_device_type, enabled=scaler_enabled)
         self.best_anchor_teacher: BestAnchorTeacherManager | None = None
         if bool(getattr(self.config, "best_anchor_distill_enabled", False)):
             if teacher_model_factory is None or teacher_checkpoint_dir is None:
@@ -197,11 +212,135 @@ class PPOAgent:
         
         # 鑷€傚簲璇勪及鏂版棫绛栫暐宸窛 (KL鏁ｅ害) 鐨勬柟娉曞湪 update 灏鹃儴鍙樺姩 LR銆?
 
-    def autocast_context(self):
+    @staticmethod
+    def resolve_amp_settings(
+        precision: str,
+        device_type: str,
+    ) -> tuple[bool, torch.dtype | None, bool]:
+        """把 Lightning 精度语义映射为 PPO 内部 autocast 与缩放器配置。"""
+        if device_type != "cuda":
+            return False, None, False
+        normalized = str(precision).strip().lower()
+        if normalized == "16-mixed":
+            return True, torch.float16, True
+        if normalized == "bf16-mixed":
+            return True, torch.bfloat16, False
+        if normalized == "32-true":
+            return False, None, False
+        raise ValueError(f"不支持的 lightning_precision: {precision}")
+
+    def autocast_context(self) -> Any:
         """返回与当前设备匹配的 AMP 上下文，CPU 路径默认禁用混合精度。"""
         if self.amp_enabled:
-            return torch.amp.autocast(device_type=self.amp_device_type)
+            assert self.amp_dtype is not None
+            return torch.amp.autocast(
+                device_type=self.amp_device_type,
+                dtype=self.amp_dtype,
+            )
         return nullcontext()
+
+    def _build_v2_pressure_context(
+        self,
+        *,
+        task_features: torch.Tensor,
+        worker_features: torch.Tensor,
+        task_present: torch.Tensor | None,
+        task_action_invalid: torch.Tensor | None,
+        worker_present: torch.Tensor | None,
+        worker_queue_invalid: torch.Tensor | None,
+    ) -> WorkerPressureContext:
+        """统一构造 rollout、eval 与 PPO 重算共用的 v2 压力上下文。"""
+
+        if task_features.ndim == 2:
+            task_features = task_features.unsqueeze(0)
+        if worker_features.ndim == 2:
+            worker_features = worker_features.unsqueeze(0)
+        task_features = task_features.to(self.device)
+        worker_features = worker_features.to(self.device)
+        batch_size, num_tasks, _ = task_features.shape
+        worker_batch, num_workers, _ = worker_features.shape
+        assert batch_size == worker_batch
+        if task_present is None:
+            task_present = torch.ones((batch_size, num_tasks), dtype=torch.bool, device=self.device)
+        if task_action_invalid is None:
+            task_action_invalid = torch.zeros((batch_size, num_tasks), dtype=torch.bool, device=self.device)
+        if worker_present is None:
+            worker_present = torch.ones((batch_size, num_workers), dtype=torch.bool, device=self.device)
+        if worker_queue_invalid is None:
+            worker_queue_invalid = torch.zeros((batch_size, num_workers), dtype=torch.bool, device=self.device)
+        return build_worker_pressure_context(
+            task_features=task_features,
+            worker_features=worker_features,
+            task_present=task_present.to(self.device).reshape(batch_size, num_tasks),
+            task_action_invalid=task_action_invalid.to(self.device).reshape(batch_size, num_tasks),
+            worker_present=worker_present.to(self.device).reshape(batch_size, num_workers),
+            worker_queue_invalid=worker_queue_invalid.to(self.device).reshape(batch_size, num_workers),
+            temperature=float(self.config.worker_pointer_pressure_temperature),
+            supply_epsilon=float(self.config.worker_pointer_supply_epsilon),
+        )
+
+    def reset_worker_pointer_v2_diagnostics(self) -> None:
+        self.worker_pointer_v2_diagnostics.reset()
+
+    def finalize_worker_pointer_v2_diagnostics(self) -> dict[str, float]:
+        require_coverage = not self.worker_pointer_v2_coverage_checked
+        metrics = self.worker_pointer_v2_diagnostics.finalize(
+            require_coverage=require_coverage
+        )
+        if require_coverage:
+            self.worker_pointer_v2_coverage_checked = True
+        return metrics
+
+    def _apcf_float32_pointer_logits(
+        self,
+        policy: Any,
+        *,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        anchor_emb: torch.Tensor,
+        worker_embs: torch.Tensor,
+        mask: torch.Tensor,
+        current_team_emb: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """? float32 APCF pointer head ?? rollout/recompute ? AMP ?????"""
+        if policy.anchor_team_head is None:
+            raise RuntimeError("APCF ?? anchor_team_head")
+        context = current_team_emb.float() if current_team_emb is not None else None
+        with torch.autocast(device_type=self.amp_device_type, enabled=False):
+            scores = policy.anchor_team_head.forward_choice(
+                task_emb.float(),
+                station_emb.float(),
+                anchor_emb.float(),
+                worker_embs.float(),
+                mask=mask,
+                current_team_emb=context,
+            )
+        return scores.float()
+
+    def _apcf_float32_gate_logits(
+        self,
+        policy: Any,
+        *,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        anchor_emb: torch.Tensor,
+        proposal_emb: torch.Tensor,
+        gate_features: torch.Tensor,
+        hamming: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """? float32 APCF gate head ???? logits ?????"""
+        if policy.anchor_proposal_gate is None:
+            raise RuntimeError("APCF ?? anchor_proposal_gate")
+        with torch.autocast(device_type=self.amp_device_type, enabled=False):
+            branch_logits, delta_a, gate_value = policy.anchor_proposal_gate(
+                task_emb.float(),
+                station_emb.float(),
+                anchor_emb.float(),
+                proposal_emb.float(),
+                gate_features.float(),
+                hamming.float(),
+            )
+        return branch_logits.float(), delta_a.float(), gate_value.float()
 
     def _make_schedulefree_teacher_optimizer(self, model: torch.nn.Module) -> Any:
         """为冻结教师恢复 ScheduleFree 的评估态，不加入学生优化图。"""
@@ -586,15 +725,15 @@ class PPOAgent:
                 if proposal_seq
                 else None
             )
-            with self.autocast_context():
-                scores = policy.anchor_team_head.forward_choice(
-                    task_emb,
-                    station_emb,
-                    anchor_emb,
-                    worker_embs3,
-                    mask=step_illegal.reshape(1, -1),
-                    current_team_emb=context,
-                )
+            scores = self._apcf_float32_pointer_logits(
+                policy=policy,
+                task_emb=task_emb,
+                station_emb=station_emb,
+                anchor_emb=anchor_emb,
+                worker_embs=worker_embs3,
+                mask=step_illegal.reshape(1, -1),
+                current_team_emb=context,
+            )
             scores_float = scores.float()
             if torch.isnan(scores_float).any():
                 scores_float = torch.nan_to_num(scores_float, nan=-1.0e4)
@@ -664,15 +803,15 @@ class PPOAgent:
             device=device,
         ).reshape(1, -1)
         gate_features_flat = tuple(float(value) for value in gate_features.reshape(-1).tolist())
-        with self.autocast_context():
-            branch_logits, _delta_a, _gate_val = policy.anchor_proposal_gate(
-                task_emb,
-                station_emb,
-                anchor_emb,
-                proposal_emb,
-                gate_features,
-                torch.tensor([[float(hamming)]], dtype=torch.float32, device=device),
-            )
+        branch_logits, _delta_a, _gate_val = self._apcf_float32_gate_logits(
+            policy=policy,
+            task_emb=task_emb,
+            station_emb=station_emb,
+            anchor_emb=anchor_emb,
+            proposal_emb=proposal_emb,
+            gate_features=gate_features,
+            hamming=torch.tensor([[float(hamming)]], dtype=torch.float32, device=device),
+        )
         branch_logits = branch_logits.float()
         if torch.isnan(branch_logits).any():
             branch_logits = torch.nan_to_num(branch_logits, nan=-1.0e4)
@@ -709,6 +848,10 @@ class PPOAgent:
             branch_floor=float(branch_floor),
             gate_features=gate_features_flat,
             hamming_distance=int(hamming),
+            sampled_proposal_branch_logprob=float(team_logprob.detach().float().item()),
+            sampled_task_embedding=task_emb.detach().to("cpu"),
+            sampled_station_embedding=station_emb.detach().to("cpu"),
+            sampled_worker_embeddings=worker_embs3.detach().to("cpu"),
             proposal_pointer_logprob=float(step_sum.detach().item()),
             proposal_pointer_entropy_mean=float(pointer_entropy_mean.detach().item()),
             predicted_delta_a=float(_delta_a.detach().reshape(-1)[0].item()),
@@ -717,6 +860,21 @@ class PPOAgent:
         )
         return team, team_logprob, trace
 
+    @staticmethod
+    def _is_valid_anchor_proposal_trace(trace: FrozenAnchorProposalTrace) -> bool:
+        proposal = tuple(int(worker_id) for worker_id in trace.proposal_team)
+        anchor = tuple(int(worker_id) for worker_id in trace.anchor_team)
+        sequence = tuple(int(worker_id) for worker_id in trace.proposal_worker_sequence)
+        if not trace.proposal_available or not proposal or proposal == anchor:
+            return False
+        if len(proposal) != len(anchor) or len(set(proposal)) != len(proposal):
+            return False
+        if proposal != sequence or len(trace.per_step_worker_ids) != len(sequence):
+            return False
+        return all(
+            int(chosen) in tuple(int(worker_id) for worker_id in valid_ids)
+            for chosen, valid_ids in zip(sequence, trace.per_step_worker_ids, strict=True)
+        )
     @staticmethod
     def _anchor_proposal_rollout_metrics(memory: Any) -> dict[str, float]:
         """从冻结轨迹汇总 APCF 采样期诊断指标。"""
@@ -727,6 +885,7 @@ class PPOAgent:
         if not traces:
             return {
                 "APCF/RolloutDecisionCount": 0.0,
+                "APCF/RolloutProposalAvailableCount": 0.0,
                 "APCF/RolloutProposalAvailableRate": 0.0,
                 "APCF/RolloutHammingDistanceMean": 0.0,
                 "APCF/RolloutTwoWorkerEditRate": 0.0,
@@ -748,8 +907,10 @@ class PPOAgent:
         def _available_mean(field_name: str) -> float:
             values = [float(getattr(trace, field_name)) for trace in available]
             return float(sum(values) / len(values)) if values else 0.0
+        valid_count = sum(1 for trace in available if PPOAgent._is_valid_anchor_proposal_trace(trace))
         return {
             "APCF/RolloutDecisionCount": float(len(traces)),
+            "APCF/RolloutProposalAvailableCount": float(len(available)),
             "APCF/RolloutProposalAvailableRate": float(len(available) / len(traces)),
             "APCF/RolloutHammingDistanceMean": float(
                 sum(hamming_values) / len(hamming_values) if hamming_values else 0.0
@@ -767,7 +928,7 @@ class PPOAgent:
             "APCF/RolloutRawProposalSelectRate": float(
                 sum(raw_select) / len(raw_select) if raw_select else 0.0
             ),
-            "APCF/RolloutValidProposalRate": 1.0,
+            "APCF/RolloutValidProposalRate": float(valid_count / len(available)) if available else 1.0,
             "APCF/RolloutProposalPointerLogprobMean": _available_mean(
                 "proposal_pointer_logprob"
             ),
@@ -1028,6 +1189,7 @@ class PPOAgent:
         station_embeddings: torch.Tensor,
         worker_embeddings: torch.Tensor,
         frozen_traces: list[FrozenAnchorProposalTrace | None],
+        use_frozen_behavior_embeddings: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """按冻结轨迹用当前策略重算 APCF 团队对数概率。
 
@@ -1043,25 +1205,36 @@ class PPOAgent:
         num_workers = worker_embeddings.size(1)
         team_lp_rows: list[torch.Tensor] = []
         entropy_rows: list[torch.Tensor] = []
+        sampled_logprob_rows: list[torch.Tensor] = []
         for b in range(batch_size):
             trace = frozen_traces[b]
             zero_lp = torch.zeros((), device=worker_embeddings.device)
             if trace is None:
                 team_lp_rows.append(zero_lp)
                 entropy_rows.append(zero_lp)
+                sampled_logprob_rows.append(zero_lp)
                 continue
             task_emb = task_embeddings[b].unsqueeze(0)  # [1, H]
             station_emb = station_embeddings[b].unsqueeze(0)
-            anchor_emb = worker_embeddings[b, list(trace.anchor_team), :].mean(
-                dim=0, keepdim=True
-            )
+            worker_embs = worker_embeddings[b].unsqueeze(0)
+            if (
+                use_frozen_behavior_embeddings
+                and trace.sampled_task_embedding is not None
+                and trace.sampled_station_embedding is not None
+                and trace.sampled_worker_embeddings is not None
+            ):
+                task_emb = trace.sampled_task_embedding.to(worker_embeddings.device)
+                station_emb = trace.sampled_station_embedding.to(worker_embeddings.device)
+                worker_embs = trace.sampled_worker_embeddings.to(worker_embeddings.device)
+            anchor_emb = worker_embs[:, list(trace.anchor_team), :].mean(dim=1)
             if not trace.proposal_available:
                 team_lp_rows.append(zero_lp)
                 entropy_rows.append(zero_lp)
+                sampled_logprob_rows.append(zero_lp)
                 continue
-            proposal_emb = worker_embeddings[
-                b, list(trace.proposal_worker_sequence), :
-            ].mean(dim=0, keepdim=True)
+            proposal_emb = worker_embs[
+                :, list(trace.proposal_worker_sequence), :
+            ].mean(dim=1)
             step_lp_sum = zero_lp
             entropy_sum = zero_lp
             for j, chosen in enumerate(trace.proposal_worker_sequence):
@@ -1071,21 +1244,21 @@ class PPOAgent:
                 )
                 step_mask[0, list(valid_ids)] = False
                 context = (
-                    worker_embeddings[
-                        b, list(trace.proposal_worker_sequence[:j]), :
-                    ].mean(dim=0, keepdim=True)
+                    worker_embs[
+                        :, list(trace.proposal_worker_sequence[:j]), :
+                    ].mean(dim=1)
                     if j > 0
                     else None
                 )
-                with self.autocast_context():
-                    scores = self.policy.anchor_team_head.forward_choice(
-                        task_emb,
-                        station_emb,
-                        anchor_emb,
-                        worker_embeddings[b].unsqueeze(0),
-                        mask=step_mask,
-                        current_team_emb=context,
-                    )
+                scores = self._apcf_float32_pointer_logits(
+                    policy=self.policy,
+                    task_emb=task_emb,
+                    station_emb=station_emb,
+                    anchor_emb=anchor_emb,
+                    worker_embs=worker_embs,
+                    mask=step_mask,
+                    current_team_emb=context,
+                )
                 scores_float = scores.float()
                 dist = Categorical(logits=scores_float)
                 chosen_t = torch.tensor(
@@ -1101,15 +1274,15 @@ class PPOAgent:
                 [[float(trace.hamming_distance)]], dtype=torch.float32,
                 device=worker_embeddings.device,
             )
-            with self.autocast_context():
-                branch_logits, _delta_a, _g = self.policy.anchor_proposal_gate(
-                    task_emb,
-                    station_emb,
-                    anchor_emb,
-                    proposal_emb,
-                    gate_features,
-                    hamming,
-                )
+            branch_logits, _delta_a, _g = self._apcf_float32_gate_logits(
+                policy=self.policy,
+                task_emb=task_emb,
+                station_emb=station_emb,
+                anchor_emb=anchor_emb,
+                proposal_emb=proposal_emb,
+                gate_features=gate_features,
+                hamming=hamming,
+            )
             branch_logits = branch_logits.float()
             eps = max(float(trace.branch_floor), 0.0)
             soft = torch.softmax(branch_logits, dim=1)
@@ -1124,9 +1297,16 @@ class PPOAgent:
             entropy_rows.append(
                 (entropy_sum + bdist.entropy()[0]).reshape(())
             )
+            sampled_logprob_rows.append(torch.tensor(float(trace.sampled_proposal_branch_logprob), device=worker_embeddings.device))
         team_lp = torch.stack(team_lp_rows)
         team_entropy = torch.stack(entropy_rows)
-        return team_lp, team_entropy, {}
+        sampled_logprob = torch.stack(sampled_logprob_rows).float()
+        absolute_error = (team_lp.detach().float() - sampled_logprob).abs()
+        diagnostics = {
+            "sampled_proposal_branch_logprob_mae": absolute_error.mean(),
+            "sampled_proposal_branch_logprob_max_abs_error": absolute_error.max(),
+        }
+        return team_lp, team_entropy, diagnostics
 
     def get_memory_snapshot(self) -> Dict[str, float]:
         """返回当前设备显存快照，单位为 GB；CPU 环境返回 0。"""
@@ -1161,6 +1341,57 @@ class PPOAgent:
             or "not enough memory" in message
         )
 
+    @staticmethod
+    def _collect_gradient_diagnostics(named_parameters: Any) -> dict[str, float]:
+        """? optimizer.step ??????????????"""
+        finite = True
+        actor_sq = 0.0
+        critic_sq = 0.0
+        apcf_sq = 0.0
+        trunk_sq = 0.0
+        apcf_nonzero = 0
+        trunk_nonzero = 0
+        v2_sq = 0.0
+        v2_total = 0
+        v2_nonzero = 0
+        for name, parameter in named_parameters:
+            is_v2_parameter = name.startswith("worker_head.v2_")
+            if is_v2_parameter:
+                v2_total += 1
+            gradient = parameter.grad
+            if gradient is None:
+                continue
+            gradient_float = gradient.detach().float()
+            if not bool(torch.isfinite(gradient_float).all()):
+                finite = False
+                continue
+            norm = float(torch.linalg.vector_norm(gradient_float).item())
+            if is_v2_parameter:
+                v2_sq += norm * norm
+                if norm > 0.0:
+                    v2_nonzero += 1
+            if name.startswith("critic") or ".critic" in name:
+                critic_sq += norm * norm
+            elif name.startswith("anchor_team_head.") or name.startswith("anchor_proposal_gate."):
+                apcf_sq += norm * norm
+                if norm > 0.0:
+                    apcf_nonzero += 1
+            else:
+                actor_sq += norm * norm
+                trunk_sq += norm * norm
+                if norm > 0.0:
+                    trunk_nonzero += 1
+        return {
+            "finite": 1.0 if finite else 0.0,
+            "actor_grad_norm": float(actor_sq ** 0.5),
+            "critic_grad_norm": float(critic_sq ** 0.5),
+            "apcf_grad_norm": float(apcf_sq ** 0.5),
+            "trunk_grad_norm": float(trunk_sq ** 0.5),
+            "apcf_nonzero": float(apcf_nonzero > 0),
+            "trunk_nonzero": float(trunk_nonzero > 0),
+            "v2_grad_norm": float(v2_sq ** 0.5),
+            "v2_gradient_coverage": float(v2_nonzero / max(1, v2_total)),
+        }
     def _capture_update_transaction(self) -> Dict[str, Any]:
         """保存可完整回滚一次 PPO 更新所需的训练与随机状态。"""
         transaction = {
@@ -1673,6 +1904,21 @@ class PPOAgent:
                 current_worker_mask = current_worker_mask | skill_mask.to(self.device) | lock_mask.to(self.device)
 
             worker_embs = x_dict['worker'].unsqueeze(0)
+            v2_mode = str(getattr(self.config, "team_selection_mode", "autoregressive")) == "autoregressive_pressure_v2"
+            v2_pressure = None
+            v2_team_state = None
+            if v2_mode:
+                v2_pressure = self._build_v2_pressure_context(
+                    task_features=obs['task'].x,
+                    worker_features=worker_feats,
+                    task_present=None,
+                    task_action_invalid=mask_task,
+                    worker_present=None,
+                    worker_queue_invalid=mask_worker,
+                )
+                v2_team_state = active_policy.worker_head.initialize_v2_state(
+                    batch_size=1, device=self.device
+                )
             
             # 鍔犲叆杩唬闃堝€煎拰 Fallback 闃叉鍥犳帺鐮佽繃搴﹂噸鍙犲彂鐢熸寰幆
             max_iter = demand * 2
@@ -1689,7 +1935,20 @@ class PPOAgent:
                     break
                 
                 with self.autocast_context():
-                    worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs, mask=current_worker_mask, current_team_emb=current_team_emb)
+                    if v2_mode:
+                        assert v2_pressure is not None and v2_team_state is not None
+                        worker_logits = active_policy.worker_head.forward_choice_v2(
+                            task_emb=selected_task_emb,
+                            station_emb=x_dict['station'][int(station_action.item())].unsqueeze(0),
+                            global_context=global_context,
+                            worker_embs=worker_embs,
+                            pressure_context=v2_pressure,
+                            team_state=v2_team_state,
+                            demand=torch.tensor([float(demand)], device=self.device),
+                            mask=current_worker_mask.unsqueeze(0),
+                        )
+                    else:
+                        worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs, mask=current_worker_mask, current_team_emb=current_team_emb)
                 
                 if torch.isnan(worker_logits).any():
                     worker_logits = torch.nan_to_num(worker_logits, nan=mask_value)
@@ -1709,7 +1968,7 @@ class PPOAgent:
                      if temperature != 1.0:
                          worker_logits = worker_logits / max(temperature, 1e-5)
                          
-                     w_dist = Categorical(logits=worker_logits)
+                     w_dist = Categorical(logits=worker_logits.float() if v2_mode else worker_logits)
                      w_action = w_dist.sample()
                      w_lp = w_dist.log_prob(w_action)
                 
@@ -1720,6 +1979,13 @@ class PPOAgent:
                 # 鍒锋柊宸查€夊洟闃熻〃寰佽蹇?
                 selected_worker_feats = worker_embs[0, team_indices, :]
                 current_team_emb = selected_worker_feats.mean(dim=0, keepdim=True) # [1, H]
+                if v2_mode:
+                    assert v2_team_state is not None
+                    v2_team_state = active_policy.worker_head.advance_v2_state(
+                        v2_team_state,
+                        worker_embs[:, w_idx, :],
+                        worker_skills[w_idx].unsqueeze(0).to(self.device),
+                    )
                 
                 # 鏇存柊 Mask (閫夎繃鐨勪汉涓嶈兘鍐嶉€?
                 current_worker_mask = current_worker_mask.clone() # 纭繚涓?鍘熷湴淇敼 褰卞搷涓嬩竴杞?
@@ -2131,6 +2397,26 @@ class PPOAgent:
                     current_worker_mask = current_worker_mask | skill_mask.to(self.device) | lock_mask.to(self.device)
     
                 worker_embs_i = worker_embs.unsqueeze(0) # [1, W, H]
+                v2_mode = str(getattr(self.config, "team_selection_mode", "autoregressive")) == "autoregressive_pressure_v2"
+                v2_pressure = None
+                v2_team_state = None
+                if v2_mode:
+                    v2_context_started = time.perf_counter()
+                    v2_pressure = self._build_v2_pressure_context(
+                        task_features=source_task_x,
+                        worker_features=worker_feats,
+                        task_present=None,
+                        task_action_invalid=m_task,
+                        worker_present=None,
+                        worker_queue_invalid=m_worker,
+                    )
+                    self.worker_pointer_v2_diagnostics.record_context(
+                        v2_pressure,
+                        host_elapsed_ms=(time.perf_counter() - v2_context_started) * 1000.0,
+                    )
+                    v2_team_state = active_policy.worker_head.initialize_v2_state(
+                        batch_size=1, device=self.device
+                    )
                 
                 max_iter = demand * 2
                 iter_cnt = 0
@@ -2143,7 +2429,20 @@ class PPOAgent:
                         break
                     
                     with self.autocast_context():
-                        worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs_i, mask=current_worker_mask, current_team_emb=current_team_emb)
+                        if v2_mode:
+                            assert v2_pressure is not None and v2_team_state is not None
+                            worker_logits = active_policy.worker_head.forward_choice_v2(
+                                task_emb=selected_task_emb,
+                                station_emb=station_embs[int(station_action.item())].unsqueeze(0),
+                                global_context=global_context_i,
+                                worker_embs=worker_embs_i,
+                                pressure_context=v2_pressure,
+                                team_state=v2_team_state,
+                                demand=torch.tensor([float(demand)], device=self.device),
+                                mask=current_worker_mask.unsqueeze(0),
+                            )
+                        else:
+                            worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs_i, mask=current_worker_mask, current_team_emb=current_team_emb)
                     
                     if torch.isnan(worker_logits).any():
                         worker_logits = torch.nan_to_num(worker_logits, nan=mask_value)
@@ -2162,7 +2461,7 @@ class PPOAgent:
                          if temperature != 1.0:
                              worker_logits = worker_logits / max(temperature, 1e-5)
                              
-                         w_dist = Categorical(logits=worker_logits)
+                         w_dist = Categorical(logits=worker_logits.float() if v2_mode else worker_logits)
                          w_action = w_dist.sample()
                          w_lp = w_dist.log_prob(w_action)
                     
@@ -2172,9 +2471,41 @@ class PPOAgent:
                     
                     selected_worker_feats = worker_embs_i[0, team_indices, :]
                     current_team_emb = selected_worker_feats.mean(dim=0, keepdim=True)
+                    if v2_mode:
+                        assert v2_team_state is not None and v2_pressure is not None
+                        selected_exposure = torch.cat(
+                            (
+                                v2_pressure.candidate_exposure[:, w_idx, :],
+                                v2_pressure.candidate_max_exposure[:, w_idx, :],
+                            ),
+                            dim=-1,
+                        )
+                        entropy = (
+                            Categorical(logits=worker_logits.float()).entropy()
+                            if deterministic
+                            else w_dist.entropy()
+                        )
+                        self.worker_pointer_v2_diagnostics.record_selection(
+                            selected_exposure=selected_exposure,
+                            entropy=entropy,
+                        )
+                        v2_team_state = active_policy.worker_head.advance_v2_state(
+                            v2_team_state,
+                            worker_embs_i[:, w_idx, :],
+                            worker_skills[w_idx].unsqueeze(0).to(self.device),
+                        )
                     
                     current_worker_mask = current_worker_mask.clone()
                     current_worker_mask[w_idx] = True
+
+                if v2_mode:
+                    assert v2_team_state is not None and v2_pressure is not None
+                    team_consumption = v2_team_state.selected_skill_sum / (
+                        v2_pressure.supply_all.clamp_min(
+                            float(self.config.worker_pointer_supply_epsilon)
+                        )
+                    )
+                    self.worker_pointer_v2_diagnostics.record_team(team_consumption)
                 
                 # 鑻ュ洜杩囧害绔炰簤鎴栨閿侀€変笉澶熷伐浜?
                 if len(team_indices) < demand:
@@ -2522,6 +2853,19 @@ class PPOAgent:
         distill_station_values = []
         distill_weighted_values = []
         distill_lambda_values = []
+        gradient_finite_values = []
+        actor_gradient_norms = []
+        critic_gradient_norms = []
+        apcf_gradient_norms = []
+        trunk_gradient_norms = []
+        v2_gradient_norms = []
+        v2_gradient_coverages = []
+        apcf_first_recompute_mae = 0.0
+        apcf_first_recompute_max_abs_error = 0.0
+        apcf_recompute_checked = False
+        v2_first_recompute_mae = 0.0
+        v2_first_recompute_max_abs_error = 0.0
+        v2_recompute_checked = False
         
         # 鏀堕泦 batch 绾?Critic 棰勬祴鍋忓樊涓庝紭鍔垮垎甯?
         batch_pred_vals = []
@@ -2666,6 +3010,40 @@ class PPOAgent:
                     current_team_emb = None # [B, H]
                     team_emb_sum = torch.zeros(B_size, worker_x.size(-1)).to(self.device)
                     team_cnt = torch.zeros(B_size, 1).to(self.device)
+                    v2_mode = (
+                        action_scope == "operation_station_worker"
+                        and str(getattr(self.config, "team_selection_mode", "autoregressive"))
+                        == "autoregressive_pressure_v2"
+                    )
+                    v2_pressure = None
+                    v2_team_state = None
+                    raw_worker_x_v2 = None
+                    selected_station_emb_v2 = None
+                    selected_demand_v2 = None
+                    if v2_mode:
+                        raw_task_x_v2, raw_task_present = to_dense_batch(
+                            batch['task'].x, batch['task'].batch
+                        )
+                        raw_worker_x_v2, raw_worker_present = to_dense_batch(
+                            batch['worker'].x, batch['worker'].batch
+                        )
+                        v2_pressure = self._build_v2_pressure_context(
+                            task_features=raw_task_x_v2,
+                            worker_features=raw_worker_x_v2,
+                            task_present=raw_task_present,
+                            task_action_invalid=combined_task_mask,
+                            worker_present=raw_worker_present,
+                            worker_queue_invalid=replay_worker_mask,
+                        )
+                        v2_team_state = self.policy.worker_head.initialize_v2_state(
+                            batch_size=B_size, device=self.device
+                        )
+                        selected_station_emb_v2 = station_x[
+                            batch_indices, torch.clamp(batch.y_station, min=0)
+                        ]
+                        selected_demand_v2 = raw_task_x_v2[
+                            batch_indices, batch.y_task, 16
+                        ]
                     
                     worker_steps = (
                         range(batch.y_team.size(1))
@@ -2677,7 +3055,23 @@ class PPOAgent:
                         valid_step = (target != -1)
                         if not valid_step.any(): continue
                         
-                        logits = self.policy.worker_head.forward_choice(sel_task_emb, worker_x, mask=curr_mask, current_team_emb=current_team_emb)
+                        if v2_mode:
+                            assert v2_pressure is not None
+                            assert v2_team_state is not None
+                            assert selected_station_emb_v2 is not None
+                            assert selected_demand_v2 is not None
+                            logits = self.policy.worker_head.forward_choice_v2(
+                                task_emb=sel_task_emb,
+                                station_emb=selected_station_emb_v2,
+                                global_context=global_context,
+                                worker_embs=worker_x,
+                                pressure_context=v2_pressure,
+                                team_state=v2_team_state,
+                                demand=selected_demand_v2,
+                                mask=curr_mask,
+                            )
+                        else:
+                            logits = self.policy.worker_head.forward_choice(sel_task_emb, worker_x, mask=curr_mask, current_team_emb=current_team_emb)
                         if torch.isnan(logits).any(): logits = torch.nan_to_num(logits, nan=(torch.finfo(logits.dtype).min / 2.0))
                         
                         dist = Categorical(logits=logits.float())
@@ -2702,6 +3096,19 @@ class PPOAgent:
                         team_cnt = next_team_cnt
                         
                         current_team_emb = team_emb_sum / torch.clamp(team_cnt, min=1.0)
+                        if v2_mode:
+                            assert v2_team_state is not None and raw_worker_x_v2 is not None
+                            safe_target = torch.clamp(target, min=0)
+                            selected_emb_all = worker_x[batch_indices, safe_target]
+                            selected_skills_all = raw_worker_x_v2[
+                                batch_indices, safe_target, 1:6
+                            ]
+                            v2_team_state = self.policy.worker_head.advance_v2_state(
+                                v2_team_state,
+                                selected_emb_all,
+                                selected_skills_all,
+                                valid=valid_step,
+                            )
                         
                         # Update mask for next worker in team
                         curr_mask = curr_mask.clone()
@@ -2791,7 +3198,12 @@ class PPOAgent:
                             station_embeddings=apcf_station_embeddings,
                             worker_embeddings=worker_x,
                             frozen_traces=apcf_traces,
+                            use_frozen_behavior_embeddings=not apcf_recompute_checked,
                         )
+                        if not apcf_recompute_checked:
+                            apcf_first_recompute_mae = float(_apcf_diag["sampled_proposal_branch_logprob_mae"].detach().float().item())
+                            apcf_first_recompute_max_abs_error = float(_apcf_diag["sampled_proposal_branch_logprob_max_abs_error"].detach().float().item())
+                            apcf_recompute_checked = True
 
                     if action_scope == "operation":
                         total_lp = task_lp
@@ -2803,6 +3215,18 @@ class PPOAgent:
                         total_lp = task_lp + station_lp + team_lp
                         entropy = task_entropy + station_entropy + team_entropy
                     old_lp = batch.y_logprob.view(-1)
+                    if v2_mode and not v2_recompute_checked:
+                        recompute_error = torch.abs(total_lp.detach().float() - old_lp.float())
+                        v2_first_recompute_mae = float(recompute_error.mean().cpu())
+                        v2_first_recompute_max_abs_error = float(recompute_error.max().cpu())
+                        v2_threshold = 1.0e-3 if self.amp_dtype == torch.bfloat16 else 1.0e-4
+                        if v2_first_recompute_max_abs_error > v2_threshold:
+                            raise RuntimeError(
+                                "WorkerPointer v2 首次 PPO 重算与行为策略不一致："
+                                f"max_abs_error={v2_first_recompute_max_abs_error:.6g}，"
+                                f"threshold={v2_threshold:.6g}"
+                            )
+                        v2_recompute_checked = True
                     log_ratio, safe_log_ratio, ratios = self.compute_stable_log_ratio_and_ratio(total_lp, old_lp)
                     
                     # --- PPO Loss Calculation ---
@@ -2941,6 +3365,16 @@ class PPOAgent:
                 if ((step_idx + 1) % self.accumulation_steps == 0) or (step_idx + 1 == num_batches):
                     self.scaler.unscale_(self.optimizer)
                     
+                    gradient_diagnostics = self._collect_gradient_diagnostics(self.policy.named_parameters())
+                    gradient_finite_values.append(gradient_diagnostics["finite"])
+                    actor_gradient_norms.append(gradient_diagnostics["actor_grad_norm"])
+                    critic_gradient_norms.append(gradient_diagnostics["critic_grad_norm"])
+                    apcf_gradient_norms.append(gradient_diagnostics["apcf_grad_norm"])
+                    trunk_gradient_norms.append(gradient_diagnostics["trunk_grad_norm"])
+                    v2_gradient_norms.append(gradient_diagnostics["v2_grad_norm"])
+                    v2_gradient_coverages.append(
+                        gradient_diagnostics["v2_gradient_coverage"]
+                    )
                     # 鐙珛鍙傛暟姊害瑁佸壀
                     torch.nn.utils.clip_grad_norm_(self.actor_parameters, max_norm=0.5)
                     # 缁?Critic 鎸傝杩滄瘮 Actor 鏇磋杽寮辩殑瑁呯敳锛岄槻姝㈠眬閮ㄨ剦鍐插甫宕╁叏鐩?
@@ -3050,12 +3484,41 @@ class PPOAgent:
             'PPO/GPURebuildFallbackCount': gpu_rebuild_fallback_count,
             'PPO/BatchVectorRepairCount': batch_vector_repair_count,
             'Train/LearningRate': self.optimizer.param_groups[0]['lr'],
+            'PPO/GradientsFinite': float(min(gradient_finite_values)) if gradient_finite_values else 1.0,
+            'PPO/ActorGradNorm': float(sum(actor_gradient_norms) / len(actor_gradient_norms)) if actor_gradient_norms else 0.0,
+            'PPO/CriticGradNorm': float(sum(critic_gradient_norms) / len(critic_gradient_norms)) if critic_gradient_norms else 0.0,
+            'PointerV2/GradientNorm': float(sum(v2_gradient_norms) / len(v2_gradient_norms)) if v2_gradient_norms else 0.0,
+            'PointerV2/GradientCoverage': float(sum(v2_gradient_coverages) / len(v2_gradient_coverages)) if v2_gradient_coverages else 0.0,
+            'PointerV2/PPOFirstRecomputeMAE': v2_first_recompute_mae,
+            'PointerV2/PPOFirstRecomputeMaxAE': v2_first_recompute_max_abs_error,
+            'APCF/GradientNorm': float(sum(apcf_gradient_norms) / len(apcf_gradient_norms)) if apcf_gradient_norms else 0.0,
+            'APCF/PPOProposalBranchRecomputeMAE': apcf_first_recompute_mae,
+            'APCF/PPOProposalBranchRecomputeMaxAE': apcf_first_recompute_max_abs_error,
+            'APCF/AutocastEnabled': 1.0 if self.amp_enabled else 0.0,
+            'APCF/AutocastBF16Target': 1.0 if self.amp_enabled and self.amp_dtype == torch.bfloat16 else 0.0,
+            'APCF/TrunkGradientNorm': float(sum(trunk_gradient_norms) / len(trunk_gradient_norms)) if trunk_gradient_norms else 0.0,
+            'APCF/PretrainLoadedModelKeyCount': float(getattr(self.config, 'apcf_pretrain_loaded_model_key_count', 0) or 0),
             'Train/ActorLearningRate': self.optimizer.param_groups[0]['lr'],
             'Train/CriticLearningRate': self.optimizer.param_groups[1]['lr'] if len(self.optimizer.param_groups) > 1 else self.optimizer.param_groups[0]['lr'],
             'Train/ScheduleFreeEnabled': 1.0 if self.use_schedule_free else 0.0,
             'Memory/Allocated_GB': memory_snapshot['allocated_gb'],
             'Memory/Reserved_GB': memory_snapshot['reserved_gb'],
         }
+        if action_scope == "operation_station_worker" and str(
+            getattr(self.config, "team_selection_mode", "autoregressive")
+        ) == "autoregressive_pressure_v2":
+            metrics.update(
+                {
+                    "PointerV2/AutocastEnabled": 1.0 if self.amp_enabled else 0.0,
+                    "PointerV2/AutocastBF16": 1.0
+                    if self.amp_enabled and self.amp_dtype == torch.bfloat16
+                    else 0.0,
+                    "PointerV2/GradScalerEnabled": 1.0
+                    if self.scaler.is_enabled()
+                    else 0.0,
+                    "PointerV2/NonFiniteCount": 0.0,
+                }
+            )
         if action_scope == "operation_station_gated_team":
             metrics.update(self._gated_team_rollout_metrics(memory))
             metrics.update(

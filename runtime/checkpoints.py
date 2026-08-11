@@ -38,6 +38,10 @@ class ModelSpec:
     workforce_binding_mode: str = "endogenous"
     workforce_preallocation_ratio: float = 1.0
     team_selection_mode: str = "autoregressive"
+    worker_pointer_context_version: str | None = None
+    worker_pointer_pressure_temperature: float | None = None
+    worker_pointer_supply_epsilon: float | None = None
+    worker_pointer_wait_discount_mode: str | None = None
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
     hidden_dim: int | None = None
@@ -111,6 +115,18 @@ def build_model_spec(config: Config) -> ModelSpec:
                 apcf_fields["anchor_proposal_cf_manifest_sha256"] = _sha256_of(
                     path
                 )
+    pointer_v2_fields: dict[str, Any] = {}
+    if str(config.team_selection_mode) == "autoregressive_pressure_v2":
+        pointer_v2_fields = {
+            "worker_pointer_context_version": str(config.worker_pointer_context_version),
+            "worker_pointer_pressure_temperature": float(
+                config.worker_pointer_pressure_temperature
+            ),
+            "worker_pointer_supply_epsilon": float(config.worker_pointer_supply_epsilon),
+            "worker_pointer_wait_discount_mode": str(
+                config.worker_pointer_wait_discount_mode
+            ),
+        }
     return ModelSpec(
         resource_graph_mode=mode,
         policy_action_scope=str(config.policy_action_scope),
@@ -133,6 +149,7 @@ def build_model_spec(config: Config) -> ModelSpec:
         num_skill_types=worker_layout.num_skill_types,
         worker_skill_feature_slots=worker_layout.skill_slots,
         worker_feature_layout_version=WORKER_FEATURE_LAYOUT_VERSION,
+        **pointer_v2_fields,
         **apcf_fields,
     )
 
@@ -151,6 +168,11 @@ def build_checkpoint_metadata(config: Config, **extra: Any) -> dict[str, Any]:
         ).strip()
         if source_sha256:
             metadata["apcf_pretrain_source_sha256"] = source_sha256
+            loaded_key_count = int(
+                getattr(config, "apcf_pretrain_loaded_model_key_count", 0) or 0
+            )
+            if loaded_key_count > 0:
+                metadata["apcf_pretrain_loaded_model_key_count"] = loaded_key_count
     metadata.update(extra)
     return metadata
 
@@ -251,6 +273,27 @@ def apply_checkpoint_model_spec(
     *,
     explicit_fields: set[str] | None = None,
 ) -> None:
+    current_team_mode = str(getattr(config, "team_selection_mode", "autoregressive"))
+    checkpoint_team_mode = str(spec.team_selection_mode)
+    if current_team_mode != checkpoint_team_mode:
+        raise ValueError(
+            "team_selection_mode 与 checkpoint 不兼容："
+            f"config={current_team_mode!r}, checkpoint={checkpoint_team_mode!r}"
+        )
+    if current_team_mode == "autoregressive_pressure_v2":
+        semantic_fields = (
+            "worker_pointer_context_version",
+            "worker_pointer_pressure_temperature",
+            "worker_pointer_supply_epsilon",
+            "worker_pointer_wait_discount_mode",
+        )
+        conflicts = {
+            key: (getattr(config, key), getattr(spec, key))
+            for key in semantic_fields
+            if getattr(spec, key) is None or getattr(config, key) != getattr(spec, key)
+        }
+        if conflicts:
+            raise ValueError(f"WorkerPointer v2 checkpoint 语义不兼容: {conflicts}")
     current_scope = str(getattr(config, "policy_action_scope", ""))
     current_scoring_mode = str(
         getattr(config, "conditional_team_scoring_mode", "fixed_prior_v1")
@@ -302,6 +345,15 @@ def apply_checkpoint_model_spec(
         "graph_encoder_mode": spec.graph_encoder_mode,
         "actor_context_mode": spec.actor_context_mode,
     }
+    for key in (
+        "worker_pointer_context_version",
+        "worker_pointer_pressure_temperature",
+        "worker_pointer_supply_epsilon",
+        "worker_pointer_wait_discount_mode",
+    ):
+        value = getattr(spec, key)
+        if value is not None:
+            inferred[key] = value
     if spec.policy_action_scope == "operation_station_anchor_proposal_team":
         for key in (
             "anchor_proposal_mode",

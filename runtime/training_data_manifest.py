@@ -23,7 +23,7 @@ def resolve_explicit_five_skill_initial_training_paths(
     manifest_path: str | Path,
     configured_data_path: str | Path,
 ) -> tuple[Path, ...]:
-    """只允许 manifest 已声明、哈希一致的训练 CSV 进入初始调度训练。"""
+    """以 manifest 权威绑定初始调度训练 CSV，目录额外文件不得进入训练。"""
     path = resolve_workspace_path(manifest_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(f"初始调度训练 manifest 不存在: {path}")
@@ -51,11 +51,6 @@ def resolve_explicit_five_skill_initial_training_paths(
         declared.append(candidate)
     if len(set(declared)) != len(declared):
         raise ValueError("初始调度训练 manifest 存在重复 CSV")
-    discovered = tuple(sorted(item.resolve() for item in directory.iterdir() if item.suffix.lower() == ".csv"))
-    if tuple(sorted(declared)) != discovered:
-        extra = sorted(str(item) for item in set(discovered) - set(declared))
-        missing = sorted(str(item) for item in set(declared) - set(discovered))
-        raise ValueError(f"初始训练目录与 manifest 精确文件列表不一致: extra={extra}; missing={missing}")
     return tuple(declared)
 
 

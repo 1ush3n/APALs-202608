@@ -10,7 +10,6 @@ from __future__ import annotations
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +22,9 @@ PREFLIGHT_TESTS = (
     "tests/test_graph_ddqn_performance.py",
     "tests/test_checkpoint_metadata.py",
     "tests/test_lightning_architecture.py",
+    "tests/test_training_data_manifest.py",
+    "tests/test_worker_pointer_v2.py",
+    "tests/test_verify_worker_pointer_v2_training_run.py",
     "tests/test_skill_hub_graph.py",
     "tests/test_heterogeneous_rebuild.py",
     "tests/test_dynamic_events.py",
@@ -36,7 +38,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = list(sys.argv[1:] if argv is None else argv)
     selected = ["tests"] if "--all" in args else list(PREFLIGHT_TESTS)
-    base_temp = Path(tempfile.gettempdir()) / "apal_pytest_preflight"
+    base_temp = PROJECT_ROOT / ".pytest_tmp_v2" / "preflight"
+    base_temp.parent.mkdir(parents=True, exist_ok=True)
     command = [
         sys.executable,
         "-m",

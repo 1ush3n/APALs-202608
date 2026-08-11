@@ -139,6 +139,15 @@ class APALRolloutService:
         episode: int,
     ) -> tuple[list[Memory], RolloutMetrics]:
         self.agent.policy.train()
+        v2_mode = (
+            str(getattr(self.config, "team_selection_mode", "autoregressive"))
+            == "autoregressive_pressure_v2"
+        )
+        if self.device.type == "cuda":
+            # 每个 rollout 独立统计峰值，供 v2 与 legacy 使用相同口径比较。
+            torch.cuda.reset_peak_memory_stats(self.device)
+        if v2_mode:
+            self.agent.reset_worker_pointer_v2_diagnostics()
         heartbeat = RolloutHeartbeat(
             episode,
             self.num_envs,
@@ -423,6 +432,15 @@ class APALRolloutService:
             self._merge_memories(merged, memories)
             apcf_metrics = self.agent._anchor_proposal_rollout_metrics(merged)
             extra_metrics.update(apcf_metrics)
+        if v2_mode:
+            extra_metrics.update(self.agent.finalize_worker_pointer_v2_diagnostics())
+        if self.device.type == "cuda":
+            peak_memory_mib = float(
+                torch.cuda.max_memory_allocated(self.device) / (1024.0**2)
+            )
+            extra_metrics["Memory/PeakAllocatedMiB"] = peak_memory_mib
+            if v2_mode:
+                extra_metrics["PointerV2/PeakMemoryMiB"] = peak_memory_mib
         metrics = RolloutMetrics(
             episode=int(episode),
             average_reward=float(np.mean([sum(memory.rewards) for memory in memories])),

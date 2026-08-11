@@ -22,7 +22,7 @@ def _write_graph(path: Path) -> None:
     pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
 
 
-def test_initial_training_manifest_binds_exact_files(tmp_path: Path) -> None:
+def test_initial_training_manifest_uses_only_declared_files(tmp_path: Path) -> None:
     train = tmp_path / "train"
     train.mkdir()
     graph = train / "g.csv"
@@ -31,6 +31,72 @@ def test_initial_training_manifest_binds_exact_files(tmp_path: Path) -> None:
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"protocol": "explicit_fiveskill_v1", "files": [{"file": "g.csv", "sha256": digest}]}), encoding="utf-8")
     assert resolve_explicit_five_skill_initial_training_paths(manifest, train) == (graph.resolve(),)
-    _write_graph(train / "extra.csv")
-    with pytest.raises(ValueError, match="精确文件列表不一致"):
+    extra = train / "extra.csv"
+    _write_graph(extra)
+
+    resolved = resolve_explicit_five_skill_initial_training_paths(manifest, train)
+
+    assert resolved == (graph.resolve(),)
+    assert extra.resolve() not in resolved
+
+
+def test_initial_training_manifest_rejects_missing_declared_file(tmp_path: Path) -> None:
+    train = tmp_path / "train"
+    train.mkdir()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "protocol": "explicit_fiveskill_v1",
+                "files": [{"file": "missing.csv", "sha256": "0" * 64}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="不存在或越界"):
+        resolve_explicit_five_skill_initial_training_paths(manifest, train)
+
+
+def test_initial_training_manifest_rejects_hash_drift(tmp_path: Path) -> None:
+    train = tmp_path / "train"
+    train.mkdir()
+    graph = train / "g.csv"
+    _write_graph(graph)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "protocol": "explicit_fiveskill_v1",
+                "files": [{"file": "g.csv", "sha256": "0" * 64}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="哈希不一致"):
+        resolve_explicit_five_skill_initial_training_paths(manifest, train)
+
+
+def test_initial_training_manifest_rejects_duplicate_declarations(tmp_path: Path) -> None:
+    train = tmp_path / "train"
+    train.mkdir()
+    graph = train / "g.csv"
+    _write_graph(graph)
+    digest = hashlib.sha256(graph.read_bytes()).hexdigest()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "protocol": "explicit_fiveskill_v1",
+                "files": [
+                    {"file": "g.csv", "sha256": digest},
+                    {"file": "g.csv", "sha256": digest},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="重复 CSV"):
         resolve_explicit_five_skill_initial_training_paths(manifest, train)

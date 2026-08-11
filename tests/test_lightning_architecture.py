@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -73,6 +74,19 @@ class _RolloutService:
 
     def close(self):
         self.closed = True
+
+
+def _checkpointing_trainer(saved_paths: list[str]) -> SimpleNamespace:
+    """返回会写出可加载 checkpoint 的 trainer 替身。"""
+    import torch
+
+    def save_checkpoint(path: str) -> None:
+        saved_paths.append(path)
+        checkpoint_path = Path(path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"apal_metadata": {"model_spec": {}}}, checkpoint_path)
+
+    return SimpleNamespace(save_checkpoint=save_checkpoint)
 
 
 def test_lightning_module_uses_manual_optimization_contract() -> None:
@@ -153,9 +167,7 @@ def test_rollout_checkpoint_saves_latest_and_best(tmp_path) -> None:
     from train_lightning import RolloutCheckpoint
 
     saved_paths = []
-    trainer = SimpleNamespace(
-        save_checkpoint=lambda path: saved_paths.append(path)
-    )
+    trainer = _checkpointing_trainer(saved_paths)
     module = SimpleNamespace(
         last_completed_episode=2,
         last_eval_metrics={"makespan": 10.0, "completion_rate": 1.0},
@@ -211,7 +223,7 @@ def test_rollout_checkpoint_uses_reschedule_selection_score(tmp_path) -> None:
     from train_lightning import RolloutCheckpoint
 
     saved_paths = []
-    trainer = SimpleNamespace(save_checkpoint=lambda path: saved_paths.append(path))
+    trainer = _checkpointing_trainer(saved_paths)
     module = SimpleNamespace(
         last_completed_episode=1,
         last_eval_metrics={
@@ -248,7 +260,7 @@ def test_rollout_checkpoint_rejects_incomplete_initial_schedule(tmp_path) -> Non
     from train_lightning import RolloutCheckpoint
 
     saved_paths = []
-    trainer = SimpleNamespace(save_checkpoint=lambda path: saved_paths.append(path))
+    trainer = _checkpointing_trainer(saved_paths)
     module = SimpleNamespace(
         last_completed_episode=1,
         last_eval_metrics={"makespan": 1.0, "completion_rate": 0.0},
@@ -259,6 +271,48 @@ def test_rollout_checkpoint_rejects_incomplete_initial_schedule(tmp_path) -> Non
 
     assert saved_paths == [str(tmp_path / "last.ckpt")]
     assert callback.best_score == float("inf")
+
+
+def test_rollout_checkpoint_writes_model_spec_metadata_to_final_file(tmp_path) -> None:
+    import torch
+
+    from train_lightning import RolloutCheckpoint
+
+    saved_paths: list[str] = []
+
+    def save_checkpoint(path: str) -> None:
+        saved_paths.append(path)
+        checkpoint_path = Path(path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({}, checkpoint_path)
+
+    class _MetadataModule:
+        last_completed_episode = 1
+        last_eval_metrics = {"makespan": 1.0, "completion_rate": 1.0}
+
+        @staticmethod
+        def on_save_checkpoint(checkpoint: dict) -> None:
+            checkpoint["apal_metadata"] = {
+                "model_spec": {"team_selection_mode": "autoregressive_pressure_v2"}
+            }
+
+    callback = RolloutCheckpoint(tmp_path)
+    callback.on_train_batch_end(
+        SimpleNamespace(save_checkpoint=save_checkpoint),
+        _MetadataModule(),
+        None,
+        None,
+        0,
+    )
+
+    assert saved_paths == [
+        str(tmp_path / "best" / "best.ckpt"),
+        str(tmp_path / "last.ckpt"),
+    ]
+    final_checkpoint = torch.load(tmp_path / "last.ckpt", map_location="cpu")
+    assert final_checkpoint["apal_metadata"]["model_spec"] == {
+        "team_selection_mode": "autoregressive_pressure_v2"
+    }
 
 
 def test_reschedule_warm_start_rejects_legacy_raw_checkpoint(tmp_path) -> None:

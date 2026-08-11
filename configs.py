@@ -80,6 +80,11 @@ class Config:
     workforce_binding_mode: str = "endogenous"
     workforce_preallocation_ratio: float = 1.0
     team_selection_mode: str = "autoregressive"
+    worker_pointer_context_version: str = "pressure_v2_normwork_headcount_physicalwait_v1"
+    worker_pointer_pressure_temperature: float = 1.0
+    worker_pointer_supply_epsilon: float = 1.0e-6
+    worker_pointer_wait_discount_mode: str = "physical_wait_exponential_v1"
+    worker_pointer_v2_init_seed_offset: int = 1009
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
     
@@ -354,7 +359,10 @@ class Config:
     run_id: str = ""
     run_dir: str = ""
     artifact_layout: str = "runs"          # "runs" 使用统一运行目录；"legacy" 保持旧 checkpoints/results 结构
+    evaluation_protocol: str = "standard"
     config_paths: tuple[str, ...] = field(default_factory=tuple)
+    apcf_smoke_guard_root: str = ""
+    apcf_pretrain_loaded_model_key_count: int = 0
     
     # 报告生成 (Report Generation)
     generate_report_every_episodes: int = 100

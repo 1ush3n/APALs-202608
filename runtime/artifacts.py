@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from configs import Config
+from runtime.checkpoints import build_model_spec
 
 
 def resolve_path(path_like: str | Path, project_root: Path) -> Path:
@@ -134,6 +136,19 @@ def write_run_manifest(
         yaml.safe_dump(config.to_flat_dict(), allow_unicode=True, sort_keys=True),
         encoding="utf-8",
     )
+    manifest = build_run_manifest_payload(config, command=command, extra=extra)
+    (directory / "run_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def build_run_manifest_payload(
+    config: Config,
+    *,
+    command: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """构造可测试的运行语义清单；文件写入由调用方单独负责。"""
     try:
         git_commit = subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -141,19 +156,62 @@ def write_run_manifest(
             encoding="utf-8",
             stderr=subprocess.DEVNULL,
         ).strip()
-    except Exception:
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError, UnicodeError):
         git_commit = None
+    precision = str(getattr(config, "lightning_precision", "16-mixed")).lower()
+    autocast_dtype = {
+        "16-mixed": "float16",
+        "bf16-mixed": "bfloat16",
+        "32-true": None,
+    }.get(precision)
+    try:
+        git_status = subprocess.check_output(
+            ["git", "status", "--short"],
+            text=True,
+            encoding="utf-8",
+            stderr=subprocess.DEVNULL,
+        ).splitlines()
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError, UnicodeError):
+        git_status = []
+    training_manifest_raw = str(getattr(config, "training_manifest_path", "") or "").strip()
+    training_manifest_path = Path(training_manifest_raw) if training_manifest_raw else None
+    training_manifest_sha256 = None
+    if training_manifest_path is not None and training_manifest_path.is_file():
+        digest = hashlib.sha256()
+        with training_manifest_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+        training_manifest_sha256 = digest.hexdigest()
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": command,
         "experiment_name": sanitize_name(config.experiment_name),
         "config_paths": list(config.config_paths),
         "git_commit": git_commit,
+        "git_worktree_dirty": bool(git_status),
+        "git_status": git_status,
+        "evaluation_protocol": str(getattr(config, "evaluation_protocol", "standard")),
+        "model_spec": asdict(build_model_spec(config)),
+        "training_manifest_path": training_manifest_raw or None,
+        "training_manifest_sha256": training_manifest_sha256,
+        "runtime": {
+            "num_envs": int(getattr(config, "num_envs", 1)),
+            "batch_size": int(getattr(config, "batch_size", 1)),
+            "accumulation_steps": int(getattr(config, "accumulation_steps", 1)),
+            "lightning_precision": precision,
+            "autocast_dtype": autocast_dtype,
+            "grad_scaler_enabled": precision == "16-mixed",
+            "worker_pointer_v2_init_seed": (
+                int(getattr(config, "seed", 0))
+                + int(getattr(config, "worker_pointer_v2_init_seed_offset", 1009))
+                if str(getattr(config, "team_selection_mode", "autoregressive"))
+                == "autoregressive_pressure_v2"
+                else None
+            ),
+        },
         **(extra or {}),
     }
-    (directory / "run_manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    return manifest
 
 
 def write_run_context_files(
@@ -204,3 +262,20 @@ def resolve_run_output_dir(
     if create_dirs:
         output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir, context
+
+def assert_apcf_smoke_output_isolated(
+    smoke_root: Path,
+    output_paths: list[Path],
+) -> None:
+    """?? APCF PPO smoke ????????????"""
+    root = Path(smoke_root).expanduser().resolve()
+    if not output_paths:
+        raise ValueError("APCF smoke ????????????")
+    for raw_path in output_paths:
+        path = Path(raw_path).expanduser().resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                f"APCF smoke ???????? smoke ?????root={root}, path={path}"
+            ) from exc

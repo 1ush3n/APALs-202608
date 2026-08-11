@@ -44,6 +44,9 @@ STRUCTURAL_FIELDS = {
     "conditional_team_scoring_mode", "conditional_team_prior_margin",
     "conditional_team_prior_weight", "workforce_binding_mode",
     "workforce_preallocation_ratio", "team_selection_mode",
+    "worker_pointer_context_version", "worker_pointer_pressure_temperature",
+    "worker_pointer_supply_epsilon", "worker_pointer_wait_discount_mode",
+    "worker_pointer_v2_init_seed_offset",
     "graph_encoder_mode", "actor_context_mode",
     "anchor_proposal_mode", "anchor_proposal_prior_margin",
     "anchor_proposal_gate_bias",
@@ -59,7 +62,9 @@ _VALID_EXPERIMENT_MODES = {
         "operation_station_gated_team", "operation_station_anchor_proposal_team",
     },
     "workforce_binding_mode": {"endogenous", "preallocated"},
-    "team_selection_mode": {"autoregressive", "static_topq"},
+    "team_selection_mode": {
+        "autoregressive", "autoregressive_pressure_v2", "static_topq",
+    },
     "graph_encoder_mode": {"hetero_gat", "homogeneous_graphsage", "none"},
     "actor_context_mode": {"attention", "mean_max", "local_only"},
     "conditional_team_scoring_mode": {
@@ -221,6 +226,27 @@ def validate_runtime_config(config: Config) -> None:
                 f"{field_name} 无效: {value!r}；允许值={sorted(choices)}"
             )
         setattr(config, field_name, value)
+    if config.team_selection_mode == "autoregressive_pressure_v2":
+        if config.policy_action_scope != "operation_station_worker":
+            raise ValueError(
+                "autoregressive_pressure_v2 仅允许 policy_action_scope=operation_station_worker"
+            )
+        if config.actor_context_mode != "attention":
+            raise ValueError(
+                "autoregressive_pressure_v2 要求 actor_context_mode=attention"
+            )
+        temperature = float(config.worker_pointer_pressure_temperature)
+        epsilon = float(config.worker_pointer_supply_epsilon)
+        if not math.isfinite(temperature) or temperature <= 0.0:
+            raise ValueError("worker_pointer_pressure_temperature 必须是大于 0 的有限数")
+        if not math.isfinite(epsilon) or epsilon <= 0.0:
+            raise ValueError("worker_pointer_supply_epsilon 必须是大于 0 的有限数")
+        if str(config.worker_pointer_wait_discount_mode) != "physical_wait_exponential_v1":
+            raise ValueError(
+                "worker_pointer_wait_discount_mode 仅支持 physical_wait_exponential_v1"
+            )
+        if int(config.worker_pointer_v2_init_seed_offset) < 0:
+            raise ValueError("worker_pointer_v2_init_seed_offset 不能为负数")
     ratio = float(getattr(config, "workforce_preallocation_ratio", 1.0))
     if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
         raise ValueError("workforce_preallocation_ratio 必须是 [0, 1] 内的有限数")
@@ -437,6 +463,17 @@ def initialize_training_config(args, argv=None, system_name: str | None = None):
         raise ValueError(f"float32_matmul_precision 无效: {precision}")
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision(precision)
+
+    if (
+        str(getattr(configs, "team_selection_mode", "autoregressive"))
+        == "autoregressive_pressure_v2"
+        and int(configs.num_envs) != 4
+    ):
+        print(
+            "[Runtime][WorkerPointerV2] 警告：最终 num_envs="
+            f"{int(configs.num_envs)}，正式探索训练应通过 CLI 再次覆盖为 4。",
+            flush=True,
+        )
 
     if uses_runs_layout(configs):
         if getattr(args, "resume", False) and not str(getattr(configs, "run_id", "") or "").strip():
