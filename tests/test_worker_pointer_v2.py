@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 import torch
@@ -44,6 +46,37 @@ def _pressure_inputs() -> dict[str, torch.Tensor]:
         "worker_present": torch.tensor([[True, True, False]]),
         "worker_queue_invalid": torch.tensor([[False, False, True]]),
     }
+
+
+def test_v2_benchmark_summary_reports_ordered_quantiles() -> None:
+    from scripts.benchmark_worker_pointer_v2_decode import (
+        DECODE_VARIANTS,
+        summarize_samples,
+    )
+
+    summary = summarize_samples([3.0, 1.0, 2.0, 4.0])
+
+    assert summary == {"p10": 1.3, "p50": 2.5, "p90": 3.7, "mean": 2.5}
+    assert DECODE_VARIANTS == (
+        "decode_uncached_with_legacy_mean",
+        "decode_uncached_without_legacy_mean",
+        "decode_cached_with_legacy_mean",
+        "decode_cached_without_legacy_mean",
+    )
+
+
+def test_v2_benchmark_script_runs_from_project_root() -> None:
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, "-B", "scripts/benchmark_worker_pointer_v2_decode.py", "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--manifest" in completed.stdout
 
 
 def test_worker_pressure_context_uses_normalized_work_and_physical_wait_discount() -> None:

@@ -3129,19 +3129,31 @@ class PPOAgent:
                         valid_b_indices = torch.nonzero(valid_step).squeeze(-1)
                         valid_targets = target[valid_step]
                         
-                        selected_feats = worker_x[valid_b_indices, valid_targets]
+                        selected_feats = (
+                            worker_x[valid_b_indices, valid_targets]
+                            if not v2_mode
+                            else None
+                        )
                         
                         # 浣跨敤 clone() 淇濋殰 PyTorch 鑷姩姹傚鏈哄埗鐨勮繛缁€?(Gradient Preservation)
-                        next_team_emb_sum = team_emb_sum.clone()
-                        next_team_cnt = team_cnt.clone()
+                        next_team_emb_sum = (
+                            team_emb_sum.clone() if not v2_mode else team_emb_sum
+                        )
+                        next_team_cnt = team_cnt.clone() if not v2_mode else team_cnt
                         
-                        next_team_emb_sum[valid_b_indices] += selected_feats
-                        next_team_cnt[valid_b_indices] += 1
+                        if not v2_mode:
+                            assert selected_feats is not None
+                            next_team_emb_sum[valid_b_indices] += selected_feats
+                            next_team_cnt[valid_b_indices] += 1
                         
                         team_emb_sum = next_team_emb_sum
                         team_cnt = next_team_cnt
                         
-                        current_team_emb = team_emb_sum / torch.clamp(team_cnt, min=1.0)
+                        current_team_emb = (
+                            team_emb_sum / torch.clamp(team_cnt, min=1.0)
+                            if not v2_mode
+                            else None
+                        )
                         if v2_mode:
                             assert v2_team_state is not None and raw_worker_x_v2 is not None
                             safe_target = torch.clamp(target, min=0)
