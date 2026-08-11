@@ -12,7 +12,11 @@ from torch_geometric.nn import (
     global_mean_pool,
 )
 from configs import configs
-from models.worker_pointer_context import WorkerPointerV2State, WorkerPressureContext
+from models.worker_pointer_context import (
+    WorkerPointerV2DecodeCache,
+    WorkerPointerV2State,
+    WorkerPressureContext,
+)
 
 # ---------------------------------------------------------------------------
 # 辅助函数: 动态获取激活函数 (防止 ReLU 死亡)
@@ -510,6 +514,66 @@ class WorkerPointer(nn.Module):
             # input shape: [B,H] * 3 -> [B,3H] -> [B,H]
             return self.v2_team_proj(torch.cat([mapped_sum, mean, maximum], dim=-1))
 
+    def build_v2_decode_cache(
+        self,
+        *,
+        task_emb: torch.Tensor,
+        station_emb: torch.Tensor,
+        global_context: torch.Tensor,
+        worker_embs: torch.Tensor,
+        pressure_context: WorkerPressureContext,
+        demand: torch.Tensor,
+    ) -> WorkerPointerV2DecodeCache:
+        """构造单队复用的静态 key 与 query 特征，不跨团队或 update 保存。"""
+
+        batch_size, num_workers, hidden_dim = worker_embs.shape
+        assert task_emb.shape == station_emb.shape == (batch_size, hidden_dim)
+        assert global_context.shape == (batch_size, hidden_dim * 3)
+        assert pressure_context.pressure_all.shape == (batch_size, 5)
+        assert pressure_context.candidate_exposure.shape == (batch_size, num_workers, 10)
+        assert demand.reshape(-1).shape == (batch_size,)
+        with torch.autocast(device_type=task_emb.device.type, enabled=False):
+            query_prefix = torch.cat(
+                [task_emb.float(), station_emb.float(), global_context.float()], dim=-1
+            )
+            pressure_features = torch.cat(
+                [
+                    pressure_context.pressure_all.to(
+                        device=task_emb.device, dtype=torch.float32
+                    ),
+                    pressure_context.pressure_near.to(
+                        device=task_emb.device, dtype=torch.float32
+                    ),
+                ],
+                dim=-1,
+            )
+            candidate_features = torch.cat(
+                [
+                    worker_embs.float(),
+                    pressure_context.candidate_exposure.to(
+                        device=worker_embs.device, dtype=torch.float32
+                    ),
+                    pressure_context.candidate_max_exposure.to(
+                        device=worker_embs.device, dtype=torch.float32
+                    ),
+                ],
+                dim=-1,
+            )
+            candidate_keys = self.v2_key_proj(candidate_features)
+            supply_all = pressure_context.supply_all.to(
+                device=task_emb.device, dtype=torch.float32
+            )
+            demand_f = demand.to(
+                device=task_emb.device, dtype=torch.float32
+            ).reshape(-1).clamp_min(1.0)
+        return WorkerPointerV2DecodeCache(
+            candidate_keys=candidate_keys,
+            query_prefix=query_prefix,
+            pressure_features=pressure_features,
+            supply_all=supply_all,
+            demand=demand_f,
+        )
+
     def forward_choice_v2(
         self,
         *,
@@ -521,6 +585,7 @@ class WorkerPointer(nn.Module):
         team_state: WorkerPointerV2State,
         demand: torch.Tensor,
         mask: torch.Tensor | None,
+        decode_cache: WorkerPointerV2DecodeCache | None = None,
     ) -> torch.Tensor:
         """以增强状态表达执行原始 ``tanh(query + key)`` pointer 打分。"""
 
@@ -530,43 +595,46 @@ class WorkerPointer(nn.Module):
         assert pressure_context.pressure_all.shape == (batch_size, 5)
         assert pressure_context.candidate_exposure.shape == (batch_size, num_workers, 10)
         assert demand.reshape(-1).shape == (batch_size,)
+        cache = decode_cache or self.build_v2_decode_cache(
+            task_emb=task_emb,
+            station_emb=station_emb,
+            global_context=global_context,
+            worker_embs=worker_embs,
+            pressure_context=pressure_context,
+            demand=demand,
+        )
+        assert cache.candidate_keys.shape == (batch_size, num_workers, hidden_dim)
+        assert cache.query_prefix.shape == (batch_size, hidden_dim * 5)
+        assert cache.pressure_features.shape == (batch_size, 10)
+        assert cache.supply_all.shape == (batch_size, 5)
+        assert cache.demand.shape == (batch_size,)
         with torch.autocast(device_type=task_emb.device.type, enabled=False):
             team_repr = self.v2_team_representation(team_state)
             epsilon = float(getattr(self.config, "worker_pointer_supply_epsilon", 1.0e-6))
             consumption = (
                 team_state.selected_skill_sum.float()
-                / pressure_context.supply_all.float().clamp_min(epsilon)
+                / cache.supply_all.clamp_min(epsilon)
             )
-            demand_f = demand.to(device=task_emb.device, dtype=torch.float32).reshape(-1).clamp_min(1.0)
             selected_count = team_state.count.float().reshape(-1)
             progress = torch.stack(
-                [selected_count / demand_f, (demand_f - selected_count).clamp_min(0.0) / demand_f],
+                [
+                    selected_count / cache.demand,
+                    (cache.demand - selected_count).clamp_min(0.0) / cache.demand,
+                ],
                 dim=-1,
             )
             query_features = torch.cat(
                 [
-                    task_emb.float(),
-                    station_emb.float(),
-                    global_context.float(),
+                    cache.query_prefix,
                     team_repr.float(),
-                    pressure_context.pressure_all.to(device=task_emb.device, dtype=torch.float32),
-                    pressure_context.pressure_near.to(device=task_emb.device, dtype=torch.float32),
+                    cache.pressure_features,
                     consumption,
                     progress,
                 ],
                 dim=-1,
             )  # [B,6H+17]
-            candidate_features = torch.cat(
-                [
-                    worker_embs.float(),
-                    pressure_context.candidate_exposure.to(device=worker_embs.device, dtype=torch.float32),
-                    pressure_context.candidate_max_exposure.to(device=worker_embs.device, dtype=torch.float32),
-                ],
-                dim=-1,
-            )  # [B,N,H+12]
             query = self.v2_query_proj(query_features).unsqueeze(1)  # [B,1,H]
-            keys = self.v2_key_proj(candidate_features)  # [B,N,H]
-            scores = self.v2_attn(torch.tanh(query + keys)).squeeze(-1)  # [B,N]
+            scores = self.v2_attn(torch.tanh(query + cache.candidate_keys)).squeeze(-1)  # [B,N]
         # 后续可控消融可比较 query-candidate 交互 MLP 或 legacy score+压力残差；本轮不实现。
         if mask is not None:
             assert mask.shape == (batch_size, num_workers)

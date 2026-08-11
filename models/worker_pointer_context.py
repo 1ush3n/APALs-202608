@@ -40,6 +40,17 @@ class WorkerPointerV2State:
     selected_skill_sum: torch.Tensor
 
 
+@dataclass(frozen=True)
+class WorkerPointerV2DecodeCache:
+    """单个工序—工位团队解码中不随成员选择变化的 float32 张量。"""
+
+    candidate_keys: torch.Tensor
+    query_prefix: torch.Tensor
+    pressure_features: torch.Tensor
+    supply_all: torch.Tensor
+    demand: torch.Tensor
+
+
 def build_worker_pressure_context(
     *,
     task_features: torch.Tensor,
@@ -132,5 +143,6 @@ def build_worker_pressure_context(
 __all__ = [
     "WorkerPointerV2State",
     "WorkerPressureContext",
+    "WorkerPointerV2DecodeCache",
     "build_worker_pressure_context",
 ]

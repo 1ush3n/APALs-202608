@@ -205,6 +205,77 @@ def test_worker_pointer_v2_scores_enriched_context_and_preserves_mask() -> None:
     assert logits[0, 2].item() == pytest.approx(-1.0e4)
 
 
+def test_v2_decode_cache_preserves_logits_and_projection_gradients() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    torch.manual_seed(314)
+    head = WorkerPointer(_pointer_config("autoregressive_pressure_v2"))
+    context = build_worker_pressure_context(
+        **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+    )
+    task_emb = torch.randn(1, 8)
+    station_emb = torch.randn(1, 8)
+    global_context = torch.randn(1, 24)
+    worker_embs = torch.randn(1, 3, 8)
+    demand = torch.tensor([2.0])
+    mask = torch.tensor([[False, True, False]])
+    state = head.initialize_v2_state(batch_size=1, device=torch.device("cpu"))
+    state = head.advance_v2_state(
+        state,
+        worker_embs[:, 0],
+        torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0]]),
+    )
+
+    uncached = head.forward_choice_v2(
+        task_emb=task_emb,
+        station_emb=station_emb,
+        global_context=global_context,
+        worker_embs=worker_embs,
+        pressure_context=context,
+        team_state=state,
+        demand=demand,
+        mask=mask,
+    )
+    cache = head.build_v2_decode_cache(
+        task_emb=task_emb,
+        station_emb=station_emb,
+        global_context=global_context,
+        worker_embs=worker_embs,
+        pressure_context=context,
+        demand=demand,
+    )
+    cached = head.forward_choice_v2(
+        task_emb=task_emb,
+        station_emb=station_emb,
+        global_context=global_context,
+        worker_embs=worker_embs,
+        pressure_context=context,
+        team_state=state,
+        demand=demand,
+        mask=mask,
+        decode_cache=cache,
+    )
+
+    torch.testing.assert_close(cached, uncached, atol=1.0e-6, rtol=0.0)
+
+    uncached.sum().backward(retain_graph=True)
+    uncached_grads = {
+        name: parameter.grad.detach().clone()
+        for name, parameter in head.named_parameters()
+        if name.startswith("v2_") and parameter.grad is not None
+    }
+    head.zero_grad(set_to_none=True)
+    cached.sum().backward()
+    cached_grads = {
+        name: parameter.grad.detach().clone()
+        for name, parameter in head.named_parameters()
+        if name.startswith("v2_") and parameter.grad is not None
+    }
+    assert uncached_grads.keys() == cached_grads.keys()
+    for name in uncached_grads:
+        torch.testing.assert_close(cached_grads[name], uncached_grads[name])
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="需要 CUDA 验证 bf16 数值合同")
 def test_v2_pointer_logits_stay_float32_inside_bf16_autocast() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
