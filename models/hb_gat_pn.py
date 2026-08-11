@@ -479,7 +479,8 @@ class WorkerPointer(nn.Module):
             if valid is None
             else valid.to(device=selected_worker_emb.device, dtype=torch.bool).reshape(batch_size, 1)
         )
-        mapped = self.v2_member_proj(selected_worker_emb)  # [B,H] -> [B,H]
+        with torch.autocast(device_type=selected_worker_emb.device.type, enabled=False):
+            mapped = self.v2_member_proj(selected_worker_emb.float())  # [B,H] -> [B,H]
         mapped_for_state = mapped.to(state.mapped_sum.dtype)
         next_sum = state.mapped_sum + mapped_for_state * valid_mask.to(mapped_for_state.dtype)
         first_member = state.count <= 0
@@ -498,11 +499,16 @@ class WorkerPointer(nn.Module):
     def v2_team_representation(self, state: WorkerPointerV2State) -> torch.Tensor:
         """返回顺序不敏感的 sum+mean+max 团队表示。"""
 
-        nonempty = state.count > 0
-        mean = state.mapped_sum / state.count.clamp_min(1.0)
-        maximum = torch.where(nonempty, state.mapped_max, torch.zeros_like(state.mapped_max))
-        # input shape: [B,H] * 3 -> [B,3H] -> [B,H]
-        return self.v2_team_proj(torch.cat([state.mapped_sum, mean, maximum], dim=-1))
+        with torch.autocast(device_type=state.mapped_sum.device.type, enabled=False):
+            mapped_sum = state.mapped_sum.float()
+            count = state.count.float()
+            nonempty = count > 0
+            mean = mapped_sum / count.clamp_min(1.0)
+            maximum = torch.where(
+                nonempty, state.mapped_max.float(), torch.zeros_like(mapped_sum)
+            )
+            # input shape: [B,H] * 3 -> [B,3H] -> [B,H]
+            return self.v2_team_proj(torch.cat([mapped_sum, mean, maximum], dim=-1))
 
     def forward_choice_v2(
         self,
@@ -524,43 +530,43 @@ class WorkerPointer(nn.Module):
         assert pressure_context.pressure_all.shape == (batch_size, 5)
         assert pressure_context.candidate_exposure.shape == (batch_size, num_workers, 10)
         assert demand.reshape(-1).shape == (batch_size,)
-        dtype = task_emb.dtype
-        team_repr = self.v2_team_representation(team_state).to(dtype=dtype)
-        epsilon = float(getattr(self.config, "worker_pointer_supply_epsilon", 1.0e-6))
-        consumption = (
-            team_state.selected_skill_sum
-            / pressure_context.supply_all.clamp_min(epsilon)
-        ).to(dtype=dtype)
-        demand_f = demand.to(device=task_emb.device, dtype=torch.float32).reshape(-1).clamp_min(1.0)
-        selected_count = team_state.count.float().reshape(-1)
-        progress = torch.stack(
-            [selected_count / demand_f, (demand_f - selected_count).clamp_min(0.0) / demand_f],
-            dim=-1,
-        ).to(dtype=dtype)
-        query_features = torch.cat(
-            [
-                task_emb,
-                station_emb,
-                global_context,
-                team_repr,
-                pressure_context.pressure_all.to(device=task_emb.device, dtype=dtype),
-                pressure_context.pressure_near.to(device=task_emb.device, dtype=dtype),
-                consumption,
-                progress,
-            ],
-            dim=-1,
-        )  # [B,6H+17]
-        candidate_features = torch.cat(
-            [
-                worker_embs,
-                pressure_context.candidate_exposure.to(device=worker_embs.device, dtype=worker_embs.dtype),
-                pressure_context.candidate_max_exposure.to(device=worker_embs.device, dtype=worker_embs.dtype),
-            ],
-            dim=-1,
-        )  # [B,N,H+12]
-        query = self.v2_query_proj(query_features).unsqueeze(1)  # [B,1,H]
-        keys = self.v2_key_proj(candidate_features)  # [B,N,H]
-        scores = self.v2_attn(torch.tanh(query + keys)).squeeze(-1)  # [B,N]
+        with torch.autocast(device_type=task_emb.device.type, enabled=False):
+            team_repr = self.v2_team_representation(team_state)
+            epsilon = float(getattr(self.config, "worker_pointer_supply_epsilon", 1.0e-6))
+            consumption = (
+                team_state.selected_skill_sum.float()
+                / pressure_context.supply_all.float().clamp_min(epsilon)
+            )
+            demand_f = demand.to(device=task_emb.device, dtype=torch.float32).reshape(-1).clamp_min(1.0)
+            selected_count = team_state.count.float().reshape(-1)
+            progress = torch.stack(
+                [selected_count / demand_f, (demand_f - selected_count).clamp_min(0.0) / demand_f],
+                dim=-1,
+            )
+            query_features = torch.cat(
+                [
+                    task_emb.float(),
+                    station_emb.float(),
+                    global_context.float(),
+                    team_repr.float(),
+                    pressure_context.pressure_all.to(device=task_emb.device, dtype=torch.float32),
+                    pressure_context.pressure_near.to(device=task_emb.device, dtype=torch.float32),
+                    consumption,
+                    progress,
+                ],
+                dim=-1,
+            )  # [B,6H+17]
+            candidate_features = torch.cat(
+                [
+                    worker_embs.float(),
+                    pressure_context.candidate_exposure.to(device=worker_embs.device, dtype=torch.float32),
+                    pressure_context.candidate_max_exposure.to(device=worker_embs.device, dtype=torch.float32),
+                ],
+                dim=-1,
+            )  # [B,N,H+12]
+            query = self.v2_query_proj(query_features).unsqueeze(1)  # [B,1,H]
+            keys = self.v2_key_proj(candidate_features)  # [B,N,H]
+            scores = self.v2_attn(torch.tanh(query + keys)).squeeze(-1)  # [B,N]
         # 后续可控消融可比较 query-candidate 交互 MLP 或 legacy score+压力残差；本轮不实现。
         if mask is not None:
             assert mask.shape == (batch_size, num_workers)

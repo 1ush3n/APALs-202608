@@ -205,6 +205,34 @@ def test_worker_pointer_v2_scores_enriched_context_and_preserves_mask() -> None:
     assert logits[0, 2].item() == pytest.approx(-1.0e4)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="需要 CUDA 验证 bf16 数值合同")
+def test_v2_pointer_logits_stay_float32_inside_bf16_autocast() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    device = torch.device("cuda")
+    head = WorkerPointer(_pointer_config("autoregressive_pressure_v2")).to(device)
+    context = build_worker_pressure_context(
+        **{key: value.to(device) for key, value in _pressure_inputs().items()},
+        temperature=1.0,
+        supply_epsilon=1.0e-6,
+    )
+    state = head.initialize_v2_state(batch_size=1, device=device)
+    with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+        logits = head.forward_choice_v2(
+            task_emb=torch.randn(1, 8, device=device),
+            station_emb=torch.randn(1, 8, device=device),
+            global_context=torch.randn(1, 24, device=device),
+            worker_embs=torch.randn(1, 3, 8, device=device),
+            pressure_context=context,
+            team_state=state,
+            demand=torch.tensor([2.0], device=device),
+            mask=torch.tensor([[False, False, True]], device=device),
+        )
+
+    assert logits.dtype == torch.float32
+    assert logits[0, 2].item() == pytest.approx(-1.0e4)
+
+
 def test_v2_initialization_does_not_advance_legacy_rng_or_change_legacy_keys() -> None:
     torch.manual_seed(123)
     legacy = WorkerPointer(_pointer_config("autoregressive"))
