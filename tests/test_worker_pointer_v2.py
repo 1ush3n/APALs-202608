@@ -319,7 +319,9 @@ def test_v2_initialization_does_not_advance_legacy_rng_or_change_legacy_keys() -
     assert any(key.startswith("v2_") for key in v2.state_dict())
 
 
-def _v2_agent_and_ready_env() -> tuple[object, object, tuple[torch.Tensor, ...]]:
+def _v2_agent_and_ready_env(
+    device: torch.device | None = None,
+) -> tuple[object, object, tuple[torch.Tensor, ...]]:
     from environment import AirLineEnv_Graph
     from models.hb_gat_pn import HBGATPN
     from ppo_agent import PPOAgent
@@ -336,12 +338,52 @@ def _v2_agent_and_ready_env() -> tuple[object, object, tuple[torch.Tensor, ...]]
         gamma=0.99,
         k_epochs=1,
         eps_clip=0.2,
-        device=torch.device("cpu"),
+        device=device or torch.device("cpu"),
         batch_size=1,
         total_timesteps=1,
         config=__import__("configs").configs,
     )
     return agent, env, (obs, *masks)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="需要 CUDA 验证批量路径原始特征复用")
+def test_v2_batch_path_passes_uploaded_raw_features_to_pressure_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from configs import configs
+    from tests.test_joint_experiment_architecture import _small_overrides
+
+    devices: list[tuple[torch.device, torch.device]] = []
+    original = __import__("ppo_agent").PPOAgent._build_v2_pressure_context
+
+    def spy(self: object, **kwargs: object) -> object:
+        devices.append(
+            (kwargs["task_features"].device, kwargs["worker_features"].device)
+        )
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(
+        __import__("ppo_agent").PPOAgent, "_build_v2_pressure_context", spy
+    )
+    overrides = _small_overrides(
+        team_selection_mode="autoregressive_pressure_v2",
+        policy_action_scope="operation_station_worker",
+        actor_context_mode="attention",
+        batch_size=1,
+        lightning_precision="bf16-mixed",
+    )
+    with temporary_config(configs, overrides):
+        agent, _env, prepared = _v2_agent_and_ready_env(torch.device("cuda"))
+        obs, task_mask, station_mask, worker_mask = prepared
+        results = agent.select_actions_batch(
+            [obs], [task_mask], [station_mask], [worker_mask], deterministic=False
+        )
+
+    assert results[0][0] is not None and not results[0][4]
+    assert devices and all(
+        task_device.type == worker_device.type == "cuda"
+        for task_device, worker_device in devices
+    )
 
 
 @pytest.mark.parametrize("deterministic", [False, True])
@@ -352,14 +394,22 @@ def test_v2_single_and_deterministic_paths_call_v2_pointer(
     from configs import configs
     from tests.test_joint_experiment_architecture import _small_overrides
 
-    calls: list[int] = []
+    calls: list[object] = []
+    cache_build_calls: list[object] = []
     original = WorkerPointer.forward_choice_v2
+    original_build_cache = WorkerPointer.build_v2_decode_cache
 
     def spy(self: WorkerPointer, **kwargs: object) -> torch.Tensor:
-        calls.append(1)
+        calls.append(kwargs.get("decode_cache"))
         return original(self, **kwargs)
 
+    def cache_spy(self: WorkerPointer, **kwargs: object) -> object:
+        cache = original_build_cache(self, **kwargs)
+        cache_build_calls.append(cache)
+        return cache
+
     monkeypatch.setattr(WorkerPointer, "forward_choice_v2", spy)
+    monkeypatch.setattr(WorkerPointer, "build_v2_decode_cache", cache_spy)
     overrides = _small_overrides(
         team_selection_mode="autoregressive_pressure_v2",
         policy_action_scope="operation_station_worker",
@@ -379,21 +429,30 @@ def test_v2_single_and_deterministic_paths_call_v2_pointer(
         )
     assert action is not None and not invalid
     assert torch.isfinite(torch.tensor(logprob))
-    assert calls
+    assert calls and all(cache is not None for cache in calls)
+    assert len(cache_build_calls) == 1
 
 
 def test_v2_batch_path_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> None:
     from configs import configs
     from tests.test_joint_experiment_architecture import _small_overrides
 
-    calls: list[int] = []
+    calls: list[object] = []
+    cache_build_calls: list[object] = []
     original = WorkerPointer.forward_choice_v2
+    original_build_cache = WorkerPointer.build_v2_decode_cache
 
     def spy(self: WorkerPointer, **kwargs: object) -> torch.Tensor:
-        calls.append(1)
+        calls.append(kwargs.get("decode_cache"))
         return original(self, **kwargs)
 
+    def cache_spy(self: WorkerPointer, **kwargs: object) -> object:
+        cache = original_build_cache(self, **kwargs)
+        cache_build_calls.append(cache)
+        return cache
+
     monkeypatch.setattr(WorkerPointer, "forward_choice_v2", spy)
+    monkeypatch.setattr(WorkerPointer, "build_v2_decode_cache", cache_spy)
     overrides = _small_overrides(
         team_selection_mode="autoregressive_pressure_v2",
         policy_action_scope="operation_station_worker",
@@ -407,7 +466,8 @@ def test_v2_batch_path_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> None
             [obs], [task_mask], [station_mask], [worker_mask], deterministic=False
         )
     assert results[0][0] is not None and not results[0][4]
-    assert calls
+    assert calls and all(cache is not None for cache in calls)
+    assert len(cache_build_calls) == 1
 
 
 def test_v2_ppo_recompute_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -443,14 +503,22 @@ def test_v2_ppo_recompute_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> N
         memory.rewards.append(float(reward))
         memory.is_terminals.append(bool(done))
 
-        calls: list[int] = []
+        calls: list[object] = []
+        cache_build_calls: list[object] = []
         original = WorkerPointer.forward_choice_v2
+        original_build_cache = WorkerPointer.build_v2_decode_cache
 
         def spy(self: WorkerPointer, **kwargs: object) -> torch.Tensor:
-            calls.append(1)
+            calls.append(kwargs.get("decode_cache"))
             return original(self, **kwargs)
 
+        def cache_spy(self: WorkerPointer, **kwargs: object) -> object:
+            cache = original_build_cache(self, **kwargs)
+            cache_build_calls.append(cache)
+            return cache
+
         monkeypatch.setattr(WorkerPointer, "forward_choice_v2", spy)
+        monkeypatch.setattr(WorkerPointer, "build_v2_decode_cache", cache_spy)
         optimizer_parameter_ids = {
             id(parameter)
             for group in agent.optimizer.param_groups
@@ -469,7 +537,8 @@ def test_v2_ppo_recompute_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> N
     assert metrics["PointerV2/GradientNorm"] > 0.0
     assert metrics["PointerV2/GradientCoverage"] > 0.0
     assert metrics["PointerV2/PPOFirstRecomputeMaxAE"] <= 1.0e-4
-    assert calls
+    assert calls and all(cache is not None for cache in calls)
+    assert len(cache_build_calls) == 1
 
 
 @pytest.mark.parametrize(

@@ -1907,6 +1907,8 @@ class PPOAgent:
             v2_mode = str(getattr(self.config, "team_selection_mode", "autoregressive")) == "autoregressive_pressure_v2"
             v2_pressure = None
             v2_team_state = None
+            v2_decode_cache = None
+            v2_demand = None
             if v2_mode:
                 v2_pressure = self._build_v2_pressure_context(
                     task_features=obs['task'].x,
@@ -1918,6 +1920,15 @@ class PPOAgent:
                 )
                 v2_team_state = active_policy.worker_head.initialize_v2_state(
                     batch_size=1, device=self.device
+                )
+                v2_demand = torch.tensor([float(demand)], device=self.device)
+                v2_decode_cache = active_policy.worker_head.build_v2_decode_cache(
+                    task_emb=selected_task_emb,
+                    station_emb=x_dict['station'][int(station_action.item())].unsqueeze(0),
+                    global_context=global_context,
+                    worker_embs=worker_embs,
+                    pressure_context=v2_pressure,
+                    demand=v2_demand,
                 )
             
             # 鍔犲叆杩唬闃堝€煎拰 Fallback 闃叉鍥犳帺鐮佽繃搴﹂噸鍙犲彂鐢熸寰幆
@@ -1937,6 +1948,7 @@ class PPOAgent:
                 with self.autocast_context():
                     if v2_mode:
                         assert v2_pressure is not None and v2_team_state is not None
+                        assert v2_decode_cache is not None and v2_demand is not None
                         worker_logits = active_policy.worker_head.forward_choice_v2(
                             task_emb=selected_task_emb,
                             station_emb=x_dict['station'][int(station_action.item())].unsqueeze(0),
@@ -1944,8 +1956,9 @@ class PPOAgent:
                             worker_embs=worker_embs,
                             pressure_context=v2_pressure,
                             team_state=v2_team_state,
-                            demand=torch.tensor([float(demand)], device=self.device),
+                            demand=v2_demand,
                             mask=current_worker_mask.unsqueeze(0),
+                            decode_cache=v2_decode_cache,
                         )
                     else:
                         worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs, mask=current_worker_mask, current_team_emb=current_team_emb)
@@ -1977,8 +1990,6 @@ class PPOAgent:
                 worker_logprobs.append(w_lp)
                 
                 # 鍒锋柊宸查€夊洟闃熻〃寰佽蹇?
-                selected_worker_feats = worker_embs[0, team_indices, :]
-                current_team_emb = selected_worker_feats.mean(dim=0, keepdim=True) # [1, H]
                 if v2_mode:
                     assert v2_team_state is not None
                     v2_team_state = active_policy.worker_head.advance_v2_state(
@@ -1986,6 +1997,9 @@ class PPOAgent:
                         worker_embs[:, w_idx, :],
                         worker_skills[w_idx].unsqueeze(0).to(self.device),
                     )
+                else:
+                    selected_worker_feats = worker_embs[0, team_indices, :]
+                    current_team_emb = selected_worker_feats.mean(dim=0, keepdim=True) # [1, H]
                 
                 # 鏇存柊 Mask (閫夎繃鐨勪汉涓嶈兘鍐嶉€?
                 current_worker_mask = current_worker_mask.clone() # 纭繚涓?鍘熷湴淇敼 褰卞搷涓嬩竴杞?
@@ -2142,6 +2156,8 @@ class PPOAgent:
                 task_embs = x_dict_batch['task'][task_start:task_end]
                 station_embs = x_dict_batch['station'][station_start:station_end]
                 worker_embs = x_dict_batch['worker'][worker_start:worker_end]
+                raw_task_features = batch_obs['task'].x[task_start:task_end]
+                raw_worker_features = batch_obs['worker'].x[worker_start:worker_end]
                 
                 global_context_i = global_context_batch[i].unsqueeze(0)
                 
@@ -2400,11 +2416,14 @@ class PPOAgent:
                 v2_mode = str(getattr(self.config, "team_selection_mode", "autoregressive")) == "autoregressive_pressure_v2"
                 v2_pressure = None
                 v2_team_state = None
+                v2_decode_cache = None
+                v2_demand = None
+                v2_worker_skills = None
                 if v2_mode:
                     v2_context_started = time.perf_counter()
                     v2_pressure = self._build_v2_pressure_context(
-                        task_features=source_task_x,
-                        worker_features=worker_feats,
+                        task_features=raw_task_features,
+                        worker_features=raw_worker_features,
                         task_present=None,
                         task_action_invalid=m_task,
                         worker_present=None,
@@ -2416,6 +2435,18 @@ class PPOAgent:
                     )
                     v2_team_state = active_policy.worker_head.initialize_v2_state(
                         batch_size=1, device=self.device
+                    )
+                    v2_demand = torch.tensor([float(demand)], device=self.device)
+                    v2_worker_skills = raw_worker_features[
+                        :, worker_layout.skill_slice
+                    ]
+                    v2_decode_cache = active_policy.worker_head.build_v2_decode_cache(
+                        task_emb=selected_task_emb,
+                        station_emb=station_embs[int(station_action.item())].unsqueeze(0),
+                        global_context=global_context_i,
+                        worker_embs=worker_embs_i,
+                        pressure_context=v2_pressure,
+                        demand=v2_demand,
                     )
                 
                 max_iter = demand * 2
@@ -2431,6 +2462,7 @@ class PPOAgent:
                     with self.autocast_context():
                         if v2_mode:
                             assert v2_pressure is not None and v2_team_state is not None
+                            assert v2_decode_cache is not None and v2_demand is not None
                             worker_logits = active_policy.worker_head.forward_choice_v2(
                                 task_emb=selected_task_emb,
                                 station_emb=station_embs[int(station_action.item())].unsqueeze(0),
@@ -2438,8 +2470,9 @@ class PPOAgent:
                                 worker_embs=worker_embs_i,
                                 pressure_context=v2_pressure,
                                 team_state=v2_team_state,
-                                demand=torch.tensor([float(demand)], device=self.device),
+                                demand=v2_demand,
                                 mask=current_worker_mask.unsqueeze(0),
+                                decode_cache=v2_decode_cache,
                             )
                         else:
                             worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs_i, mask=current_worker_mask, current_team_emb=current_team_emb)
@@ -2469,10 +2502,9 @@ class PPOAgent:
                     team_indices.append(w_idx)
                     worker_logprobs.append(w_lp)
                     
-                    selected_worker_feats = worker_embs_i[0, team_indices, :]
-                    current_team_emb = selected_worker_feats.mean(dim=0, keepdim=True)
                     if v2_mode:
                         assert v2_team_state is not None and v2_pressure is not None
+                        assert v2_worker_skills is not None
                         selected_exposure = torch.cat(
                             (
                                 v2_pressure.candidate_exposure[:, w_idx, :],
@@ -2492,8 +2524,11 @@ class PPOAgent:
                         v2_team_state = active_policy.worker_head.advance_v2_state(
                             v2_team_state,
                             worker_embs_i[:, w_idx, :],
-                            worker_skills[w_idx].unsqueeze(0).to(self.device),
+                            v2_worker_skills[w_idx].unsqueeze(0),
                         )
+                    else:
+                        selected_worker_feats = worker_embs_i[0, team_indices, :]
+                        current_team_emb = selected_worker_feats.mean(dim=0, keepdim=True)
                     
                     current_worker_mask = current_worker_mask.clone()
                     current_worker_mask[w_idx] = True
@@ -3017,6 +3052,7 @@ class PPOAgent:
                     )
                     v2_pressure = None
                     v2_team_state = None
+                    v2_decode_cache = None
                     raw_worker_x_v2 = None
                     selected_station_emb_v2 = None
                     selected_demand_v2 = None
@@ -3044,6 +3080,14 @@ class PPOAgent:
                         selected_demand_v2 = raw_task_x_v2[
                             batch_indices, batch.y_task, 16
                         ]
+                        v2_decode_cache = self.policy.worker_head.build_v2_decode_cache(
+                            task_emb=sel_task_emb,
+                            station_emb=selected_station_emb_v2,
+                            global_context=global_context,
+                            worker_embs=worker_x,
+                            pressure_context=v2_pressure,
+                            demand=selected_demand_v2,
+                        )
                     
                     worker_steps = (
                         range(batch.y_team.size(1))
@@ -3060,6 +3104,7 @@ class PPOAgent:
                             assert v2_team_state is not None
                             assert selected_station_emb_v2 is not None
                             assert selected_demand_v2 is not None
+                            assert v2_decode_cache is not None
                             logits = self.policy.worker_head.forward_choice_v2(
                                 task_emb=sel_task_emb,
                                 station_emb=selected_station_emb_v2,
@@ -3069,6 +3114,7 @@ class PPOAgent:
                                 team_state=v2_team_state,
                                 demand=selected_demand_v2,
                                 mask=curr_mask,
+                                decode_cache=v2_decode_cache,
                             )
                         else:
                             logits = self.policy.worker_head.forward_choice(sel_task_emb, worker_x, mask=curr_mask, current_team_emb=current_team_emb)
