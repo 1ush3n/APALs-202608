@@ -498,7 +498,11 @@ def test_async_checkpoint_uses_explicit_submission_cadence(
     monkeypatch.setattr(train_lightning, "AsyncEvaluationManager", _Manager)
     callback = train_lightning.RolloutCheckpoint(tmp_path)
     saved: list[str] = []
-    trainer = SimpleNamespace(save_checkpoint=lambda path: saved.append(str(path)))
+    def _save_checkpoint(path: str) -> None:
+        saved.append(str(path))
+        torch.save({"apal_metadata": {"model_spec": {}}}, path)
+
+    trainer = SimpleNamespace(save_checkpoint=_save_checkpoint)
     module = SimpleNamespace(
         agent=SimpleNamespace(optimizer=None, use_schedule_free=False),
         last_completed_episode=4,

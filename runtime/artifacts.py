@@ -188,12 +188,12 @@ def build_run_manifest_payload(
         == "autoregressive_pressure_v2"
     )
     requested_logical_cap = (
-        int(getattr(config, "worker_pointer_v2_logical_batch_cap", 64))
+        int(getattr(config, "batch_size", 1))
         if v2_mode
         else None
     )
     effective_logical_cap = (
-        min(int(getattr(config, "batch_size", 1)), int(requested_logical_cap))
+        int(getattr(config, "batch_size", 1))
         if requested_logical_cap is not None
         else None
     )

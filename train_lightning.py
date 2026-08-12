@@ -576,6 +576,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     _validate_apcf_smoke_output_paths(checkpoint_paths)
     checkpoint_dir = checkpoint_paths["lightning_dir"]
     start_episode = 1
+    resume_batch_semantics = None
     if args.resume:
         resume_path = checkpoint_paths["lightning_latest"]
         if not resume_path.exists():
@@ -587,11 +588,18 @@ def run(args, *, config_initialized: bool = False) -> None:
             resume_checkpoint.model_spec,
             explicit_fields=getattr(args, "explicit_config_fields", set()),
         )
-        from runtime.checkpoints import validate_checkpoint_training_spec
+        from runtime.checkpoints import (
+            build_resume_batch_audit,
+            validate_checkpoint_training_spec,
+        )
 
         validate_checkpoint_training_spec(
             configs,
             resume_checkpoint.metadata,
+        )
+        resume_batch_semantics = build_resume_batch_audit(
+            resume_checkpoint.payload,
+            current_batch_size=int(configs.batch_size),
         )
         start_episode = _resume_start_episode(resume_checkpoint.payload)
         if start_episode > int(configs.max_episodes):
@@ -605,13 +613,24 @@ def run(args, *, config_initialized: bool = False) -> None:
         )
     if uses_runs_layout(configs) and str(getattr(configs, "run_dir", "") or "").strip():
         context = create_run_context(configs, PROJECT_ROOT, create_dirs=True)
-        write_run_context_files(context, configs, command="train_lightning", extra={"resume": bool(args.resume)})
+        write_run_context_files(
+            context,
+            configs,
+            command="train_lightning",
+            extra={
+                "resume": bool(args.resume),
+                "resume_batch_semantics": resume_batch_semantics,
+            },
+        )
     else:
         write_run_manifest(
             checkpoint_dir,
             configs,
             command="train_lightning",
-            extra={"resume": bool(args.resume)},
+            extra={
+                "resume": bool(args.resume),
+                "resume_batch_semantics": resume_batch_semantics,
+            },
         )
 
     num_envs = int(configs.num_envs)

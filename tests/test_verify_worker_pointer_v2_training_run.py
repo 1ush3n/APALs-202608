@@ -59,7 +59,7 @@ def _write_run(
                 "training_manifest_sha256": manifest_sha256,
                 "runtime": {
                     "num_envs": 4,
-                    "batch_size": 64,
+                    "batch_size": 256,
                     "accumulation_steps": 16,
                     "lightning_precision": "bf16-mixed",
                     "autocast_dtype": "bfloat16",
@@ -70,16 +70,16 @@ def _write_run(
                         else None
                     ),
                     "requested_logical_batch_cap": (
-                        64 if mode == "autoregressive_pressure_v2" else None
+                        256 if mode == "autoregressive_pressure_v2" else None
                     ),
                     "effective_logical_batch_cap": (
-                        64 if mode == "autoregressive_pressure_v2" else None
+                        256 if mode == "autoregressive_pressure_v2" else None
                     ),
                     "rollout_group_upper_bound": (
                         4 if mode == "autoregressive_pressure_v2" else None
                     ),
                     "target_max_samples_per_optimizer_step": (
-                        1024 if mode == "autoregressive_pressure_v2" else None
+                        4096 if mode == "autoregressive_pressure_v2" else None
                     ),
                 },
             }

@@ -179,7 +179,7 @@ def build_checkpoint_metadata(config: Config, **extra: Any) -> dict[str, Any]:
                 config.worker_pointer_v2_replay_mode
             ),
             "worker_pointer_v2_logical_batch_cap": int(
-                config.worker_pointer_v2_logical_batch_cap
+                config.batch_size
             ),
             "worker_pointer_v2_rollout_group_upper_bound": int(
                 config.worker_pointer_v2_rollout_group_upper_bound
@@ -208,9 +208,6 @@ def validate_checkpoint_training_spec(
         "worker_pointer_v2_replay_mode": str(
             config.worker_pointer_v2_replay_mode
         ),
-        "worker_pointer_v2_logical_batch_cap": int(
-            config.worker_pointer_v2_logical_batch_cap
-        ),
         "worker_pointer_v2_rollout_group_upper_bound": int(
             config.worker_pointer_v2_rollout_group_upper_bound
         ),
@@ -226,6 +223,26 @@ def validate_checkpoint_training_spec(
         raise ValueError(
             f"WorkerPointer v2 checkpoint training_spec 不兼容: {conflicts}"
         )
+
+
+def build_resume_batch_audit(
+    checkpoint_payload: Mapping[str, Any],
+    *,
+    current_batch_size: int,
+) -> dict[str, int | bool | None]:
+    """生成 resume 的 batch 迁移审计信息，不修改 checkpoint 内容。"""
+    agent_state = checkpoint_payload.get("apal_agent_state")
+    checkpoint_batch_size: int | None = None
+    if isinstance(agent_state, Mapping) and agent_state.get("batch_size") is not None:
+        checkpoint_batch_size = int(agent_state["batch_size"])
+    current = max(1, int(current_batch_size))
+    return {
+        "checkpoint_batch_size": checkpoint_batch_size,
+        "current_batch_size": current,
+        "override_applied": (
+            checkpoint_batch_size is not None and checkpoint_batch_size != current
+        ),
+    }
 
 
 def _strip_policy_prefix(state_dict: Mapping[str, Any]) -> dict[str, torch.Tensor]:

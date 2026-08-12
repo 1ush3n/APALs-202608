@@ -21,6 +21,10 @@ from models.worker_pointer_context import WorkerPressureContext, build_worker_pr
 from worker_feature_layout import resolve_worker_feature_layout
 from training.best_anchor_teacher import BestAnchorTeacherManager
 from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
+from runtime.batch_semantics import (
+    resolve_effective_ppo_batch_size,
+    resolve_v2_logical_batch_size,
+)
 try:
     from schedulefree import AdamWScheduleFree
 except ImportError:
@@ -166,10 +170,9 @@ class PPOAgent:
         self.device = device
         requested_batch_size = max(1, int(batch_size))
         batch_size_cap = max(0, int(getattr(self.config, "ppo_batch_size_cap", 0)))
-        self.batch_size = (
-            min(requested_batch_size, batch_size_cap)
-            if batch_size_cap > 0
-            else requested_batch_size
+        self.batch_size = resolve_effective_ppo_batch_size(
+            requested_batch_size,
+            self.config,
         )
         if self.batch_size != requested_batch_size:
             print(
@@ -3944,10 +3947,11 @@ class PPOAgent:
                 "v2 行为组超过配置上限: "
                 f"max={max(group_sizes)} upper_bound={group_upper_bound}"
             )
-        requested_logical_cap = int(
-            getattr(self.config, "worker_pointer_v2_logical_batch_cap", 64)
+        requested_logical_cap = int(self.batch_size)
+        logical_cap = resolve_v2_logical_batch_size(
+            int(self.batch_size),
+            self.config,
         )
-        logical_cap = min(requested_logical_cap, int(self.batch_size))
         accumulation_steps = max(1, int(self.accumulation_steps))
         seed = int(getattr(self.config, "seed", 42))
         threshold = 1.0e-3 if self.amp_dtype == torch.bfloat16 else 1.0e-4

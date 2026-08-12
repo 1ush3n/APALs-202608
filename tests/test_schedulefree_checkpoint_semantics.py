@@ -95,11 +95,16 @@ def test_sync_rollout_checkpoint_saves_schedulefree_eval_parameters(
     monkeypatch.setattr(train_lightning.configs, "async_eval_enabled", False)
     callback = train_lightning.RolloutCheckpoint(tmp_path)
     saved_modes: list[list[bool]] = []
-    trainer = SimpleNamespace(
-        save_checkpoint=lambda _path: saved_modes.append(
+
+    def _save_checkpoint(path: str) -> None:
+        saved_modes.append(
             [group["train_mode"] for group in optimizer.param_groups]
         )
-    )
+        checkpoint_path = Path(path)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"apal_metadata": {"model_spec": {}}}, checkpoint_path)
+
+    trainer = SimpleNamespace(save_checkpoint=_save_checkpoint)
     module = SimpleNamespace(
         agent=SimpleNamespace(optimizer=optimizer, use_schedule_free=True),
         last_completed_episode=1,

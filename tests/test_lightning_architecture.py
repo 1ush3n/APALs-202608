@@ -163,7 +163,7 @@ def test_lightning_checkpoint_contains_apal_metadata() -> None:
     )
 
 
-def test_lightning_v2_resume_rejects_effective_batch_override() -> None:
+def test_lightning_v2_resume_keeps_current_effective_batch_override() -> None:
     from configs import Config
     from runtime.checkpoints import build_checkpoint_metadata
 
@@ -172,25 +172,35 @@ def test_lightning_v2_resume_rejects_effective_batch_override() -> None:
     cfg.policy_action_scope = "operation_station_worker"
     cfg.actor_context_mode = "attention"
     cfg.worker_pointer_v2_behavior_replay = True
-    cfg.worker_pointer_v2_logical_batch_cap = 64
+    cfg.worker_pointer_v2_logical_batch_cap = 256
     cfg.worker_pointer_v2_rollout_group_upper_bound = 4
     cfg.accumulation_steps = 16
     agent = _Agent()
     agent.current_step = 0
-    agent.batch_size = 64
+    agent.batch_size = 256
     service = _RolloutService()
     service.config = cfg
     module = APALLightningModule(agent, service, eval_freq=1)
+    old_cfg = Config()
+    old_cfg.team_selection_mode = "autoregressive_pressure_v2"
+    old_cfg.policy_action_scope = "operation_station_worker"
+    old_cfg.actor_context_mode = "attention"
+    old_cfg.worker_pointer_v2_behavior_replay = True
+    old_cfg.batch_size = 64
+    old_cfg.worker_pointer_v2_logical_batch_cap = 64
+    old_cfg.worker_pointer_v2_rollout_group_upper_bound = 4
+    old_cfg.accumulation_steps = 16
     checkpoint = {
-        "apal_metadata": build_checkpoint_metadata(cfg),
-        "apal_agent_state": {"current_step": 3, "batch_size": 256},
+        "apal_metadata": build_checkpoint_metadata(old_cfg),
+        "apal_agent_state": {"current_step": 3, "batch_size": 64},
     }
 
-    with pytest.raises(ValueError, match="有效逻辑 batch"):
-        module.on_load_checkpoint(checkpoint)
+    module.on_load_checkpoint(checkpoint)
 
-    assert agent.current_step == 0
-    assert agent.batch_size == 64
+    assert agent.current_step == 3
+    assert agent.batch_size == 256
+    assert module.resume_checkpoint_batch_size == 64
+    assert module.resume_batch_override_applied is True
 
 
 def test_rollout_checkpoint_saves_latest_and_best(tmp_path) -> None:

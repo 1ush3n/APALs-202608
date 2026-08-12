@@ -201,7 +201,7 @@ def test_training_config_selects_linux_profile() -> None:
     assert Path(paths[-1]).name == "linux_server.yaml"
 
 
-def test_worker_pointer_v2_linux_config_keeps_64_by_16_training_semantics() -> None:
+def test_worker_pointer_v2_linux_config_keeps_256_by_16_training_semantics() -> None:
     cfg = Config()
     _, paths = load_training_config(
         [
@@ -216,12 +216,19 @@ def test_worker_pointer_v2_linux_config_keeps_64_by_16_training_semantics() -> N
         system_name="Linux",
     )
 
-    assert cfg.batch_size == 64
+    assert cfg.batch_size == 256
     assert cfg.accumulation_steps == 16
     assert cfg.worker_pointer_v2_behavior_replay is True
     assert cfg.worker_pointer_v2_replay_mode == "behavior_group_exact_v1"
-    assert cfg.worker_pointer_v2_logical_batch_cap == 64
+    assert cfg.worker_pointer_v2_logical_batch_cap == 256
     assert cfg.worker_pointer_v2_rollout_group_upper_bound == 4
+    assert cfg.async_eval_enabled is True
+    assert cfg.async_eval_submit_every_episodes == 3
+    assert cfg.async_eval_worker_count == 2
+    assert cfg.checkpoint_selection_protocol == "multiscale_manifest"
+    assert cfg.checkpoint_selection_manifest_path == (
+        "data/initial_selection_manifests/real_four_instances_temperature0_v1.json"
+    )
     # Linux 硬件层仍可给出 16；正式启动命令须最终覆盖为 4。
     assert cfg.num_envs == 16
     assert Path(paths[-1]).name == "linux_server.yaml"
@@ -317,6 +324,84 @@ def test_initialize_runtime_cli_leaf_override_wins_nested_experiment_defaults() 
     assert cfg.batch_size == 64
     assert args.batch_size == 64
     assert cfg.train_data_path_or_dir == "data/scale_400_800_datasets"
+
+
+@pytest.mark.parametrize(
+    "batch_args",
+    [
+        ["--batch_size", "256"],
+        ["--batch_size=256"],
+        ["--batch-size", "256"],
+    ],
+)
+def test_compat_batch_size_cli_has_final_priority(batch_args: list[str]) -> None:
+    cfg = Config()
+    args = initialize_hydra_runtime(
+        [
+            "experiment=initial_worker_pointer_v2_exploratory",
+            "train.batch_size=16",
+            *batch_args,
+        ],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.batch_size == 256
+    assert args.batch_size == 256
+    assert "batch_size" in args.explicit_config_fields
+
+
+def test_compat_async_cadence_cli_has_final_priority() -> None:
+    cfg = Config()
+    args = initialize_hydra_runtime(
+        [
+            "experiment=initial_worker_pointer_v2_exploratory",
+            "train.async_eval_submit_every_episodes=5",
+            "--async_eval_submit_every_episodes",
+            "2",
+        ],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.async_eval_submit_every_episodes == 2
+    assert args.async_eval_submit_every_episodes == 2
+    assert "async_eval_submit_every_episodes" in args.explicit_config_fields
+
+
+def test_compat_batch_size_cli_disables_windows_platform_cap() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        [
+            "experiment=initial_worker_pointer_v2_exploratory",
+            "--batch_size",
+            "256",
+        ],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Windows",
+        create_run_context=False,
+    )
+
+    assert cfg.batch_size == 256
+    assert cfg.ppo_batch_size_cap == 0
+
+
+def test_v2_default_batch_is_256_on_windows_hardware_profile() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_exploratory"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Windows",
+        create_run_context=False,
+    )
+
+    assert cfg.batch_size == 256
 
 
 def test_ctg_margin2_experiment_loads_through_actual_training_entry() -> None:

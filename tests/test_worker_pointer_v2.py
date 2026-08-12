@@ -628,11 +628,11 @@ def test_v2_experiment_config_is_isolated_and_explicit() -> None:
     assert cfg.actor_context_mode == "attention"
     assert cfg.lightning_precision == "bf16-mixed"
     assert cfg.num_envs == 4
-    assert cfg.batch_size == 64
+    assert cfg.batch_size == 256
     assert cfg.accumulation_steps == 16
     assert cfg.worker_pointer_v2_behavior_replay is True
     assert cfg.worker_pointer_v2_replay_mode == "behavior_group_exact_v1"
-    assert cfg.worker_pointer_v2_logical_batch_cap == 64
+    assert cfg.worker_pointer_v2_logical_batch_cap == 256
     assert cfg.worker_pointer_v2_rollout_group_upper_bound == 4
     assert cfg.evaluation_protocol == "training_auto_eval_only"
 
@@ -650,7 +650,7 @@ def test_run_manifest_records_model_and_runtime_semantics(
     cfg.evaluation_protocol = "training_auto_eval_only"
     cfg.lightning_precision = "bf16-mixed"
     cfg.num_envs = 4
-    cfg.batch_size = 64
+    cfg.batch_size = 256
     cfg.accumulation_steps = 16
     cfg.worker_pointer_v2_behavior_replay = True
     payload = build_run_manifest_payload(cfg, command="pytest")
@@ -661,10 +661,10 @@ def test_run_manifest_records_model_and_runtime_semantics(
     assert payload["runtime"]["autocast_dtype"] == "bfloat16"
     assert payload["runtime"]["grad_scaler_enabled"] is False
     assert payload["runtime"]["worker_pointer_v2_replay_mode"] == "behavior_group_exact_v1"
-    assert payload["runtime"]["requested_logical_batch_cap"] == 64
-    assert payload["runtime"]["effective_logical_batch_cap"] == 64
+    assert payload["runtime"]["requested_logical_batch_cap"] == 256
+    assert payload["runtime"]["effective_logical_batch_cap"] == 256
     assert payload["runtime"]["rollout_group_upper_bound"] == 4
-    assert payload["runtime"]["target_max_samples_per_optimizer_step"] == 1024
+    assert payload["runtime"]["target_max_samples_per_optimizer_step"] == 4096
     assert payload["runtime"]["cublas_workspace_config"] == ":4096:8"
     assert payload["runtime"]["deterministic_algorithms_warn_only"] is True
 
