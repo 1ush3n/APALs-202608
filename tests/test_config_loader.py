@@ -201,6 +201,32 @@ def test_training_config_selects_linux_profile() -> None:
     assert Path(paths[-1]).name == "linux_server.yaml"
 
 
+def test_worker_pointer_v2_linux_config_keeps_64_by_16_training_semantics() -> None:
+    cfg = Config()
+    _, paths = load_training_config(
+        [
+            str(
+                PROJECT_ROOT
+                / "conf"
+                / "experiment"
+                / "initial_worker_pointer_v2_exploratory.yaml"
+            )
+        ],
+        target=cfg,
+        system_name="Linux",
+    )
+
+    assert cfg.batch_size == 64
+    assert cfg.accumulation_steps == 16
+    assert cfg.worker_pointer_v2_behavior_replay is True
+    assert cfg.worker_pointer_v2_replay_mode == "behavior_group_exact_v1"
+    assert cfg.worker_pointer_v2_logical_batch_cap == 64
+    assert cfg.worker_pointer_v2_rollout_group_upper_bound == 4
+    # Linux 硬件层仍可给出 16；正式启动命令须最终覆盖为 4。
+    assert cfg.num_envs == 16
+    assert Path(paths[-1]).name == "linux_server.yaml"
+
+
 def test_experiments_do_not_embed_hardware_profiles() -> None:
     experiment_dir = PROJECT_ROOT / "conf" / "experiment"
     for path in experiment_dir.glob("*.yaml"):

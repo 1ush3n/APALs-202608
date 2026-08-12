@@ -123,12 +123,27 @@ def _run_checks(
         observed_mode=model_spec.get("team_selection_mode"),
         observed_scope=model_spec.get("policy_action_scope"),
     )
-    checks["runtime"] = _check(
+    runtime_ok = (
         int(runtime.get("num_envs", 0)) == 4
         and runtime.get("lightning_precision") == "bf16-mixed"
         and runtime.get("autocast_dtype") == "bfloat16"
-        and runtime.get("grad_scaler_enabled") is False,
-        "运行必须为 4 环境 bf16 且禁用 GradScaler",
+        and runtime.get("grad_scaler_enabled") is False
+    )
+    if require_v2:
+        runtime_ok = runtime_ok and (
+            int(runtime.get("batch_size", 0)) == 64
+            and int(runtime.get("accumulation_steps", 0)) == 16
+            and runtime.get("worker_pointer_v2_replay_mode")
+            == "behavior_group_exact_v1"
+            and int(runtime.get("requested_logical_batch_cap", 0)) == 64
+            and int(runtime.get("effective_logical_batch_cap", 0)) == 64
+            and int(runtime.get("rollout_group_upper_bound", 0)) == 4
+            and int(runtime.get("target_max_samples_per_optimizer_step", 0))
+            == 1024
+        )
+    checks["runtime"] = _check(
+        runtime_ok,
+        "运行必须为 4 环境 bf16、禁用 GradScaler；v2 还必须采用 64×16 的 behavior_group_exact_v1",
         observed=dict(runtime),
     )
     manifest_file = _resolve_manifest_path(run_dir, manifest.get("training_manifest_path"))

@@ -20,6 +20,8 @@ class Memory:
         # 与每条动作严格对齐；仅门控团队动作保存冻结候选，其他动作为 None。
         self.gated_team_traces = []
         self.anchor_proposal_traces = []
+        # WorkerPointer v2 行为轨迹；与动作严格对齐，仅 v2 模式写入，其余为 None。
+        self.worker_pointer_v2_behavior_traces = []
 
     def clear(self) -> None:
         del self.states[:]
@@ -30,6 +32,7 @@ class Memory:
         del self.is_truncated[:]
         del self.masks[:]
         del self.values[:]
+        del self.worker_pointer_v2_behavior_traces[:]
         del self.gated_team_traces[:]
         del self.anchor_proposal_traces[:]
         gc.collect()

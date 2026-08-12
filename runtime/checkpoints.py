@@ -173,8 +173,59 @@ def build_checkpoint_metadata(config: Config, **extra: Any) -> dict[str, Any]:
             )
             if loaded_key_count > 0:
                 metadata["apcf_pretrain_loaded_model_key_count"] = loaded_key_count
+    if str(config.team_selection_mode) == "autoregressive_pressure_v2":
+        metadata["training_spec"] = {
+            "worker_pointer_v2_replay_mode": str(
+                config.worker_pointer_v2_replay_mode
+            ),
+            "worker_pointer_v2_logical_batch_cap": int(
+                config.worker_pointer_v2_logical_batch_cap
+            ),
+            "worker_pointer_v2_rollout_group_upper_bound": int(
+                config.worker_pointer_v2_rollout_group_upper_bound
+            ),
+            "worker_pointer_v2_per_sample_heads": True,
+            "accumulation_steps": int(config.accumulation_steps),
+        }
     metadata.update(extra)
     return metadata
+
+
+def validate_checkpoint_training_spec(
+    config: Config,
+    metadata: Mapping[str, Any],
+) -> None:
+    """在恢复训练状态前校验 WorkerPointer v2 的数值重放语义。"""
+    if str(config.team_selection_mode) != "autoregressive_pressure_v2":
+        return
+    saved = metadata.get("training_spec")
+    if not isinstance(saved, Mapping):
+        raise ValueError(
+            "WorkerPointer v2 checkpoint 缺少 training_spec；"
+            "旧 256/大批形状语义不得恢复为 behavior_group_exact_v1"
+        )
+    expected = {
+        "worker_pointer_v2_replay_mode": str(
+            config.worker_pointer_v2_replay_mode
+        ),
+        "worker_pointer_v2_logical_batch_cap": int(
+            config.worker_pointer_v2_logical_batch_cap
+        ),
+        "worker_pointer_v2_rollout_group_upper_bound": int(
+            config.worker_pointer_v2_rollout_group_upper_bound
+        ),
+        "worker_pointer_v2_per_sample_heads": True,
+        "accumulation_steps": int(config.accumulation_steps),
+    }
+    conflicts = {
+        key: (saved.get(key), expected_value)
+        for key, expected_value in expected.items()
+        if saved.get(key) != expected_value
+    }
+    if conflicts:
+        raise ValueError(
+            f"WorkerPointer v2 checkpoint training_spec 不兼容: {conflicts}"
+        )
 
 
 def _strip_policy_prefix(state_dict: Mapping[str, Any]) -> dict[str, torch.Tensor]:

@@ -85,6 +85,11 @@ class Config:
     worker_pointer_supply_epsilon: float = 1.0e-6
     worker_pointer_wait_discount_mode: str = "physical_wait_exponential_v1"
     worker_pointer_v2_init_seed_offset: int = 1009
+    # WorkerPointer v2 行为组同形重放（behavior_group_exact_v1）。
+    worker_pointer_v2_behavior_replay: bool = False
+    worker_pointer_v2_logical_batch_cap: int = 64
+    worker_pointer_v2_replay_mode: str = "behavior_group_exact_v1"
+    worker_pointer_v2_rollout_group_upper_bound: int = 4
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
     

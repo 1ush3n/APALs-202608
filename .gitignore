@@ -46,7 +46,7 @@ wandb/
 # ============================================================
 /scratch/
 /pytest_tmp/
-/.pytest_tmp_v2/
+/.pytest_tmp*/
 /docs/*
 !/docs/
 !/docs/使用说明.md

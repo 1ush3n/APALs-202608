@@ -59,9 +59,28 @@ def _write_run(
                 "training_manifest_sha256": manifest_sha256,
                 "runtime": {
                     "num_envs": 4,
+                    "batch_size": 64,
+                    "accumulation_steps": 16,
                     "lightning_precision": "bf16-mixed",
                     "autocast_dtype": "bfloat16",
                     "grad_scaler_enabled": False,
+                    "worker_pointer_v2_replay_mode": (
+                        "behavior_group_exact_v1"
+                        if mode == "autoregressive_pressure_v2"
+                        else None
+                    ),
+                    "requested_logical_batch_cap": (
+                        64 if mode == "autoregressive_pressure_v2" else None
+                    ),
+                    "effective_logical_batch_cap": (
+                        64 if mode == "autoregressive_pressure_v2" else None
+                    ),
+                    "rollout_group_upper_bound": (
+                        4 if mode == "autoregressive_pressure_v2" else None
+                    ),
+                    "target_max_samples_per_optimizer_step": (
+                        1024 if mode == "autoregressive_pressure_v2" else None
+                    ),
                 },
             }
         ),
@@ -119,3 +138,21 @@ def test_training_gate_report_fails_closed_for_incomplete_evaluation(tmp_path: P
 
     assert report["status"] == "failed"
     assert report["checks"]["scalar_contract"]["passed"] is False
+
+
+def test_training_gate_report_fails_closed_for_missing_group_replay_semantics(
+    tmp_path: Path,
+) -> None:
+    from scripts.verify_worker_pointer_v2_training_run import evaluate_training_run
+
+    v2_run = tmp_path / "results" / "initial_worker_pointer_v2_exploratory" / "v2"
+    _write_run(v2_run, mode="autoregressive_pressure_v2")
+    manifest_path = v2_run / "configs" / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["runtime"].pop("worker_pointer_v2_replay_mode")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    report = evaluate_training_run(v2_run)
+
+    assert report["status"] == "failed"
+    assert report["checks"]["runtime"]["passed"] is False

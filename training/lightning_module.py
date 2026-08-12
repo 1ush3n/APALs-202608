@@ -165,12 +165,30 @@ class APALLightningModule(pl.LightningModule):
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         metadata = checkpoint.get("apal_metadata", {})
         if isinstance(metadata, dict):
+            from runtime.checkpoints import validate_checkpoint_training_spec
+
+            validate_checkpoint_training_spec(
+                self.rollout_service.config,
+                metadata,
+            )
             self.last_completed_episode = int(metadata.get("episode", 0))
         agent_state = checkpoint.get("apal_agent_state", {})
         if not isinstance(agent_state, dict):
             return
-        self.agent.current_step = int(agent_state.get("current_step", self.agent.current_step))
-        self.agent.batch_size = int(agent_state.get("batch_size", self.agent.batch_size))
+        saved_batch_size = int(agent_state.get("batch_size", self.agent.batch_size))
+        if (
+            str(getattr(self.rollout_service.config, "team_selection_mode", ""))
+            == "autoregressive_pressure_v2"
+            and saved_batch_size != int(self.agent.batch_size)
+        ):
+            raise ValueError(
+                "WorkerPointer v2 checkpoint 有效逻辑 batch 与当前运行不兼容: "
+                f"checkpoint={saved_batch_size}, current={self.agent.batch_size}"
+            )
+        self.agent.current_step = int(
+            agent_state.get("current_step", self.agent.current_step)
+        )
+        self.agent.batch_size = saved_batch_size
         scaler_state = agent_state.get("scaler")
         if isinstance(scaler_state, dict) and hasattr(self.agent, "scaler"):
             self.agent.scaler.load_state_dict(scaler_state)

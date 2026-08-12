@@ -587,6 +587,12 @@ def run(args, *, config_initialized: bool = False) -> None:
             resume_checkpoint.model_spec,
             explicit_fields=getattr(args, "explicit_config_fields", set()),
         )
+        from runtime.checkpoints import validate_checkpoint_training_spec
+
+        validate_checkpoint_training_spec(
+            configs,
+            resume_checkpoint.metadata,
+        )
         start_episode = _resume_start_episode(resume_checkpoint.payload)
         if start_episode > int(configs.max_episodes):
             raise ValueError(

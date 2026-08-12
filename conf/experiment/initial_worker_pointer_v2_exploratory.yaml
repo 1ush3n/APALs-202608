@@ -38,6 +38,11 @@ model:
   worker_pointer_v2_init_seed_offset: 1009
 
 train:
-  batch_size: 256
+  batch_size: 64
+  accumulation_steps: 16
   num_envs: 4
   lightning_precision: bf16-mixed
+  worker_pointer_v2_behavior_replay: true
+  worker_pointer_v2_replay_mode: behavior_group_exact_v1
+  worker_pointer_v2_logical_batch_cap: 64
+  worker_pointer_v2_rollout_group_upper_bound: 4

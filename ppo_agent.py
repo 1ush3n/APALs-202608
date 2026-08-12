@@ -2102,6 +2102,12 @@ class PPOAgent:
         eval_fail_flags = []
         gated_team_traces: list[FrozenGatedTeamTrace | None] = [None] * batch_size
         anchor_proposal_traces: list[FrozenAnchorProposalTrace | None] = [None] * batch_size
+        # WorkerPointer v2 行为三部分 log-prob（task/station/team），与 results 顺序对齐。
+        self.last_v2_behavior_logprobs = [None] * batch_size
+        v2_behavior_mode = (
+            str(getattr(self.config, "team_selection_mode", "autoregressive"))
+            == "autoregressive_pressure_v2"
+        )
 
         profile: Dict[str, float] = {}
 
@@ -2210,6 +2216,13 @@ class PPOAgent:
                     ).any()
                 )
                 if is_virtual_task:
+                    if v2_behavior_mode:
+                        # 虚拟任务不产生 station/team 决策，三部分 log-prob 中后两列为零。
+                        self.last_v2_behavior_logprobs[i] = (
+                            float(task_logprob.detach().float().item()),
+                            0.0,
+                            0.0,
+                        )
                     state_value_tensors.append(state_values_batch[i])
                     decoded_actions.append((t_idx, 0, [], task_logprob, None))
                     task_mask_refs.append(m_task)
@@ -2563,6 +2576,13 @@ class PPOAgent:
                     if worker_logprobs
                     else torch.tensor(0.0, device=self.device)
                 )
+                if v2_behavior_mode:
+                    # 记录行为三部分 log-prob，供 group-aware 同形重放使用。
+                    self.last_v2_behavior_logprobs[i] = (
+                        float(task_logprob.detach().float().item()),
+                        float(station_logprob.detach().float().item()),
+                        float(total_worker_logprob.detach().float().item()),
+                    )
                 state_value_tensors.append(state_values_batch[i])
                 decoded_actions.append(
                     (
@@ -2918,6 +2938,29 @@ class PPOAgent:
         kl_meltdown_occurred = False 
         total_batches_diagnosed = 0 
         kl_exceeded_count = 0
+
+        v2_behavior_replay = (
+            action_scope == "operation_station_worker"
+            and str(getattr(self.config, "team_selection_mode", "autoregressive"))
+            == "autoregressive_pressure_v2"
+            and bool(getattr(self.config, "worker_pointer_v2_behavior_replay", False))
+        )
+        if v2_behavior_replay:
+            if env is None:
+                raise RuntimeError("v2 行为同形重放要求提供 env 实例（snapshot 重建依赖 env）")
+            return self._run_v2_behavior_replay_update(
+                memory=memory,
+                env=env,
+                current_ep=current_ep,
+                advantages=advantages,
+                rewards=rewards,
+                old_logprobs=old_logprobs,
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                action_scope=action_scope,
+            )
+
         for i_epoch in range(self.k_epochs):
             epoch_kls = []
             
@@ -3594,4 +3637,655 @@ class PPOAgent:
                 }
             )
         metrics.update(distill_lifecycle)
+        return metrics
+
+    def _build_v2_behavior_group_batch(
+        self,
+        *,
+        memory: Any,
+        env: Any,
+        memory_indices: list[int],
+        b_task: torch.Tensor,
+        b_station: torch.Tensor,
+        b_team: torch.Tensor,
+        old_logprobs: torch.Tensor,
+        rewards: torch.Tensor,
+        advantages: torch.Tensor,
+    ) -> Any:
+        """按行为组原顺序重建 PyG Batch，并绑定节点级 mask 与样本级目标。"""
+        if not memory_indices:
+            raise ValueError("v2 行为组不能为空")
+        data_list: list[Any] = []
+        max_team = int(b_team.shape[1]) if b_team.ndim == 2 else 1
+        for raw_index in memory_indices:
+            index = int(raw_index)
+            state = env.rebuild_state_from_snapshot(memory.states[index])
+            state.y_task = b_task[index].reshape(1)
+            state.y_station = b_station[index].reshape(1)
+            state.y_team = b_team[index, :max_team].reshape(1, max_team)
+            state.y_logprob = old_logprobs[index].reshape(1)
+            state.y_reward = rewards[index].reshape(1)
+            state.y_advantage = advantages[index].reshape(1)
+            state.y_memory_index = torch.tensor([index], dtype=torch.long)
+            if len(memory.values) > index:
+                state.y_value = torch.as_tensor(
+                    [float(memory.values[index])], dtype=torch.float32
+                )
+            if len(memory.masks) <= index:
+                raise RuntimeError(f"v2 行为组缺少动作 mask: memory_index={index}")
+            task_mask, station_mask, worker_mask = memory.masks[index]
+            # 节点级 mask 保持原秩；PyG Batch 会沿节点维拼接。
+            state.y_task_mask = torch.as_tensor(task_mask, dtype=torch.bool)
+            state.y_station_mask = torch.as_tensor(station_mask, dtype=torch.bool)
+            state.y_worker_mask = torch.as_tensor(worker_mask, dtype=torch.bool)
+            data_list.append(state)
+        group_batch = Batch.from_data_list(data_list).to(self.device)
+        assert int(group_batch.num_graphs) == len(memory_indices)
+        return group_batch
+
+    @staticmethod
+    def _normalized_categorical_entropy(
+        entropy: torch.Tensor,
+        invalid_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """按每个样本自身合法动作数归一化熵；单一合法动作的归一化熵为零。"""
+        valid_count = (~invalid_mask).sum(dim=-1).to(dtype=torch.float32)
+        denominator = torch.log(valid_count.clamp_min(2.0))
+        normalized = entropy.float() / denominator
+        return torch.where(valid_count > 1.0, normalized, torch.zeros_like(normalized))
+
+    def _replay_v2_behavior_group(self, batch: Any) -> list[dict[str, torch.Tensor]]:
+        """编码器/critic 按原行为组前向，动作 head 按 rollout 的 B=1 逐样本重放。"""
+        with self.autocast_context():
+            x_dict, global_context = self.policy(batch)
+            state_values = self.policy.get_value(
+                batch, actor_x_dict_encoded=x_dict
+            ).reshape(-1)
+
+        group_size = int(batch.num_graphs)
+        assert global_context.shape[0] == group_size
+        assert state_values.shape == (group_size,)
+        task_ptr = batch["task"].ptr.detach().cpu().tolist()
+        station_ptr = batch["station"].ptr.detach().cpu().tolist()
+        worker_ptr = batch["worker"].ptr.detach().cpu().tolist()
+        task_targets_cpu = batch.y_task.detach().cpu().tolist()
+        station_targets_cpu = batch.y_station.detach().cpu().tolist()
+        team_targets_cpu = batch.y_team.detach().cpu().tolist()
+        outputs: list[dict[str, torch.Tensor]] = []
+        worker_layout = resolve_worker_feature_layout(self.config)
+        num_skills = int(worker_layout.num_skill_types)
+
+        for sample_index in range(group_size):
+            task_start, task_end = task_ptr[sample_index : sample_index + 2]
+            station_start, station_end = station_ptr[sample_index : sample_index + 2]
+            worker_start, worker_end = worker_ptr[sample_index : sample_index + 2]
+            task_embs = x_dict["task"][task_start:task_end]
+            station_embs = x_dict["station"][station_start:station_end]
+            worker_embs = x_dict["worker"][worker_start:worker_end]
+            raw_task = batch["task"].x[task_start:task_end]
+            raw_worker = batch["worker"].x[worker_start:worker_end]
+            task_mask = batch.y_task_mask[task_start:task_end].bool()
+            station_mask_matrix = batch.y_station_mask[task_start:task_end].bool()
+            worker_queue_mask = batch.y_worker_mask[worker_start:worker_end].bool()
+            global_i = global_context[sample_index].unsqueeze(0)
+            task_target = batch.y_task[sample_index].reshape(1)
+            task_id = int(task_targets_cpu[sample_index])
+            assert 0 <= task_id < task_embs.shape[0]
+
+            with self.autocast_context():
+                task_logits = self.policy.task_head(
+                    task_embs, global_i, mask=task_mask
+                )
+            task_logits = torch.nan_to_num(task_logits, nan=-1.0e4)
+            task_dist = Categorical(logits=task_logits.float())
+            task_lp = task_dist.log_prob(task_target)
+            task_entropy = task_dist.entropy()
+            normalized_task_entropy = self._normalized_categorical_entropy(
+                task_entropy, task_mask.unsqueeze(0)
+            )
+            selected_task_emb = task_embs[task_id].unsqueeze(0)
+
+            team_target_ids = [
+                int(worker_id)
+                for worker_id in team_targets_cpu[sample_index]
+                if int(worker_id) >= 0
+            ]
+            is_virtual = not team_target_ids
+            zero = torch.zeros_like(task_lp)
+            if is_virtual:
+                outputs.append(
+                    {
+                        "task": task_lp,
+                        "station": zero,
+                        "team": zero,
+                        "entropy": task_entropy,
+                        "normalized_entropy": normalized_task_entropy,
+                        "state_value": state_values[sample_index].reshape(1),
+                    }
+                )
+                continue
+
+            station_target = batch.y_station[sample_index].reshape(1)
+            station_id = int(station_targets_cpu[sample_index])
+            assert 0 <= station_id < station_embs.shape[0]
+            station_mask = station_mask_matrix[task_id].unsqueeze(0)
+            with self.autocast_context():
+                station_logits = self.policy.station_head(
+                    selected_task_emb,
+                    station_embs.unsqueeze(0),
+                    mask=station_mask,
+                )
+            station_logits = torch.nan_to_num(station_logits, nan=-1.0e4)
+            station_dist = Categorical(logits=station_logits.float())
+            station_lp = station_dist.log_prob(station_target)
+            station_entropy = station_dist.entropy()
+            normalized_station_entropy = self._normalized_categorical_entropy(
+                station_entropy, station_mask
+            )
+
+            task_skill = torch.argmax(
+                raw_task[task_id, 5 : 5 + num_skills]
+            ).reshape(1)
+            worker_skills = raw_worker[:, worker_layout.skill_slice]
+            skill_invalid = ~(
+                worker_skills.index_select(1, task_skill).squeeze(1) > 0.5
+            )
+            station_action_id = station_id + 1
+            worker_locks = torch.argmax(
+                raw_worker[:, worker_layout.lock_slice], dim=1
+            )
+            lock_invalid = (worker_locks != 0) & (worker_locks != station_action_id)
+            current_mask = worker_queue_mask | skill_invalid | lock_invalid
+            pressure = self._build_v2_pressure_context(
+                task_features=raw_task,
+                worker_features=raw_worker,
+                task_present=None,
+                task_action_invalid=task_mask,
+                worker_present=None,
+                worker_queue_invalid=worker_queue_mask,
+            )
+            team_state = self.policy.worker_head.initialize_v2_state(
+                batch_size=1, device=self.device
+            )
+            worker_embs_i = worker_embs.unsqueeze(0)
+            station_emb_i = station_embs[station_id].unsqueeze(0)
+            demand = torch.tensor(
+                [float(len(team_target_ids))],
+                device=self.device,
+            )
+            decode_cache = self.policy.worker_head.build_v2_decode_cache(
+                task_emb=selected_task_emb,
+                station_emb=station_emb_i,
+                global_context=global_i,
+                worker_embs=worker_embs_i,
+                pressure_context=pressure,
+                demand=demand,
+            )
+            team_lp = torch.zeros_like(task_lp)
+            team_entropy = torch.zeros_like(task_entropy)
+            normalized_team_entropy = torch.zeros_like(normalized_task_entropy)
+            for worker_id in team_target_ids:
+                assert worker_id < worker_embs.shape[0]
+                with self.autocast_context():
+                    worker_logits = self.policy.worker_head.forward_choice_v2(
+                        task_emb=selected_task_emb,
+                        station_emb=station_emb_i,
+                        global_context=global_i,
+                        worker_embs=worker_embs_i,
+                        pressure_context=pressure,
+                        team_state=team_state,
+                        demand=demand,
+                        mask=current_mask.unsqueeze(0),
+                        decode_cache=decode_cache,
+                    )
+                worker_logits = torch.nan_to_num(worker_logits, nan=-1.0e4)
+                worker_dist = Categorical(logits=worker_logits.float())
+                target = torch.tensor([worker_id], device=self.device)
+                team_lp = team_lp + worker_dist.log_prob(target)
+                step_entropy = worker_dist.entropy()
+                team_entropy = team_entropy + step_entropy
+                normalized_team_entropy = normalized_team_entropy + (
+                    self._normalized_categorical_entropy(
+                        step_entropy, current_mask.unsqueeze(0)
+                    )
+                )
+                team_state = self.policy.worker_head.advance_v2_state(
+                    team_state,
+                    worker_embs_i[:, worker_id, :],
+                    worker_skills[worker_id].unsqueeze(0),
+                )
+                current_mask = current_mask.clone()
+                current_mask[worker_id] = True
+
+            normalized_entropy = (
+                normalized_task_entropy
+                + 1.5 * normalized_station_entropy
+                + 0.5 * normalized_team_entropy
+            )
+            outputs.append(
+                {
+                    "task": task_lp,
+                    "station": station_lp,
+                    "team": team_lp,
+                    "entropy": task_entropy + station_entropy + team_entropy,
+                    "normalized_entropy": normalized_entropy,
+                    "state_value": state_values[sample_index].reshape(1),
+                }
+            )
+        assert len(outputs) == group_size
+        return outputs
+
+    def _run_v2_behavior_replay_update(
+        self,
+        memory: Any,
+        env: Any,
+        *,
+        current_ep: int,
+        advantages: torch.Tensor,
+        rewards: torch.Tensor,
+        old_logprobs: torch.Tensor,
+        b_task: torch.Tensor,
+        b_station: torch.Tensor,
+        b_team: torch.Tensor,
+        action_scope: str,
+    ) -> dict[str, float]:
+        """v2 行为组同形重放 PPO 更新。
+
+        每个物理 group 按 rollout 原形状（group size 图）前向 GNN/critic，
+        三个动作 head 以 B=1 逐样本重算；逻辑 batch 内按样本均值聚合，
+        accumulation 窗口（≤accumulation_steps 个逻辑 batch）梯度按窗口
+        实际总样本数归一化。首次 PPO update 在 backward 前对首个逻辑
+        batch 执行无梯度同形重放合同（MaxAE ≤ 1e-3/1e-4），超阈值 fail-closed。
+        """
+        import math
+
+        from training.worker_pointer_v2_replay import (
+            check_first_recompute_contract,
+            normalize_group_loss_sum,
+            plan_behavior_groups,
+            select_validation_groups,
+        )
+
+        started = time.perf_counter()
+        traces = list(getattr(memory, "worker_pointer_v2_behavior_traces", []) or [])
+        if len(traces) != len(memory.states):
+            raise RuntimeError(
+                "v2 行为轨迹与 memory.states 数量不一致: "
+                f"{len(traces)} vs {len(memory.states)}"
+            )
+        if any(trace is None for trace in traces):
+            raise RuntimeError("v2 行为轨迹包含空项，禁止静默跳过样本")
+
+        grouped: dict[tuple[int, int], list[tuple[int, Any]]] = {}
+        for memory_index, trace in enumerate(traces):
+            grouped.setdefault(trace.group_id, []).append((memory_index, trace))
+        restored: list[list[tuple[int, Any]]] = []
+        for group_id in sorted(grouped):
+            members = sorted(grouped[group_id], key=lambda item: item[1].group_position)
+            expected_size = int(members[0][1].group_size)
+            positions = [int(item[1].group_position) for item in members]
+            env_indices = [int(item[1].env_index) for item in members]
+            if len(members) != expected_size or positions != list(range(expected_size)):
+                raise RuntimeError(f"v2 行为组不完整: group_id={group_id!r}")
+            if len(set(env_indices)) != len(env_indices):
+                raise RuntimeError(f"v2 行为组存在重复环境: group_id={group_id!r}")
+            if any(int(item[1].group_size) != expected_size for item in members):
+                raise RuntimeError(f"v2 行为组 group_size 不一致: group_id={group_id!r}")
+            restored.append(members)
+        if not restored:
+            raise RuntimeError("v2 行为重放：没有有效的行为组可重放")
+
+        group_sizes = [len(group) for group in restored]
+        group_upper_bound = int(
+            getattr(self.config, "worker_pointer_v2_rollout_group_upper_bound", 4)
+        )
+        if max(group_sizes) > group_upper_bound:
+            raise RuntimeError(
+                "v2 行为组超过配置上限: "
+                f"max={max(group_sizes)} upper_bound={group_upper_bound}"
+            )
+        requested_logical_cap = int(
+            getattr(self.config, "worker_pointer_v2_logical_batch_cap", 64)
+        )
+        logical_cap = min(requested_logical_cap, int(self.batch_size))
+        accumulation_steps = max(1, int(self.accumulation_steps))
+        seed = int(getattr(self.config, "seed", 42))
+        threshold = 1.0e-3 if self.amp_dtype == torch.bfloat16 else 1.0e-4
+
+        def _build_group(group_index: int) -> Any:
+            memory_indices = [item[0] for item in restored[group_index]]
+            return self._build_v2_behavior_group_batch(
+                memory=memory,
+                env=env,
+                memory_indices=memory_indices,
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                old_logprobs=old_logprobs,
+                rewards=rewards,
+                advantages=advantages,
+            )
+
+        logical_batches_by_epoch = [
+            plan_behavior_groups(
+                group_sizes,
+                logical_cap=logical_cap,
+                seed=seed,
+                current_step=int(self.current_step),
+                epoch=epoch,
+            )
+            for epoch in range(self.k_epochs)
+        ]
+        if not logical_batches_by_epoch[0]:
+            raise RuntimeError("v2 行为重放未生成逻辑 batch")
+
+        # 首次合同在 optimizer.zero_grad/backward/step 前完成，失败时不产生部分更新。
+        group_team_sizes = [
+            [len(memory.actions[memory_index][2]) for memory_index, _trace in group]
+            for group in restored
+        ]
+        validation_groups = select_validation_groups(
+            group_team_sizes,
+            logical_cap=logical_cap,
+        )
+        behavior_rows: list[tuple[float, float, float]] = []
+        replayed_rows: list[tuple[float, float, float]] = []
+        with torch.no_grad():
+            for group_index in validation_groups:
+                outputs = self._replay_v2_behavior_group(_build_group(group_index))
+                assert len(outputs) == len(restored[group_index])
+                for output, (_memory_index, trace) in zip(
+                    outputs, restored[group_index]
+                ):
+                    behavior_rows.append(
+                        (float(trace.task_lp), float(trace.station_lp), float(trace.team_lp))
+                    )
+                    replayed_rows.append(
+                        (
+                            float(output["task"].detach().float().item()),
+                            float(output["station"].detach().float().item()),
+                            float(output["team"].detach().float().item()),
+                        )
+                    )
+        first_contract_report = check_first_recompute_contract(
+            behavior_rows,
+            replayed_rows,
+            max_abs_error=threshold,
+        )
+
+        decay_eps = max(1, int(self.config.entropy_decay_episodes))
+        ent_progress = min(1.0, current_ep / decay_eps)
+        c_ent = float(self.config.c_entropy_end) + (
+            float(self.config.c_entropy) - float(self.config.c_entropy_end)
+        ) * math.exp(-3.0 * ent_progress)
+        c_policy = float(self.config.c_policy)
+        c_value = float(self.config.c_value)
+        progress = min(1.0, self.current_step / max(1, self.total_timesteps))
+        eps_clip_end = float(getattr(self.config, "eps_clip_end", 0.05))
+        current_eps_clip = self.eps_clip - progress * (self.eps_clip - eps_clip_end)
+
+        metric_values: dict[str, list[torch.Tensor]] = {
+            "policy_loss": [],
+            "value_loss": [],
+            "entropy": [],
+            "normalized_entropy": [],
+            "ratio": [],
+            "approx_kl": [],
+            "clip": [],
+        }
+        update_steps = 0
+        logical_batch_count = 0
+        physical_group_count = 0
+        logical_batch_sizes: list[int] = []
+        gradient_diagnostics_all: list[dict[str, float]] = []
+        stop_after_epoch = False
+
+        for epoch, logical_batches in enumerate(logical_batches_by_epoch):
+            epoch_kl_sum = 0.0
+            epoch_samples = 0
+            batch_sample_counts = [
+                sum(group_sizes[group_index] for group_index in batch_groups)
+                for batch_groups in logical_batches
+            ]
+            logical_batch_sizes.extend(batch_sample_counts)
+            for window_start in range(0, len(logical_batches), accumulation_steps):
+                window_batches = logical_batches[
+                    window_start : window_start + accumulation_steps
+                ]
+                window_sample_count = sum(
+                    batch_sample_counts[window_start + offset]
+                    for offset in range(len(window_batches))
+                )
+                assert window_sample_count > 0
+                self.optimizer.zero_grad()
+                for batch_offset, batch_groups in enumerate(window_batches):
+                    logical_batch_count += 1
+                    batch_sample_count = batch_sample_counts[
+                        window_start + batch_offset
+                    ]
+                    prepass_total_lp: list[torch.Tensor] = []
+                    prepass_old_lp: list[torch.Tensor] = []
+                    # 每个逻辑批先无梯度重放，统一计算 KL 熔断尺度。
+                    with torch.no_grad():
+                        for group_index in batch_groups:
+                            outputs = self._replay_v2_behavior_group(
+                                _build_group(group_index)
+                            )
+                            for output, (memory_index, _trace) in zip(
+                                outputs, restored[group_index]
+                            ):
+                                prepass_total_lp.append(
+                                    output["task"] + output["station"] + output["team"]
+                                )
+                                prepass_old_lp.append(
+                                    old_logprobs[memory_index]
+                                    .to(self.device)
+                                    .reshape(1)
+                                )
+                        batch_total_lp = torch.cat(prepass_total_lp).float()
+                        batch_old_lp = torch.cat(prepass_old_lp).float()
+                        _, safe_log_ratio, batch_ratios = (
+                            self.compute_stable_log_ratio_and_ratio(
+                                batch_total_lp, batch_old_lp
+                            )
+                        )
+                        batch_kl_values = (batch_ratios - 1.0) - safe_log_ratio
+                        batch_kl = batch_kl_values.mean()
+                        loss_scale = 0.01 if batch_kl > self.kl_early_stop else 1.0
+                        epoch_kl_sum += float(batch_kl_values.sum().item())
+                        epoch_samples += int(batch_kl_values.numel())
+                        metric_values["approx_kl"].append(
+                            batch_kl_values.detach().float()
+                        )
+                        metric_values["clip"].append(
+                            (torch.abs(batch_ratios - 1.0) > current_eps_clip)
+                            .float()
+                            .detach()
+                        )
+
+                    # 物理组逐个保留 rollout encoder 形状；损失以样本和/窗口实际样本数反传。
+                    for group_index in batch_groups:
+                        physical_group_count += 1
+                        group_batch = _build_group(group_index)
+                        outputs = self._replay_v2_behavior_group(group_batch)
+                        sample_losses: list[torch.Tensor] = []
+                        for local_index, (output, (memory_index, _trace)) in enumerate(
+                            zip(outputs, restored[group_index])
+                        ):
+                            total_lp = output["task"] + output["station"] + output["team"]
+                            old_lp = group_batch.y_logprob[local_index].reshape(1).float()
+                            _, _, ratio = self.compute_stable_log_ratio_and_ratio(
+                                total_lp, old_lp
+                            )
+                            advantage = group_batch.y_advantage[local_index].reshape(1)
+                            surrogate = torch.minimum(
+                                ratio * advantage,
+                                torch.clamp(
+                                    ratio,
+                                    1.0 - current_eps_clip,
+                                    1.0 + current_eps_clip,
+                                )
+                                * advantage,
+                            )
+                            policy_loss = -surrogate.mean()
+                            old_value = (
+                                group_batch.y_value[local_index].reshape(1)
+                                if hasattr(group_batch, "y_value")
+                                else None
+                            )
+                            value_loss = self.compute_value_loss(
+                                state_values=output["state_value"],
+                                returns=group_batch.y_reward[local_index].reshape(1),
+                                old_values=old_value,
+                                clip_range=current_eps_clip,
+                            )
+                            normalized_entropy = output["normalized_entropy"].mean()
+                            sample_loss = (
+                                c_policy * policy_loss
+                                + c_value * value_loss
+                                - c_ent * normalized_entropy
+                            )
+                            sample_losses.append(sample_loss)
+                            metric_values["policy_loss"].append(
+                                policy_loss.detach().float().reshape(1)
+                            )
+                            metric_values["value_loss"].append(
+                                value_loss.detach().float().reshape(1)
+                            )
+                            metric_values["entropy"].append(
+                                output["entropy"].detach().float().reshape(1)
+                            )
+                            metric_values["normalized_entropy"].append(
+                                normalized_entropy.detach().float().reshape(1)
+                            )
+                            metric_values["ratio"].append(
+                                ratio.detach().float().reshape(1)
+                            )
+                        group_loss_sum = torch.stack(sample_losses).sum()
+                        scaled_loss = normalize_group_loss_sum(
+                            group_loss_sum * float(loss_scale),
+                            window_sample_count=window_sample_count,
+                        )
+                        self.scaler.scale(scaled_loss).backward()
+
+                self.scaler.unscale_(self.optimizer)
+                gradient_diagnostics = self._collect_gradient_diagnostics(
+                    self.policy.named_parameters()
+                )
+                gradient_diagnostics_all.append(gradient_diagnostics)
+                if gradient_diagnostics["finite"] < 1.0:
+                    raise RuntimeError("v2 行为重放产生非有限梯度，拒绝 optimizer.step")
+                torch.nn.utils.clip_grad_norm_(self.actor_parameters, max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(
+                    self.critic_parameters,
+                    max_norm=float(self.config.clip_v_grad_norm),
+                )
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
+                update_steps += 1
+
+            mean_epoch_kl = epoch_kl_sum / max(1, epoch_samples)
+            if mean_epoch_kl > self.kl_early_stop:
+                stop_after_epoch = True
+            if stop_after_epoch:
+                break
+
+        self.current_step += 1
+        if getattr(self, "use_ema", False) and hasattr(self, "ema_policy"):
+            with torch.no_grad():
+                for ema_parameter, parameter in zip(
+                    self.ema_policy.parameters(), self.policy.parameters()
+                ):
+                    ema_parameter.data.copy_(
+                        self.ema_decay * ema_parameter.data
+                        + (1.0 - self.ema_decay) * parameter.data
+                    )
+
+        def _sample_mean(name: str) -> float:
+            values = metric_values[name]
+            if not values:
+                return 0.0
+            flattened = torch.cat([value.reshape(-1) for value in values])
+            return float(flattened.mean().cpu().item())
+
+        elapsed = time.perf_counter() - started
+        metrics: dict[str, float] = {
+            "PPO/UpdateSteps": float(update_steps),
+            "PPO/Loss": _sample_mean("policy_loss"),
+            "PPO/ValueLoss": _sample_mean("value_loss"),
+            "PPO/Entropy": _sample_mean("entropy"),
+            "PPO/NormalizedEntropy": _sample_mean("normalized_entropy"),
+            "PPO/ApproxKL": _sample_mean("approx_kl"),
+            "PPO/ClipFraction": _sample_mean("clip"),
+            "PPO/RatioMean": _sample_mean("ratio"),
+            "V2/BehaviorReplayGroups": float(len(restored)),
+            "V2/BehaviorReplaySamples": float(sum(group_sizes)),
+            "V2/ReplayRequestedLogicalCap": float(requested_logical_cap),
+            "V2/ReplayEffectiveLogicalCap": float(logical_cap),
+            "V2/ReplayLogicalBatchCount": float(logical_batch_count),
+            "V2/ReplayLogicalBatchMeanSize": float(sum(logical_batch_sizes))
+            / max(1, len(logical_batch_sizes)),
+            "V2/ReplayLogicalBatchMinSize": float(min(logical_batch_sizes)),
+            "V2/ReplayLogicalBatchMaxSize": float(max(logical_batch_sizes)),
+            "V2/ReplayPhysicalGroupCount": float(physical_group_count),
+            "V2/ReplayMaxPhysicalGroup": float(max(group_sizes)),
+            "V2/ReplayGroupIntegrity": 1.0,
+            "V2/ReplayUpdateSeconds": float(elapsed),
+            "V2/ReplayGroupSPS": float(physical_group_count) / max(elapsed, 1.0e-9),
+            "V2/ReplayAccumulationSteps": float(accumulation_steps),
+            "V2/FirstContractTaskMAE": float(first_contract_report["task"]["mae"]),
+            "V2/FirstContractTaskMaxAE": float(
+                first_contract_report["task"]["max_abs_error"]
+            ),
+            "V2/FirstContractStationMAE": float(
+                first_contract_report["station"]["mae"]
+            ),
+            "V2/FirstContractStationMaxAE": float(
+                first_contract_report["station"]["max_abs_error"]
+            ),
+            "V2/FirstContractTeamMAE": float(first_contract_report["team"]["mae"]),
+            "V2/FirstContractTeamMaxAE": float(
+                first_contract_report["team"]["max_abs_error"]
+            ),
+            "V2/FirstContractTotalMAE": float(first_contract_report["total"]["mae"]),
+            "V2/FirstContractTotalMaxAE": float(
+                first_contract_report["total"]["max_abs_error"]
+            ),
+        }
+        if gradient_diagnostics_all:
+            metrics["Gradient/Finite"] = min(
+                item["finite"] for item in gradient_diagnostics_all
+            )
+            metrics["Gradient/V2Norm"] = sum(
+                item["v2_grad_norm"] for item in gradient_diagnostics_all
+            ) / len(gradient_diagnostics_all)
+            metrics["Gradient/V2Coverage"] = sum(
+                item["v2_gradient_coverage"] for item in gradient_diagnostics_all
+            ) / len(gradient_diagnostics_all)
+        metrics.update(
+            {
+                # 保留已有训练审计器使用的稳定别名，同时输出上面的 replay 专属细粒度指标。
+                "Policy/ApproxKL": metrics["PPO/ApproxKL"],
+                "PPO/GradientsFinite": metrics.get("Gradient/Finite", 0.0),
+                "PointerV2/GradientNorm": metrics.get("Gradient/V2Norm", 0.0),
+                "PointerV2/GradientCoverage": metrics.get(
+                    "Gradient/V2Coverage", 0.0
+                ),
+                "PointerV2/PPOFirstRecomputeMAE": metrics[
+                    "V2/FirstContractTotalMAE"
+                ],
+                "PointerV2/PPOFirstRecomputeMaxAE": metrics[
+                    "V2/FirstContractTotalMaxAE"
+                ],
+                "PointerV2/AutocastEnabled": float(self.amp_enabled),
+                "PointerV2/AutocastBF16": float(
+                    self.amp_enabled and self.amp_dtype == torch.bfloat16
+                ),
+                "PointerV2/GradScalerEnabled": float(
+                    self.scaler.is_enabled()
+                ),
+                "PointerV2/NonFiniteCount": 0.0,
+            }
+        )
         return metrics

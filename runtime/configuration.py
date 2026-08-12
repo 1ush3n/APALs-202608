@@ -247,6 +247,20 @@ def validate_runtime_config(config: Config) -> None:
             )
         if int(config.worker_pointer_v2_init_seed_offset) < 0:
             raise ValueError("worker_pointer_v2_init_seed_offset 不能为负数")
+        if not bool(config.worker_pointer_v2_behavior_replay):
+            raise ValueError(
+                "autoregressive_pressure_v2 要求启用 worker_pointer_v2_behavior_replay"
+            )
+        if str(config.worker_pointer_v2_replay_mode) != "behavior_group_exact_v1":
+            raise ValueError(
+                "worker_pointer_v2_replay_mode 仅支持 behavior_group_exact_v1"
+            )
+        if int(config.worker_pointer_v2_logical_batch_cap) < 1:
+            raise ValueError("worker_pointer_v2_logical_batch_cap 必须大于 0")
+        if int(config.worker_pointer_v2_rollout_group_upper_bound) < 1:
+            raise ValueError(
+                "worker_pointer_v2_rollout_group_upper_bound 必须大于 0"
+            )
     ratio = float(getattr(config, "workforce_preallocation_ratio", 1.0))
     if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
         raise ValueError("workforce_preallocation_ratio 必须是 [0, 1] 内的有限数")

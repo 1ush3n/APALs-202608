@@ -161,6 +161,7 @@ def test_runtime_validation_accepts_only_attention_worker_scope_for_v2() -> None
     valid.team_selection_mode = "autoregressive_pressure_v2"
     valid.policy_action_scope = "operation_station_worker"
     valid.actor_context_mode = "attention"
+    valid.worker_pointer_v2_behavior_replay = True
     validate_runtime_config(valid)
 
     wrong_scope = Config()
@@ -448,6 +449,8 @@ def test_v2_single_and_deterministic_paths_call_v2_pointer(
         policy_action_scope="operation_station_worker",
         actor_context_mode="attention",
         batch_size=1,
+        worker_pointer_v2_behavior_replay=True,
+        worker_pointer_v2_logical_batch_cap=1,
     )
     with temporary_config(configs, overrides):
         agent, _env, prepared = _v2_agent_and_ready_env()
@@ -491,6 +494,8 @@ def test_v2_batch_path_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> None
         policy_action_scope="operation_station_worker",
         actor_context_mode="attention",
         batch_size=1,
+        worker_pointer_v2_behavior_replay=True,
+        worker_pointer_v2_logical_batch_cap=1,
     )
     with temporary_config(configs, overrides):
         agent, _env, prepared = _v2_agent_and_ready_env()
@@ -513,17 +518,19 @@ def test_v2_ppo_recompute_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> N
         policy_action_scope="operation_station_worker",
         actor_context_mode="attention",
         batch_size=1,
+        worker_pointer_v2_behavior_replay=True,
+        worker_pointer_v2_logical_batch_cap=1,
     )
     with temporary_config(configs, overrides):
         agent, env, prepared = _v2_agent_and_ready_env()
         obs, task_mask, station_mask, worker_mask = prepared
-        action, logprob, value, _smask, invalid = agent.select_action(
-            obs,
-            mask_task=task_mask,
-            mask_station_matrix=station_mask,
-            mask_worker=worker_mask,
+        action, logprob, value, _smask, invalid = agent.select_actions_batch(
+            [obs],
+            [task_mask],
+            [station_mask],
+            [worker_mask],
             deterministic=False,
-        )
+        )[0]
         assert action is not None and not invalid
         memory = Memory()
         memory.states.append(env.get_state_snapshot())
@@ -531,6 +538,15 @@ def test_v2_ppo_recompute_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> N
         memory.logprobs.append(logprob)
         memory.values.append(value)
         memory.masks.append((task_mask, station_mask, worker_mask))
+        from training.worker_pointer_v2_behavior import make_behavior_traces
+
+        behavior_traces = make_behavior_traces(
+            group_id=(0, 0),
+            env_indices=[0],
+            behavior_logprobs=agent.last_v2_behavior_logprobs,
+        )
+        assert len(behavior_traces) == 1
+        memory.worker_pointer_v2_behavior_traces.append(behavior_traces[0])
         _obs, reward, done, info = env.step(action)
         assert not info.get("invalid_action", False)
         memory.rewards.append(float(reward))
@@ -565,13 +581,13 @@ def test_v2_ppo_recompute_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> N
         assert v2_parameters
         assert all(id(parameter) in optimizer_parameter_ids for parameter in v2_parameters)
         metrics = agent.update(memory, env, current_ep=1)
-    assert torch.isfinite(torch.tensor(metrics["Loss/Total"]))
-    assert torch.isfinite(torch.tensor(metrics["PointerV2/GradientNorm"]))
-    assert metrics["PointerV2/GradientNorm"] > 0.0
-    assert metrics["PointerV2/GradientCoverage"] > 0.0
-    assert metrics["PointerV2/PPOFirstRecomputeMaxAE"] <= 1.0e-4
+    assert torch.isfinite(torch.tensor(metrics["PPO/Loss"]))
+    assert torch.isfinite(torch.tensor(metrics["Gradient/V2Norm"]))
+    assert metrics["Gradient/V2Norm"] > 0.0
+    assert metrics["Gradient/V2Coverage"] > 0.0
+    assert metrics["V2/FirstContractTotalMaxAE"] <= 1.0e-4
     assert calls and all(cache is not None for cache in calls)
-    assert len(cache_build_calls) == 1
+    assert len(cache_build_calls) >= 3
 
 
 @pytest.mark.parametrize(
@@ -612,17 +628,31 @@ def test_v2_experiment_config_is_isolated_and_explicit() -> None:
     assert cfg.actor_context_mode == "attention"
     assert cfg.lightning_precision == "bf16-mixed"
     assert cfg.num_envs == 4
+    assert cfg.batch_size == 64
+    assert cfg.accumulation_steps == 16
+    assert cfg.worker_pointer_v2_behavior_replay is True
+    assert cfg.worker_pointer_v2_replay_mode == "behavior_group_exact_v1"
+    assert cfg.worker_pointer_v2_logical_batch_cap == 64
+    assert cfg.worker_pointer_v2_rollout_group_upper_bound == 4
     assert cfg.evaluation_protocol == "training_auto_eval_only"
 
 
-def test_run_manifest_records_model_and_runtime_semantics() -> None:
+def test_run_manifest_records_model_and_runtime_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from runtime.artifacts import build_run_manifest_payload
+    from runtime.seed import set_seed
 
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    set_seed(42)
     cfg = _pointer_config("autoregressive_pressure_v2")
     cfg.experiment_name = "initial_worker_pointer_v2_exploratory"
     cfg.evaluation_protocol = "training_auto_eval_only"
     cfg.lightning_precision = "bf16-mixed"
     cfg.num_envs = 4
+    cfg.batch_size = 64
+    cfg.accumulation_steps = 16
+    cfg.worker_pointer_v2_behavior_replay = True
     payload = build_run_manifest_payload(cfg, command="pytest")
 
     assert payload["model_spec"]["team_selection_mode"] == "autoregressive_pressure_v2"
@@ -630,6 +660,37 @@ def test_run_manifest_records_model_and_runtime_semantics() -> None:
     assert payload["runtime"]["num_envs"] == 4
     assert payload["runtime"]["autocast_dtype"] == "bfloat16"
     assert payload["runtime"]["grad_scaler_enabled"] is False
+    assert payload["runtime"]["worker_pointer_v2_replay_mode"] == "behavior_group_exact_v1"
+    assert payload["runtime"]["requested_logical_batch_cap"] == 64
+    assert payload["runtime"]["effective_logical_batch_cap"] == 64
+    assert payload["runtime"]["rollout_group_upper_bound"] == 4
+    assert payload["runtime"]["target_max_samples_per_optimizer_step"] == 1024
+    assert payload["runtime"]["cublas_workspace_config"] == ":4096:8"
+    assert payload["runtime"]["deterministic_algorithms_warn_only"] is True
+
+
+def test_training_entry_sets_cublas_workspace_before_framework_import() -> None:
+    import os
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ)
+    environment.pop("CUBLAS_WORKSPACE_CONFIG", None)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os; import train; print(os.environ.get('CUBLAS_WORKSPACE_CONFIG'))",
+        ],
+        cwd=root,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.stdout.strip().splitlines()[-1] == ":4096:8"
 
 
 def test_v2_diagnostics_compute_exact_quantiles_and_clear() -> None:

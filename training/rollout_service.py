@@ -16,6 +16,7 @@ from training.heartbeat import RolloutHeartbeat
 from training.lightning_module import RolloutMetrics, RolloutUpdate
 from training.memory import Memory
 from training.observation import refresh_env_observation
+from training.worker_pointer_v2_behavior import make_behavior_traces
 
 
 class APALRolloutService:
@@ -119,6 +120,7 @@ class APALRolloutService:
         masks: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         gated_team_trace: Any = None,
         anchor_proposal_trace: Any = None,
+        worker_pointer_v2_behavior_trace: Any = None,
     ) -> None:
         memory.states.append(state)
         memory.actions.append(action)
@@ -133,6 +135,7 @@ class APALRolloutService:
         memory.masks.append(masks)
         memory.gated_team_traces.append(gated_team_trace)
         memory.anchor_proposal_traces.append(anchor_proposal_trace)
+        memory.worker_pointer_v2_behavior_traces.append(worker_pointer_v2_behavior_trace)
 
     def _collect_episode(
         self,
@@ -148,6 +151,7 @@ class APALRolloutService:
             torch.cuda.reset_peak_memory_stats(self.device)
         if v2_mode:
             self.agent.reset_worker_pointer_v2_diagnostics()
+        rollout_call_index = 0
         heartbeat = RolloutHeartbeat(
             episode,
             self.num_envs,
@@ -301,6 +305,19 @@ class APALRolloutService:
                             detailed_profile_sums.get(key, 0.0) + float(value)
                         )
 
+                # WorkerPointer v2 行为组：本次 select_actions_batch 的 active env 顺序即 group 成员。
+                behavior_traces = []
+                if v2_mode:
+                    behavior_traces = make_behavior_traces(
+                        group_id=(episode, rollout_call_index),
+                        env_indices=list(active),
+                        behavior_logprobs=self.agent.last_v2_behavior_logprobs,
+                    )
+                    rollout_call_index += 1
+                behavior_trace_by_env = {
+                    trace.env_index: trace for trace in behavior_traces
+                }
+
                 actions = [None] * self.num_envs
                 for result_idx, env_idx in enumerate(active):
                     action, logprob, value, _, is_invalid = results[result_idx]
@@ -318,6 +335,9 @@ class APALRolloutService:
                         masks=masks_list[env_idx],
                         gated_team_trace=self.agent.last_gated_team_traces[result_idx],
                         anchor_proposal_trace=self.agent.last_anchor_proposal_traces[result_idx],
+                        worker_pointer_v2_behavior_trace=behavior_trace_by_env.get(
+                            env_idx
+                        ),
                     )
 
                 heartbeat.update(
@@ -470,6 +490,9 @@ class APALRolloutService:
             target.values.extend(source.values)
             target.gated_team_traces.extend(source.gated_team_traces)
             target.anchor_proposal_traces.extend(source.anchor_proposal_traces)
+            target.worker_pointer_v2_behavior_traces.extend(
+                source.worker_pointer_v2_behavior_traces
+            )
 
     def collect(self, update_index: int) -> RolloutUpdate:
         dataset_count = int(self.vector_env.envs[0].dataset_count)

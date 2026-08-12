@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -182,6 +183,40 @@ def build_run_manifest_payload(
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(chunk)
         training_manifest_sha256 = digest.hexdigest()
+    v2_mode = (
+        str(getattr(config, "team_selection_mode", "autoregressive"))
+        == "autoregressive_pressure_v2"
+    )
+    requested_logical_cap = (
+        int(getattr(config, "worker_pointer_v2_logical_batch_cap", 64))
+        if v2_mode
+        else None
+    )
+    effective_logical_cap = (
+        min(int(getattr(config, "batch_size", 1)), int(requested_logical_cap))
+        if requested_logical_cap is not None
+        else None
+    )
+    try:
+        import torch
+
+        deterministic_algorithms = bool(
+            torch.are_deterministic_algorithms_enabled()
+        )
+        warn_only = bool(
+            getattr(
+                torch,
+                "is_deterministic_algorithms_warn_only_enabled",
+                lambda: False,
+            )()
+        )
+        cudnn_deterministic = bool(torch.backends.cudnn.deterministic)
+        cudnn_benchmark = bool(torch.backends.cudnn.benchmark)
+    except (ImportError, RuntimeError):
+        deterministic_algorithms = False
+        warn_only = False
+        cudnn_deterministic = False
+        cudnn_benchmark = False
     manifest = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "command": command,
@@ -201,6 +236,31 @@ def build_run_manifest_payload(
             "lightning_precision": precision,
             "autocast_dtype": autocast_dtype,
             "grad_scaler_enabled": precision == "16-mixed",
+            "worker_pointer_v2_replay_mode": (
+                str(getattr(config, "worker_pointer_v2_replay_mode", ""))
+                if v2_mode
+                else None
+            ),
+            "requested_logical_batch_cap": requested_logical_cap,
+            "effective_logical_batch_cap": effective_logical_cap,
+            "rollout_group_upper_bound": (
+                int(getattr(config, "worker_pointer_v2_rollout_group_upper_bound", 4))
+                if v2_mode
+                else None
+            ),
+            "target_max_samples_per_optimizer_step": (
+                int(effective_logical_cap)
+                * int(getattr(config, "accumulation_steps", 1))
+                if effective_logical_cap is not None
+                else None
+            ),
+            "cublas_workspace_config": os.environ.get(
+                "CUBLAS_WORKSPACE_CONFIG"
+            ),
+            "deterministic_algorithms_enabled": deterministic_algorithms,
+            "deterministic_algorithms_warn_only": warn_only,
+            "cudnn_deterministic": cudnn_deterministic,
+            "cudnn_benchmark": cudnn_benchmark,
             "worker_pointer_v2_init_seed": (
                 int(getattr(config, "seed", 0))
                 + int(getattr(config, "worker_pointer_v2_init_seed_offset", 1009))

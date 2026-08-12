@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import sys
 from pathlib import Path
+
+# 必须在任何可能导入 PyTorch 的模块之前设置，供 CUDA 确定性矩阵乘法使用。
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 from configs import configs
 from runtime.hydra_config import (

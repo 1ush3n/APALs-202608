@@ -12,6 +12,7 @@ from runtime.checkpoints import (
     build_checkpoint_metadata,
     infer_model_spec,
     load_checkpoint,
+    validate_checkpoint_training_spec,
 )
 
 
@@ -67,3 +68,47 @@ def test_explicit_structural_conflict_is_rejected() -> None:
 
     apply_checkpoint_model_spec(cfg, spec, explicit_fields=set())
     assert cfg.use_skill_hub is False
+
+
+def _v2_training_config() -> Config:
+    cfg = Config()
+    cfg.team_selection_mode = "autoregressive_pressure_v2"
+    cfg.policy_action_scope = "operation_station_worker"
+    cfg.actor_context_mode = "attention"
+    cfg.worker_pointer_v2_behavior_replay = True
+    cfg.worker_pointer_v2_replay_mode = "behavior_group_exact_v1"
+    cfg.worker_pointer_v2_logical_batch_cap = 64
+    cfg.worker_pointer_v2_rollout_group_upper_bound = 4
+    cfg.accumulation_steps = 16
+    return cfg
+
+
+def test_v2_checkpoint_records_group_replay_training_semantics() -> None:
+    metadata = build_checkpoint_metadata(_v2_training_config())
+
+    assert metadata["training_spec"] == {
+        "worker_pointer_v2_replay_mode": "behavior_group_exact_v1",
+        "worker_pointer_v2_logical_batch_cap": 64,
+        "worker_pointer_v2_rollout_group_upper_bound": 4,
+        "worker_pointer_v2_per_sample_heads": True,
+        "accumulation_steps": 16,
+    }
+
+
+def test_v2_resume_rejects_missing_or_conflicting_training_spec() -> None:
+    cfg = _v2_training_config()
+    with pytest.raises(ValueError, match="training_spec"):
+        validate_checkpoint_training_spec(cfg, {})
+
+    metadata = build_checkpoint_metadata(cfg)
+    conflicting = dict(metadata)
+    conflicting["training_spec"] = {
+        **metadata["training_spec"],
+        "worker_pointer_v2_logical_batch_cap": 256,
+    }
+    with pytest.raises(ValueError, match="logical_batch_cap"):
+        validate_checkpoint_training_spec(cfg, conflicting)
+
+
+def test_legacy_resume_does_not_require_v2_training_spec() -> None:
+    validate_checkpoint_training_spec(Config(), {})
