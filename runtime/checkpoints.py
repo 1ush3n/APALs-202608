@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import torch
 
 from configs import Config
+from runtime.modes import is_fast_exact_mode, is_worker_pointer_v2_mode
 from worker_feature_layout import resolve_worker_feature_layout
 
 
@@ -116,7 +117,7 @@ def build_model_spec(config: Config) -> ModelSpec:
                     path
                 )
     pointer_v2_fields: dict[str, Any] = {}
-    if str(config.team_selection_mode) == "autoregressive_pressure_v2":
+    if is_worker_pointer_v2_mode(config):
         pointer_v2_fields = {
             "worker_pointer_context_version": str(config.worker_pointer_context_version),
             "worker_pointer_pressure_temperature": float(
@@ -173,7 +174,7 @@ def build_checkpoint_metadata(config: Config, **extra: Any) -> dict[str, Any]:
             )
             if loaded_key_count > 0:
                 metadata["apcf_pretrain_loaded_model_key_count"] = loaded_key_count
-    if str(config.team_selection_mode) == "autoregressive_pressure_v2":
+    if is_worker_pointer_v2_mode(config):
         metadata["training_spec"] = {
             "worker_pointer_v2_replay_mode": str(
                 config.worker_pointer_v2_replay_mode
@@ -185,6 +186,7 @@ def build_checkpoint_metadata(config: Config, **extra: Any) -> dict[str, Any]:
                 config.worker_pointer_v2_rollout_group_upper_bound
             ),
             "worker_pointer_v2_per_sample_heads": True,
+            "num_envs": int(config.num_envs),
             "accumulation_steps": int(config.accumulation_steps),
         }
     metadata.update(extra)
@@ -196,7 +198,7 @@ def validate_checkpoint_training_spec(
     metadata: Mapping[str, Any],
 ) -> None:
     """在恢复训练状态前校验 WorkerPointer v2 的数值重放语义。"""
-    if str(config.team_selection_mode) != "autoregressive_pressure_v2":
+    if not is_worker_pointer_v2_mode(config):
         return
     saved = metadata.get("training_spec")
     if not isinstance(saved, Mapping):
@@ -214,6 +216,15 @@ def validate_checkpoint_training_spec(
         "worker_pointer_v2_per_sample_heads": True,
         "accumulation_steps": int(config.accumulation_steps),
     }
+    if is_fast_exact_mode(config):
+        # Fast-Exact 的 bf16 同形合同依赖 logical batch 与原始行为组形状；
+        # 普通 v2 继续保留历史 batch 迁移兼容性。
+        expected.update(
+            {
+                "worker_pointer_v2_logical_batch_cap": int(config.batch_size),
+                "num_envs": int(config.num_envs),
+            }
+        )
     conflicts = {
         key: (saved.get(key), expected_value)
         for key, expected_value in expected.items()
@@ -348,7 +359,7 @@ def apply_checkpoint_model_spec(
             "team_selection_mode 与 checkpoint 不兼容："
             f"config={current_team_mode!r}, checkpoint={checkpoint_team_mode!r}"
         )
-    if current_team_mode == "autoregressive_pressure_v2":
+    if is_worker_pointer_v2_mode(config):
         semantic_fields = (
             "worker_pointer_context_version",
             "worker_pointer_pressure_temperature",

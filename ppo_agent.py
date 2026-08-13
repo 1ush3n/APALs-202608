@@ -25,6 +25,7 @@ from runtime.batch_semantics import (
     resolve_effective_ppo_batch_size,
     resolve_v2_logical_batch_size,
 )
+from runtime.modes import is_fast_exact_mode, is_worker_pointer_v2_mode
 try:
     from schedulefree import AdamWScheduleFree
 except ImportError:
@@ -1907,7 +1908,7 @@ class PPOAgent:
                 current_worker_mask = current_worker_mask | skill_mask.to(self.device) | lock_mask.to(self.device)
 
             worker_embs = x_dict['worker'].unsqueeze(0)
-            v2_mode = str(getattr(self.config, "team_selection_mode", "autoregressive")) == "autoregressive_pressure_v2"
+            v2_mode = is_worker_pointer_v2_mode(self.config)
             v2_pressure = None
             v2_team_state = None
             v2_decode_cache = None
@@ -2063,6 +2064,8 @@ class PPOAgent:
         is_eval: bool = False,
         *,
         profile_breakdown: bool = False,
+        snapshots: Optional[List[dict]] = None,
+        fast_exact_builder: Any = None,
     ) -> List[Tuple[Tuple[int, int, List[int]], float, float, Optional[torch.Tensor], bool]]:
         """
         鎵归噺閫夋嫨鍔ㄤ綔 (Batch Select Action)銆?
@@ -2094,7 +2097,10 @@ class PPOAgent:
         else:
             active_policy = self.policy
 
-        batch_size = len(obs_list)
+        if snapshots is not None:
+            batch_size = len(snapshots)
+        else:
+            batch_size = len(obs_list)
         if len(mask_task_list) != batch_size:
             raise ValueError("obs_list 与动作掩码批次数量不一致")
         results = []
@@ -2108,8 +2114,9 @@ class PPOAgent:
         # WorkerPointer v2 行为三部分 log-prob（task/station/team），与 results 顺序对齐。
         self.last_v2_behavior_logprobs = [None] * batch_size
         v2_behavior_mode = (
-            str(getattr(self.config, "team_selection_mode", "autoregressive"))
-            == "autoregressive_pressure_v2"
+            str(getattr(self.config, "policy_action_scope", "operation_station_worker"))
+            == "operation_station_worker"
+            and is_worker_pointer_v2_mode(self.config)
         )
 
         profile: Dict[str, float] = {}
@@ -2123,10 +2130,40 @@ class PPOAgent:
             if profile_breakdown:
                 _profile_sync()
                 stage_started = time.perf_counter()
-            batch_obs = Batch.from_data_list(obs_list)
-            task_ptr = batch_obs['task'].ptr.tolist()
-            station_ptr = batch_obs['station'].ptr.tolist()
-            worker_ptr = batch_obs['worker'].ptr.tolist()
+            batch_obs = None
+            fast_batch = None
+            if snapshots is not None:
+                # Fast-Exact 快路径：由 GPU 模板原位构建，不创建 CPU PyG 图。
+                if fast_exact_builder is None:
+                    raise RuntimeError(
+                        "select_actions_batch 的 snapshots 模式要求提供 fast_exact_builder"
+                    )
+                if not is_fast_exact_mode(self.config):
+                    raise RuntimeError(
+                        "snapshots 预构建路径仅支持 "
+                        "autoregressive_pressure_v2_fast_exact 模式"
+                    )
+                if str(getattr(self.config, "policy_action_scope", "")) != "operation_station_worker":
+                    raise RuntimeError(
+                        "Fast-Exact snapshots 预构建路径仅支持 "
+                        "policy_action_scope=operation_station_worker"
+                    )
+                if len(snapshots) != batch_size:
+                    raise ValueError(
+                        f"snapshots 数量与 batch_size 不一致: {len(snapshots)} != {batch_size}"
+                    )
+                fast_batch = fast_exact_builder.build(
+                    list(snapshots), masks=None, memory_indices=None
+                )
+                batch_obs = fast_batch.batch
+                task_ptr = fast_batch.task_ptr
+                station_ptr = fast_batch.station_ptr
+                worker_ptr = fast_batch.worker_ptr
+            else:
+                batch_obs = Batch.from_data_list(obs_list)
+                task_ptr = batch_obs['task'].ptr.tolist()
+                station_ptr = batch_obs['station'].ptr.tolist()
+                worker_ptr = batch_obs['worker'].ptr.tolist()
             if profile_breakdown:
                 _profile_sync()
                 profile["batch_build_ms"] = (time.perf_counter() - stage_started) * 1000.0
@@ -2167,6 +2204,12 @@ class PPOAgent:
                 worker_embs = x_dict_batch['worker'][worker_start:worker_end]
                 raw_task_features = batch_obs['task'].x[task_start:task_end]
                 raw_worker_features = batch_obs['worker'].x[worker_start:worker_end]
+                if fast_batch is not None:
+                    per_graph_task_x = fast_batch.raw_task_slices[i]
+                    per_graph_worker_x = fast_batch.raw_worker_slices[i]
+                else:
+                    per_graph_task_x = obs_list[i]['task'].x
+                    per_graph_worker_x = obs_list[i]['worker'].x
                 
                 global_context_i = global_context_batch[i].unsqueeze(0)
                 
@@ -2204,7 +2247,7 @@ class PPOAgent:
                 selected_task_emb = task_embs[t_idx].unsqueeze(0) # [1, H]
                 
                 # 鑾峰彇璇ヤ换鍔＄殑宸ヤ汉浜烘暟闇€姹?
-                source_task_x = obs_list[i]['task'].x
+                source_task_x = per_graph_task_x
                 demand = self.get_task_demand(source_task_x, t_idx)
                 action_scope = str(
                     getattr(self.config, "policy_action_scope", "operation_station_worker")
@@ -2402,7 +2445,7 @@ class PPOAgent:
                 obs_worker_num_nodes = worker_end - worker_start
                 current_worker_mask = m_worker.clone().to(self.device) if m_worker is not None else torch.zeros(obs_worker_num_nodes, dtype=torch.bool).to(self.device)
                 
-                worker_feats = obs_list[i]['worker'].x
+                worker_feats = per_graph_worker_x
                 worker_layout = resolve_worker_feature_layout(self.config)
                 if worker_feats.size(1) != worker_layout.total_dim:
                     raise ValueError(
@@ -2429,7 +2472,7 @@ class PPOAgent:
                     current_worker_mask = current_worker_mask | skill_mask.to(self.device) | lock_mask.to(self.device)
     
                 worker_embs_i = worker_embs.unsqueeze(0) # [1, W, H]
-                v2_mode = str(getattr(self.config, "team_selection_mode", "autoregressive")) == "autoregressive_pressure_v2"
+                v2_mode = is_worker_pointer_v2_mode(self.config)
                 v2_pressure = None
                 v2_team_state = None
                 v2_decode_cache = None
@@ -2656,6 +2699,12 @@ class PPOAgent:
         """执行可回滚的 PPO 更新；CUDA OOM 时回滚并跳过本轮。"""
         transactional = bool(getattr(self.config, "oom_transactional_updates", True))
         skip_on_oom = bool(getattr(self.config, "skip_update_on_oom", True))
+        strict_fail = is_fast_exact_mode(self.config) and bool(
+            getattr(self.config, "worker_pointer_v2_strict_gpu_replay", False)
+        )
+        if strict_fail:
+            # Fast-Exact：正式训练严禁自动降级，回滚完成后必须重新抛出并报告。
+            skip_on_oom = False
         try:
             transaction = self._capture_update_transaction() if transactional else None
         except RuntimeError as exc:
@@ -2944,10 +2993,26 @@ class PPOAgent:
 
         v2_behavior_replay = (
             action_scope == "operation_station_worker"
-            and str(getattr(self.config, "team_selection_mode", "autoregressive"))
-            == "autoregressive_pressure_v2"
+            and is_worker_pointer_v2_mode(self.config)
             and bool(getattr(self.config, "worker_pointer_v2_behavior_replay", False))
         )
+        if is_fast_exact_mode(self.config):
+            if env is None:
+                raise RuntimeError(
+                    "v2 fast-exact 同形重放要求提供 env 实例（GPU 模板依赖数据集上下文）"
+                )
+            return self._run_v2_fast_exact_replay_update(
+                memory=memory,
+                env=env,
+                current_ep=current_ep,
+                advantages=advantages,
+                rewards=rewards,
+                old_logprobs=old_logprobs,
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                action_scope=action_scope,
+            )
         if v2_behavior_replay:
             if env is None:
                 raise RuntimeError("v2 行为同形重放要求提供 env 实例（snapshot 重建依赖 env）")
@@ -3093,8 +3158,7 @@ class PPOAgent:
                     team_cnt = torch.zeros(B_size, 1).to(self.device)
                     v2_mode = (
                         action_scope == "operation_station_worker"
-                        and str(getattr(self.config, "team_selection_mode", "autoregressive"))
-                        == "autoregressive_pressure_v2"
+                        and is_worker_pointer_v2_mode(self.config)
                     )
                     v2_pressure = None
                     v2_team_state = None
@@ -3608,9 +3672,9 @@ class PPOAgent:
             'Memory/Allocated_GB': memory_snapshot['allocated_gb'],
             'Memory/Reserved_GB': memory_snapshot['reserved_gb'],
         }
-        if action_scope == "operation_station_worker" and str(
-            getattr(self.config, "team_selection_mode", "autoregressive")
-        ) == "autoregressive_pressure_v2":
+        if action_scope == "operation_station_worker" and is_worker_pointer_v2_mode(
+            self.config
+        ):
             metrics.update(
                 {
                     "PointerV2/AutocastEnabled": 1.0 if self.amp_enabled else 0.0,
@@ -3877,6 +3941,451 @@ class PPOAgent:
             )
         assert len(outputs) == group_size
         return outputs
+
+    def _run_v2_fast_exact_replay_update(
+        self,
+        memory: Any,
+        env: Any,
+        *,
+        current_ep: int,
+        advantages: torch.Tensor,
+        rewards: torch.Tensor,
+        old_logprobs: torch.Tensor,
+        b_task: torch.Tensor,
+        b_station: torch.Tensor,
+        b_team: torch.Tensor,
+        action_scope: str,
+        fast_exact_builder: Any = None,
+    ) -> dict[str, float]:
+        """Fast-Exact 同形 GPU group 重放 PPO 更新。
+
+        - 每个物理 group 经 GPUExactBatchBuilder 构建（布局元数据 CPU 缓存，
+          热路径无 ``.cpu().tolist()`` / 逐样本 ``.item()``）；
+        - 首次同形合同为 actor-only 无梯度预检（不计算 critic 与熵），输出
+          缓存复用为该逻辑 batch 首次 PPO 计算的 ratio/KL/loss-scale；
+        - 正式梯度前向仍计算 actor + critic + 完整 PPO loss。
+        """
+        import math
+
+        from training.worker_pointer_v2_replay import (
+            check_first_recompute_contract,
+            normalize_group_loss_sum,
+            plan_behavior_groups,
+            select_validation_groups,
+        )
+
+        started = time.perf_counter()
+        traces = list(getattr(memory, "worker_pointer_v2_behavior_traces", []) or [])
+        if len(traces) != len(memory.states):
+            raise RuntimeError(
+                "v2 fast-exact 行为轨迹与 memory.states 数量不一致: "
+                f"{len(traces)} vs {len(memory.states)}"
+            )
+        if any(trace is None for trace in traces):
+            raise RuntimeError("v2 fast-exact 行为轨迹包含空项，禁止静默跳过样本")
+
+        grouped: dict[tuple[int, int], list[tuple[int, Any]]] = {}
+        for memory_index, trace in enumerate(traces):
+            grouped.setdefault(trace.group_id, []).append((memory_index, trace))
+        restored: list[list[tuple[int, Any]]] = []
+        for group_id in sorted(grouped):
+            members = sorted(grouped[group_id], key=lambda item: item[1].group_position)
+            expected_size = int(members[0][1].group_size)
+            positions = [int(item[1].group_position) for item in members]
+            env_indices = [int(item[1].env_index) for item in members]
+            if len(members) != expected_size or positions != list(range(expected_size)):
+                raise RuntimeError(
+                    f"v2 fast-exact 行为组不完整: group_id={group_id!r}"
+                )
+            if len(set(env_indices)) != len(env_indices):
+                raise RuntimeError(
+                    f"v2 fast-exact 行为组存在重复环境: group_id={group_id!r}"
+                )
+            if any(int(item[1].group_size) != expected_size for item in members):
+                raise RuntimeError(
+                    f"v2 fast-exact 行为组 group_size 不一致: group_id={group_id!r}"
+                )
+            restored.append(members)
+        if not restored:
+            raise RuntimeError("v2 fast-exact 行为重放：没有有效的行为组可重放")
+
+        group_sizes = [len(group) for group in restored]
+        group_upper_bound = int(
+            getattr(self.config, "worker_pointer_v2_rollout_group_upper_bound", 4)
+        )
+        if max(group_sizes) > group_upper_bound:
+            raise RuntimeError(
+                "v2 fast-exact 行为组超过配置上限: "
+                f"max={max(group_sizes)} upper_bound={group_upper_bound}"
+            )
+        logical_cap = resolve_v2_logical_batch_size(int(self.batch_size), self.config)
+        accumulation_steps = max(1, int(self.accumulation_steps))
+        seed = int(getattr(self.config, "seed", 42))
+        threshold = 1.0e-3 if self.amp_dtype == torch.bfloat16 else 1.0e-4
+
+        if fast_exact_builder is None:
+            cached = getattr(self, "_v2_fast_exact_builder", None)
+            if cached is None or getattr(cached, "env", None) is not env:
+                from training.v2_fast_exact_batch import GPUExactBatchBuilder
+
+                cached = GPUExactBatchBuilder(
+                    config=self.config, env=env, device=self.device
+                )
+                self._v2_fast_exact_builder = cached
+            fast_exact_builder = cached
+
+        def _build_group(group_index: int) -> Any:
+            memory_indices = [item[0] for item in restored[group_index]]
+            return self._build_v2_fast_exact_group(
+                memory=memory,
+                memory_indices=memory_indices,
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                old_logprobs=old_logprobs,
+                rewards=rewards,
+                advantages=advantages,
+                fast_exact_builder=fast_exact_builder,
+            )
+
+        logical_batches_by_epoch = [
+            plan_behavior_groups(
+                group_sizes,
+                logical_cap=logical_cap,
+                seed=seed,
+                current_step=int(self.current_step),
+                epoch=epoch,
+            )
+            for epoch in range(self.k_epochs)
+        ]
+        if not logical_batches_by_epoch[0]:
+            raise RuntimeError("v2 fast-exact 行为重放未生成逻辑 batch")
+
+        # ---- 首次同形合同：actor-only 无梯度预检，输出缓存复用 ----
+        group_team_sizes = [
+            [len(memory.actions[memory_index][2]) for memory_index, _trace in group]
+            for group in restored
+        ]
+        validation_groups = select_validation_groups(
+            group_team_sizes,
+            logical_cap=logical_cap,
+        )
+        precheck_cache: dict[int, list[dict[str, torch.Tensor]]] = {}
+        behavior_rows: list[tuple[float, float, float]] = []
+        replayed_rows: list[tuple[float, float, float]] = []
+        with torch.no_grad():
+            for group_index in validation_groups:
+                outputs = self._replay_v2_fast_exact_group(
+                    _build_group(group_index), actor_only=True
+                )
+                precheck_cache[group_index] = outputs
+                assert len(outputs) == len(restored[group_index])
+                for output, (_memory_index, trace) in zip(
+                    outputs, restored[group_index]
+                ):
+                    behavior_rows.append(
+                        (float(trace.task_lp), float(trace.station_lp), float(trace.team_lp))
+                    )
+                    replayed_rows.append(
+                        (
+                            float(output["task"].detach().float().item()),
+                            float(output["station"].detach().float().item()),
+                            float(output["team"].detach().float().item()),
+                        )
+                    )
+        first_contract_report = check_first_recompute_contract(
+            behavior_rows,
+            replayed_rows,
+            max_abs_error=threshold,
+        )
+
+        decay_eps = max(1, int(self.config.entropy_decay_episodes))
+        ent_progress = min(1.0, current_ep / decay_eps)
+        c_ent = float(self.config.c_entropy_end) + (
+            float(self.config.c_entropy) - float(self.config.c_entropy_end)
+        ) * math.exp(-3.0 * ent_progress)
+        c_policy = float(self.config.c_policy)
+        c_value = float(self.config.c_value)
+        progress = min(1.0, self.current_step / max(1, self.total_timesteps))
+        eps_clip_end = float(getattr(self.config, "eps_clip_end", 0.05))
+        current_eps_clip = self.eps_clip - progress * (self.eps_clip - eps_clip_end)
+
+        metric_values: dict[str, list[torch.Tensor]] = {
+            "policy_loss": [],
+            "value_loss": [],
+            "entropy": [],
+            "normalized_entropy": [],
+            "ratio": [],
+            "approx_kl": [],
+            "clip": [],
+        }
+        update_steps = 0
+        logical_batch_count = 0
+        physical_group_count = 0
+        logical_batch_sizes: list[int] = []
+        gradient_diagnostics_all: list[dict[str, float]] = []
+        precheck_reused = 0
+        stop_after_epoch = False
+
+        for epoch, logical_batches in enumerate(logical_batches_by_epoch):
+            epoch_kl_sum = 0.0
+            epoch_samples = 0
+            batch_sample_counts = [
+                sum(group_sizes[group_index] for group_index in batch_groups)
+                for batch_groups in logical_batches
+            ]
+            logical_batch_sizes.extend(batch_sample_counts)
+            for window_start in range(0, len(logical_batches), accumulation_steps):
+                window_batches = logical_batches[
+                    window_start : window_start + accumulation_steps
+                ]
+                window_sample_count = sum(
+                    batch_sample_counts[window_start + offset]
+                    for offset in range(len(window_batches))
+                )
+                assert window_sample_count > 0
+                self.optimizer.zero_grad()
+                for batch_offset, batch_groups in enumerate(window_batches):
+                    logical_batch_count += 1
+                    # 无梯度 actor-only 预放：优先复用首次合同缓存，其余按组缓存。
+                    prepass_total_lp: list[torch.Tensor] = []
+                    prepass_old_lp: list[torch.Tensor] = []
+                    with torch.no_grad():
+                        for group_index in batch_groups:
+                            if group_index in precheck_cache:
+                                outputs = precheck_cache[group_index]
+                                precheck_reused += 1
+                            else:
+                                outputs = self._replay_v2_fast_exact_group(
+                                    _build_group(group_index), actor_only=True
+                                )
+                                precheck_cache[group_index] = outputs
+                            for output, (memory_index, _trace) in zip(
+                                outputs, restored[group_index]
+                            ):
+                                prepass_total_lp.append(
+                                    output["task"] + output["station"] + output["team"]
+                                )
+                                prepass_old_lp.append(
+                                    old_logprobs[memory_index]
+                                    .to(self.device)
+                                    .reshape(1)
+                                )
+                        batch_total_lp = torch.cat(prepass_total_lp).float()
+                        batch_old_lp = torch.cat(prepass_old_lp).float()
+                        _, safe_log_ratio, batch_ratios = (
+                            self.compute_stable_log_ratio_and_ratio(
+                                batch_total_lp, batch_old_lp
+                            )
+                        )
+                        batch_kl_values = (batch_ratios - 1.0) - safe_log_ratio
+                        batch_kl = batch_kl_values.mean()
+                        loss_scale = 0.01 if batch_kl > self.kl_early_stop else 1.0
+                        epoch_kl_sum += float(batch_kl_values.sum().item())
+                        epoch_samples += int(batch_kl_values.numel())
+                        metric_values["approx_kl"].append(
+                            batch_kl_values.detach().float()
+                        )
+                        metric_values["clip"].append(
+                            (torch.abs(batch_ratios - 1.0) > current_eps_clip)
+                            .float()
+                            .detach()
+                        )
+
+                    # 正式带梯度前向（actor + critic + 完整 PPO loss）。
+                    for group_index in batch_groups:
+                        physical_group_count += 1
+                        group_batch = _build_group(group_index)
+                        outputs = self._replay_v2_fast_exact_group(group_batch)
+                        sample_losses: list[torch.Tensor] = []
+                        for local_index, (output, (memory_index, _trace)) in enumerate(
+                            zip(outputs, restored[group_index])
+                        ):
+                            total_lp = output["task"] + output["station"] + output["team"]
+                            old_lp = group_batch.batch.y_logprob[
+                                local_index
+                            ].reshape(1).float()
+                            _, _, ratio = self.compute_stable_log_ratio_and_ratio(
+                                total_lp, old_lp
+                            )
+                            advantage = group_batch.batch.y_advantage[
+                                local_index
+                            ].reshape(1)
+                            surrogate = torch.minimum(
+                                ratio * advantage,
+                                torch.clamp(
+                                    ratio,
+                                    1.0 - current_eps_clip,
+                                    1.0 + current_eps_clip,
+                                )
+                                * advantage,
+                            )
+                            policy_loss = -surrogate.mean()
+                            old_value = (
+                                group_batch.batch.y_value[local_index].reshape(1)
+                                if hasattr(group_batch.batch, "y_value")
+                                else None
+                            )
+                            value_loss = self.compute_value_loss(
+                                state_values=output["state_value"],
+                                returns=group_batch.batch.y_reward[
+                                    local_index
+                                ].reshape(1),
+                                old_values=old_value,
+                                clip_range=current_eps_clip,
+                            )
+                            normalized_entropy = output["normalized_entropy"].mean()
+                            sample_loss = (
+                                c_policy * policy_loss
+                                + c_value * value_loss
+                                - c_ent * normalized_entropy
+                            )
+                            sample_losses.append(sample_loss)
+                            metric_values["policy_loss"].append(
+                                policy_loss.detach().float().reshape(1)
+                            )
+                            metric_values["value_loss"].append(
+                                value_loss.detach().float().reshape(1)
+                            )
+                            metric_values["entropy"].append(
+                                output["entropy"].detach().float().reshape(1)
+                            )
+                            metric_values["normalized_entropy"].append(
+                                normalized_entropy.detach().float().reshape(1)
+                            )
+                            metric_values["ratio"].append(
+                                ratio.detach().float().reshape(1)
+                            )
+                        group_loss_sum = torch.stack(sample_losses).sum()
+                        scaled_loss = normalize_group_loss_sum(
+                            group_loss_sum * float(loss_scale),
+                            window_sample_count=window_sample_count,
+                        )
+                        self.scaler.scale(scaled_loss).backward()
+
+                self.scaler.unscale_(self.optimizer)
+                gradient_diagnostics = self._collect_gradient_diagnostics(
+                    self.policy.named_parameters()
+                )
+                gradient_diagnostics_all.append(gradient_diagnostics)
+                if gradient_diagnostics["finite"] < 1.0:
+                    raise RuntimeError(
+                        "v2 fast-exact 行为重放产生非有限梯度，拒绝 optimizer.step"
+                    )
+                torch.nn.utils.clip_grad_norm_(self.actor_parameters, max_norm=0.5)
+                torch.nn.utils.clip_grad_norm_(
+                    self.critic_parameters,
+                    max_norm=float(self.config.clip_v_grad_norm),
+                )
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
+                update_steps += 1
+                # actor-only 输出只对生成它们的策略参数版本有效。每次参数更新后
+                # 立即失效，防止后续累计窗口或 PPO epoch 使用旧策略计算 KL。
+                precheck_cache.clear()
+                # 窗口边界同步：模板字段张量在本 window 释放后可能被下一 window
+                # 的 build 直接复用；在无同步的异步执行下（autograd 引擎跨 stream）
+                # 会与上一 window 的尾部 kernel 竞争同一块显存，表现为后续 GAT
+                # 前向随机段错误。每个累积窗口收尾时强制同步一次，开销可忽略。
+                torch.cuda.synchronize(self.device)
+
+            mean_epoch_kl = epoch_kl_sum / max(1, epoch_samples)
+            if mean_epoch_kl > self.kl_early_stop:
+                stop_after_epoch = True
+            if stop_after_epoch:
+                break
+
+        self.current_step += 1
+        if getattr(self, "use_ema", False) and hasattr(self, "ema_policy"):
+            with torch.no_grad():
+                for ema_parameter, parameter in zip(
+                    self.ema_policy.parameters(), self.policy.parameters()
+                ):
+                    ema_parameter.data.copy_(
+                        self.ema_decay * ema_parameter.data
+                        + (1.0 - self.ema_decay) * parameter.data
+                    )
+
+        def _sample_mean(name: str) -> float:
+            values = metric_values[name]
+            if not values:
+                return 0.0
+            flattened = torch.cat([value.reshape(-1) for value in values])
+            return float(flattened.mean().cpu().item())
+
+        elapsed = time.perf_counter() - started
+        metrics: dict[str, float] = {
+            "PPO/UpdateSteps": float(update_steps),
+            "PPO/Loss": _sample_mean("policy_loss"),
+            "PPO/ValueLoss": _sample_mean("value_loss"),
+            "PPO/Entropy": _sample_mean("entropy"),
+            "PPO/NormalizedEntropy": _sample_mean("normalized_entropy"),
+            "PPO/ApproxKL": _sample_mean("approx_kl"),
+            "PPO/ClipFraction": _sample_mean("clip"),
+            "PPO/RatioMean": _sample_mean("ratio"),
+            "V2/FastExact/BehaviorReplayGroups": float(len(restored)),
+            "V2/FastExact/BehaviorReplaySamples": float(sum(group_sizes)),
+            "V2/FastExact/PrecheckGroups": float(len(validation_groups)),
+            "V2/FastExact/PrecheckReusedGroups": float(precheck_reused),
+            "V2/FastExact/LogicalBatchCount": float(logical_batch_count),
+            "V2/FastExact/PhysicalGroupCount": float(physical_group_count),
+            "V2/FastExact/MaxPhysicalGroup": float(max(group_sizes)),
+            "V2/FastExact/ReplayUpdateSeconds": float(elapsed),
+            "V2/FastExact/LogicalBatchMeanSize": float(sum(logical_batch_sizes))
+            / max(1, len(logical_batch_sizes)),
+            "V2/FirstContractTaskMAE": float(first_contract_report["task"]["mae"]),
+            "V2/FirstContractTaskMaxAE": float(
+                first_contract_report["task"]["max_abs_error"]
+            ),
+            "V2/FirstContractStationMAE": float(
+                first_contract_report["station"]["mae"]
+            ),
+            "V2/FirstContractStationMaxAE": float(
+                first_contract_report["station"]["max_abs_error"]
+            ),
+            "V2/FirstContractTeamMAE": float(first_contract_report["team"]["mae"]),
+            "V2/FirstContractTeamMaxAE": float(
+                first_contract_report["team"]["max_abs_error"]
+            ),
+            "V2/FirstContractTotalMAE": float(first_contract_report["total"]["mae"]),
+            "V2/FirstContractTotalMaxAE": float(
+                first_contract_report["total"]["max_abs_error"]
+            ),
+        }
+        if gradient_diagnostics_all:
+            metrics["Gradient/Finite"] = min(
+                item["finite"] for item in gradient_diagnostics_all
+            )
+            metrics["Gradient/V2Norm"] = sum(
+                item["v2_grad_norm"] for item in gradient_diagnostics_all
+            ) / len(gradient_diagnostics_all)
+            metrics["Gradient/V2Coverage"] = sum(
+                item["v2_gradient_coverage"] for item in gradient_diagnostics_all
+            ) / len(gradient_diagnostics_all)
+        metrics.update(
+            {
+                "Policy/ApproxKL": metrics["PPO/ApproxKL"],
+                "PPO/GradientsFinite": metrics.get("Gradient/Finite", 0.0),
+                "PointerV2/GradientNorm": metrics.get("Gradient/V2Norm", 0.0),
+                "PointerV2/GradientCoverage": metrics.get(
+                    "Gradient/V2Coverage", 0.0
+                ),
+                "PointerV2/PPOFirstRecomputeMAE": metrics[
+                    "V2/FirstContractTotalMAE"
+                ],
+                "PointerV2/PPOFirstRecomputeMaxAE": metrics[
+                    "V2/FirstContractTotalMaxAE"
+                ],
+                "PointerV2/AutocastEnabled": float(self.amp_enabled),
+                "PointerV2/AutocastBF16": float(
+                    self.amp_enabled and self.amp_dtype == torch.bfloat16
+                ),
+                "PointerV2/GradScalerEnabled": float(self.scaler.is_enabled()),
+                "PointerV2/NonFiniteCount": 0.0,
+            }
+        )
+        return metrics
 
     def _run_v2_behavior_replay_update(
         self,
@@ -4293,3 +4802,272 @@ class PPOAgent:
             }
         )
         return metrics
+
+    def _build_v2_fast_exact_group(
+        self,
+        *,
+        memory: Any,
+        memory_indices: list[int],
+        b_task: torch.Tensor,
+        b_station: torch.Tensor,
+        b_team: torch.Tensor,
+        old_logprobs: torch.Tensor,
+        rewards: torch.Tensor,
+        advantages: torch.Tensor,
+        fast_exact_builder: Any,
+    ) -> Any:
+        """Fast-Exact：用 GPU 模板构建组 Batch 并绑定 PPO 动作目标。"""
+        if not memory_indices:
+            raise ValueError("v2 fast-exact 行为组不能为空")
+        snapshots = [memory.states[int(index)] for index in memory_indices]
+        masks = [memory.masks[int(index)] for index in memory_indices]
+        fast_batch = fast_exact_builder.build(
+            snapshots,
+            masks=masks,
+            memory_indices=list(memory_indices),
+        )
+        batch = fast_batch.batch
+        max_team = int(b_team.shape[1]) if b_team.ndim == 2 else 1
+        indices_t = torch.tensor(
+            memory_indices, dtype=torch.long, device=self.device
+        )
+        batch.y_task = b_task.to(self.device)[indices_t]
+        batch.y_station = b_station.to(self.device)[indices_t]
+        batch.y_team = b_team.to(self.device)[indices_t, :max_team]
+        batch.y_logprob = old_logprobs.to(self.device)[indices_t]
+        batch.y_reward = rewards.to(self.device)[indices_t]
+        batch.y_advantage = advantages.to(self.device)[indices_t]
+        batch.y_memory_index = indices_t
+        if len(memory.values) > max(int(index) for index in memory_indices):
+            batch.y_value = torch.tensor(
+                [float(memory.values[int(index)]) for index in memory_indices],
+                dtype=torch.float32,
+                device=self.device,
+            )
+        return fast_batch
+
+    def _replay_v2_fast_exact_group(
+        self,
+        fast_batch: Any,
+        *,
+        actor_only: bool = False,
+    ) -> list[dict[str, torch.Tensor]]:
+        """Fast-Exact 同形组重放：编码器按原 group 前向，动作 head 按 B=1 逐样本。
+
+        热路径全程使用布局元数据（CPU 整数 ptr）与 GPU 索引张量，
+        禁止 ``.cpu().tolist()`` 与逐样本 ``.item()`` 同步。
+        ``actor_only=True`` 时不计算 critic 与熵（首次同形合同预检）。
+        """
+        batch = fast_batch.batch
+        group_size = fast_batch.group_size
+        with self.autocast_context():
+            x_dict, global_context = self.policy(batch)
+            state_values = None
+            if not actor_only:
+                state_values = self.policy.get_value(
+                    batch, actor_x_dict_encoded=x_dict
+                ).reshape(-1)
+
+        outputs: list[dict[str, torch.Tensor]] = []
+        worker_layout = resolve_worker_feature_layout(self.config)
+        num_skills = int(worker_layout.num_skill_types)
+        task_ptr = fast_batch.task_ptr
+        station_ptr = fast_batch.station_ptr
+        worker_ptr = fast_batch.worker_ptr
+        y_task = batch.y_task
+        y_station = batch.y_station
+        y_team = batch.y_team
+
+        for sample_index in range(group_size):
+            task_start, task_end = task_ptr[sample_index], task_ptr[sample_index + 1]
+            station_start, station_end = (
+                station_ptr[sample_index],
+                station_ptr[sample_index + 1],
+            )
+            worker_start, worker_end = (
+                worker_ptr[sample_index],
+                worker_ptr[sample_index + 1],
+            )
+            task_embs = x_dict["task"][task_start:task_end]
+            station_embs = x_dict["station"][station_start:station_end]
+            worker_embs = x_dict["worker"][worker_start:worker_end]
+            raw_task = fast_batch.raw_task_slices[sample_index]
+            raw_worker = fast_batch.raw_worker_slices[sample_index]
+            task_mask = batch.y_task_mask[task_start:task_end].bool()
+            station_mask_matrix = batch.y_station_mask[task_start:task_end].bool()
+            worker_queue_mask = batch.y_worker_mask[worker_start:worker_end].bool()
+            global_i = global_context[sample_index].unsqueeze(0)
+
+            task_target = y_task[sample_index].reshape(1)
+            with self.autocast_context():
+                task_logits = self.policy.task_head(
+                    task_embs, global_i, mask=task_mask
+                )
+            task_logits = torch.nan_to_num(task_logits, nan=-1.0e4)
+            task_dist = Categorical(logits=task_logits.float())
+            task_lp = task_dist.log_prob(task_target)
+            task_entropy = (
+                task_dist.entropy() if not actor_only else torch.zeros_like(task_lp)
+            )
+            normalized_task_entropy = self._normalized_categorical_entropy(
+                task_entropy, task_mask.unsqueeze(0)
+            )
+            selected_task_emb = task_embs.index_select(
+                0, y_task[sample_index].reshape(1)
+            )  # [1, H]; 1-dim 索引规避 CUDA index_add_ 0-dim 快速路径 bug
+
+            team_ids = y_team[sample_index]
+            valid_team = team_ids[team_ids >= 0]
+            is_virtual = int(valid_team.numel()) == 0
+            zero = torch.zeros_like(task_lp)
+            if is_virtual:
+                outputs.append(
+                    {
+                        "task": task_lp,
+                        "station": zero,
+                        "team": zero,
+                        "entropy": task_entropy,
+                        "normalized_entropy": normalized_task_entropy,
+                        "state_value": (
+                            state_values[sample_index].reshape(1)
+                            if state_values is not None
+                            else None
+                        ),
+                    }
+                )
+                continue
+
+            station_target = y_station[sample_index].reshape(1)
+            station_mask = station_mask_matrix.index_select(
+                0, y_task[sample_index].reshape(1)
+            )  # [1, S]; 与 legacy 路径一致保持 2-D，避免 masked_fill 把 logits 广播成 3-D
+            with self.autocast_context():
+                station_logits = self.policy.station_head(
+                    selected_task_emb,
+                    station_embs.unsqueeze(0),
+                    mask=station_mask,
+                )
+            station_logits = torch.nan_to_num(station_logits, nan=-1.0e4)
+            station_dist = Categorical(logits=station_logits.float())
+            station_lp = station_dist.log_prob(station_target)
+            station_entropy = (
+                station_dist.entropy()
+                if not actor_only
+                else torch.zeros_like(station_lp)
+            )
+            normalized_station_entropy = self._normalized_categorical_entropy(
+                station_entropy, station_mask
+            )
+
+            task_skill = torch.argmax(
+                raw_task.index_select(0, y_task[sample_index].reshape(1))[:, 5 : 5 + num_skills]
+            ).reshape(1)
+            worker_skills = raw_worker[:, worker_layout.skill_slice]
+            skill_invalid = ~(
+                worker_skills.index_select(1, task_skill).squeeze(1) > 0.5
+            )
+            station_action_id = y_station[sample_index] + 1
+            worker_locks = torch.argmax(
+                raw_worker[:, worker_layout.lock_slice], dim=1
+            )
+            lock_invalid = (worker_locks != 0) & (worker_locks != station_action_id)
+            current_mask = worker_queue_mask | skill_invalid | lock_invalid
+            pressure = self._build_v2_pressure_context(
+                task_features=raw_task,
+                worker_features=raw_worker,
+                task_present=None,
+                task_action_invalid=task_mask,
+                worker_present=None,
+                worker_queue_invalid=worker_queue_mask,
+            )
+            team_state = self.policy.worker_head.initialize_v2_state(
+                batch_size=1, device=self.device
+            )
+            worker_embs_i = worker_embs.unsqueeze(0)
+            station_emb_i = station_embs.index_select(
+                0, y_station[sample_index].reshape(1)
+            )  # [1, H]; 1-dim 索引规避 CUDA index_add_ 0-dim 快速路径 bug
+            demand = torch.tensor(
+                [int(valid_team.numel())], dtype=torch.float32, device=self.device
+            )
+            decode_cache = self.policy.worker_head.build_v2_decode_cache(
+                task_emb=selected_task_emb,
+                station_emb=station_emb_i,
+                global_context=global_i,
+                worker_embs=worker_embs_i,
+                pressure_context=pressure,
+                demand=demand,
+            )
+            team_lp = torch.zeros_like(task_lp)
+            team_entropy = torch.zeros_like(task_entropy)
+            normalized_team_entropy = torch.zeros_like(normalized_task_entropy)
+            for step in range(int(valid_team.numel())):
+                worker_id_t = valid_team[step]
+                with self.autocast_context():
+                    worker_logits = self.policy.worker_head.forward_choice_v2(
+                        task_emb=selected_task_emb,
+                        station_emb=station_emb_i,
+                        global_context=global_i,
+                        worker_embs=worker_embs_i,
+                        pressure_context=pressure,
+                        team_state=team_state,
+                        demand=demand,
+                        mask=current_mask.unsqueeze(0),
+                        decode_cache=decode_cache,
+                    )
+                worker_logits = torch.nan_to_num(worker_logits, nan=-1.0e4)
+                worker_dist = Categorical(logits=worker_logits.float())
+                team_lp = team_lp + worker_dist.log_prob(worker_id_t.reshape(1))
+                step_entropy = (
+                    worker_dist.entropy()
+                    if not actor_only
+                    else torch.zeros_like(team_lp)
+                )
+                team_entropy = team_entropy + step_entropy
+                normalized_team_entropy = normalized_team_entropy + (
+                    self._normalized_categorical_entropy(
+                        step_entropy, current_mask.unsqueeze(0)
+                    )
+                )
+                # 0-dim 标量索引 worker_embs_i[:, worker_id_t, :] 的 backward 会
+                # 触发 CUDA index_add_ 的 0-dim 快速路径（PyTorch 2.12 + CUDA>=12.8），
+                # 真实训练中表现为 backward 永久挂起；改用 gather 显式提取单个
+                # worker 嵌入（backward 走常规 scatter_add_），forward 经 reshape
+                # 保持与历史路径一致的 [1,H]。
+                worker_emb_i = worker_embs_i.gather(
+                    1,
+                    worker_id_t.reshape(1, 1, 1).expand(
+                        1, 1, worker_embs_i.size(-1)
+                    ),
+                ).reshape(1, -1)
+                team_state = self.policy.worker_head.advance_v2_state(
+                    team_state,
+                    worker_emb_i,
+                    # 1-dim 索引规避 CUDA index_add_ 对 0-dim 索引的快速路径 bug。
+                    worker_skills.index_select(0, worker_id_t.reshape(1)),
+                )
+                current_mask = current_mask.clone()
+                current_mask[worker_id_t] = True
+
+            normalized_entropy = (
+                normalized_task_entropy
+                + 1.5 * normalized_station_entropy
+                + 0.5 * normalized_team_entropy
+            )
+            outputs.append(
+                {
+                    "task": task_lp,
+                    "station": station_lp,
+                    "team": team_lp,
+                    "entropy": task_entropy + station_entropy + team_entropy,
+                    "normalized_entropy": normalized_entropy,
+                    "station_emb": station_emb_i,
+                    "state_value": (
+                        state_values[sample_index].reshape(1)
+                        if state_values is not None
+                        else None
+                    ),
+                }
+            )
+        assert len(outputs) == group_size
+        return outputs

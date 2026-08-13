@@ -1,5 +1,6 @@
 hardware:
   num_envs: 2
+  worker_pointer_v2_fast_default_num_envs: 4
   ddqn_num_envs: 2
   vector_env_start_method: spawn
   vector_env_worker_threads: 2

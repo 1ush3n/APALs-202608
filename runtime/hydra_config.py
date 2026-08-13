@@ -13,7 +13,11 @@ from omegaconf import DictConfig, OmegaConf
 
 from configs import Config
 from runtime.artifacts import run_context, uses_runs_layout
-from runtime.configuration import validate_runtime_config
+from runtime.configuration import (
+    is_fast_exact_mode,
+    resolve_fast_exact_num_envs,
+    validate_runtime_config,
+)
 
 
 class HydraCliError(ValueError):
@@ -44,7 +48,6 @@ OLD_CLI_FLAGS = {
     "--trainer",
     "--batch-size",
     "--batch_size",
-    "--num-envs",
     "--max-episodes",
     "--eval-freq",
     "--log-dir",
@@ -57,6 +60,8 @@ OLD_CLI_FLAGS = {
 FINAL_PRIORITY_CLI_FLAGS = {
     "--batch_size": "batch_size",
     "--batch-size": "batch_size",
+    "--num_envs": "num_envs",
+    "--num-envs": "num_envs",
     "--async_eval_submit_every_episodes": "async_eval_submit_every_episodes",
     "--async-eval-submit-every-episodes": "async_eval_submit_every_episodes",
 }
@@ -320,6 +325,15 @@ def initialize_hydra_runtime(
     )
     apply_hydra_config(hydra_cfg, target=target, config_paths=config_paths)
     _apply_cli_leaf_overrides(target, parsed.config_overrides)
+    # Fast-Exact 平台默认：CLI 未显式 --num_envs 时按平台默认（Windows 4 / Linux 16）解析。
+    if is_fast_exact_mode(target):
+        resolved_num_envs = resolve_fast_exact_num_envs(
+            target,
+            cli_explicit_num_envs="num_envs" in parsed.explicit_fields,
+        )
+        if int(target.num_envs) != resolved_num_envs:
+            target.num_envs = resolved_num_envs
+            validate_runtime_config(target)
     _apply_final_cli_overrides(target, parsed.final_overrides)
 
     precision = str(target.float32_matmul_precision)

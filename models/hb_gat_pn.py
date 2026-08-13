@@ -17,6 +17,7 @@ from models.worker_pointer_context import (
     WorkerPointerV2State,
     WorkerPressureContext,
 )
+from runtime.modes import is_worker_pointer_v2_mode
 
 # ---------------------------------------------------------------------------
 # 辅助函数: 动态获取激活函数 (防止 ReLU 死亡)
@@ -383,7 +384,7 @@ class WorkerPointer(nn.Module):
         # Stop Head: 预测是否停止选人 [Logit_Continue, Logit_Stop]
         self.stop_head = nn.Linear(config.hidden_dim * 2, 2) 
 
-        if str(getattr(config, "team_selection_mode", "autoregressive")) == "autoregressive_pressure_v2":
+        if is_worker_pointer_v2_mode(config):
             # v2 专属参数使用局部确定性种子；退出后恢复全局 RNG，避免改变共享模块初始化序列。
             local_seed = int(getattr(config, "seed", 42)) + int(
                 getattr(config, "worker_pointer_v2_init_seed_offset", 1009)

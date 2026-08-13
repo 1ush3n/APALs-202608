@@ -9,6 +9,7 @@ import torch
 from configs import Config
 from environment import AirLineEnv_Graph
 from runtime.evaluation import compute_apal_rollout_diagnostics, evaluate_model
+from runtime.modes import is_fast_exact_mode, is_worker_pointer_v2_mode
 from runtime.multiscale import BenchmarkScore, parse_reference_makespans, score_multi_benchmark
 from runtime.paths import resolve_workspace_path
 from runtime.reschedule_eval import evaluate_reschedule_model
@@ -16,6 +17,7 @@ from training.heartbeat import RolloutHeartbeat
 from training.lightning_module import RolloutMetrics, RolloutUpdate
 from training.memory import Memory
 from training.observation import refresh_env_observation
+from training.v2_fast_exact_batch import GPUExactBatchBuilder
 from training.worker_pointer_v2_behavior import make_behavior_traces
 
 
@@ -43,6 +45,14 @@ class APALRolloutService:
         # L2D checkpoint 兼容层仍序列化该 RNG；主方法的数据集选择不依赖其进程内状态。
         self._rng = np.random.RandomState(int(config.seed))
         self.use_ipc_fusion = bool(getattr(config, "enable_rollout_ipc_fusion", False))
+        # Fast-Exact：训练 rollout 使用 GPU 常驻模板，不逐环境 CPU rebuild。
+        self._fast_exact_builder = None
+        if is_fast_exact_mode(config):
+            self._fast_exact_builder = GPUExactBatchBuilder(
+                config=config,
+                env=vector_env.envs[0],
+                device=device,
+            )
 
     def _dataset_index_for_update(self, update_index: int, dataset_count: int) -> int:
         """返回 PPO 更新所属的训练图，支持跨进程恢复时的确定性重建。"""
@@ -142,10 +152,8 @@ class APALRolloutService:
         episode: int,
     ) -> tuple[list[Memory], RolloutMetrics]:
         self.agent.policy.train()
-        v2_mode = (
-            str(getattr(self.config, "team_selection_mode", "autoregressive"))
-            == "autoregressive_pressure_v2"
-        )
+        v2_mode = is_worker_pointer_v2_mode(self.config)
+        fast_exact = self._fast_exact_builder is not None
         if self.device.type == "cuda":
             # 每个 rollout 独立统计峰值，供 v2 与 legacy 使用相同口径比较。
             torch.cuda.reset_peak_memory_stats(self.device)
@@ -194,10 +202,13 @@ class APALRolloutService:
                 randomize_duration=apply_noise,
                 randomize_workers=apply_noise,
             )
-            states: list[Any] = [
-                self.vector_env.envs[index].rebuild_state_from_snapshot(snapshots[index])
-                for index in range(self.num_envs)
-            ]
+            if fast_exact:
+                states: list[Any] = [None] * self.num_envs
+            else:
+                states = [
+                    self.vector_env.envs[index].rebuild_state_from_snapshot(snapshots[index])
+                    for index in range(self.num_envs)
+                ]
         else:
             states = self.vector_env.reset_all(
                 randomize_duration=apply_noise,
@@ -253,11 +264,12 @@ class APALRolloutService:
                         continue
                     if wait_results[idx]:
                         masks_list[idx], snapshots[idx] = refreshed_states[idx]
-                        stage_started = time.perf_counter()
-                        states[idx] = self.vector_env.envs[
-                            idx
-                        ].rebuild_state_from_snapshot(snapshots[idx])
-                        rebuild_seconds += time.perf_counter() - stage_started
+                        if not fast_exact:
+                            stage_started = time.perf_counter()
+                            states[idx] = self.vector_env.envs[
+                                idx
+                            ].rebuild_state_from_snapshot(snapshots[idx])
+                            rebuild_seconds += time.perf_counter() - stage_started
                     else:
                         dones[idx] = True
                         if memories[idx].rewards:
@@ -285,18 +297,34 @@ class APALRolloutService:
                     and step % max(1, int(self.vector_env.envs[0].num_tasks) // 4) == 0
                 )
                 with torch.inference_mode():
-                    results = self.agent.select_actions_batch(
-                        obs_list=[states[idx] for idx in active],
-                        mask_task_list=[masks_list[idx][0] for idx in active],
-                        mask_station_matrix_list=[
-                            masks_list[idx][1] for idx in active
-                        ],
-                        mask_worker_list=[masks_list[idx][2] for idx in active],
-                        deterministic=False,
-                        temperature=float(self.config.sample_temperature),
-                        is_eval=False,
-                        profile_breakdown=profile_breakdown,
-                    )
+                    if fast_exact:
+                        results = self.agent.select_actions_batch(
+                            [],
+                            mask_task_list=[masks_list[idx][0] for idx in active],
+                            mask_station_matrix_list=[
+                                masks_list[idx][1] for idx in active
+                            ],
+                            mask_worker_list=[masks_list[idx][2] for idx in active],
+                            deterministic=False,
+                            temperature=float(self.config.sample_temperature),
+                            is_eval=False,
+                            profile_breakdown=profile_breakdown,
+                            snapshots=[snapshots[idx] for idx in active],
+                            fast_exact_builder=self._fast_exact_builder,
+                        )
+                    else:
+                        results = self.agent.select_actions_batch(
+                            obs_list=[states[idx] for idx in active],
+                            mask_task_list=[masks_list[idx][0] for idx in active],
+                            mask_station_matrix_list=[
+                                masks_list[idx][1] for idx in active
+                            ],
+                            mask_worker_list=[masks_list[idx][2] for idx in active],
+                            deterministic=False,
+                            temperature=float(self.config.sample_temperature),
+                            is_eval=False,
+                            profile_breakdown=profile_breakdown,
+                        )
                 forward_seconds += time.perf_counter() - stage_started
                 if profile_breakdown:
                     detailed_profile_samples += 1
@@ -398,7 +426,7 @@ class APALRolloutService:
                     memories[env_idx].is_terminals.append(bool(step_dones[env_idx]))
                     memories[env_idx].is_truncated.append(False)
                     dones[env_idx] = bool(step_dones[env_idx])
-                    if actions[env_idx] is not None:
+                    if actions[env_idx] is not None and not fast_exact:
                         stage_started = time.perf_counter()
                         states[env_idx] = self.vector_env.envs[
                             env_idx

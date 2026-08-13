@@ -86,13 +86,15 @@ def _v2_training_config() -> Config:
 
 
 def test_v2_checkpoint_records_group_replay_training_semantics() -> None:
-    metadata = build_checkpoint_metadata(_v2_training_config())
+    cfg = _v2_training_config()
+    metadata = build_checkpoint_metadata(cfg)
 
     assert metadata["training_spec"] == {
         "worker_pointer_v2_replay_mode": "behavior_group_exact_v1",
         "worker_pointer_v2_logical_batch_cap": 64,
         "worker_pointer_v2_rollout_group_upper_bound": 4,
         "worker_pointer_v2_per_sample_heads": True,
+        "num_envs": int(cfg.num_envs),
         "accumulation_steps": 16,
     }
 

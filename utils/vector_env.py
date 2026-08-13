@@ -91,6 +91,7 @@ def _worker(
             'pid': os.getpid(),
             'torch_num_threads': torch.get_num_threads(),
             'omp_num_threads': os.environ.get("OMP_NUM_THREADS"),
+            'cuda_available': torch.cuda.is_available(),
         },
     }
     conn.send(("INIT_OK", init_info))

@@ -90,6 +90,12 @@ class Config:
     worker_pointer_v2_logical_batch_cap: int = 64
     worker_pointer_v2_replay_mode: str = "behavior_group_exact_v1"
     worker_pointer_v2_rollout_group_upper_bound: int = 4
+    # WorkerPointer v2 Fast-Exact：正式训练严禁自动降级，GPU 模板失败/OOM/组不完整
+    # 必须在 optimizer.step 前终止并报告（覆盖 skip_update_on_oom 的静默跳过分支）。
+    worker_pointer_v2_strict_gpu_replay: bool = False
+    # Fast-Exact 平台默认环境数；由 conf/hardware/*.yaml 覆盖（Windows 4 / Linux 16）。
+    # 仅在新模式且 CLI 未显式 --num_envs 时生效。
+    worker_pointer_v2_fast_default_num_envs: int = 4
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
     

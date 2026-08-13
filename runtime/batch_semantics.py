@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from runtime.modes import is_worker_pointer_v2_mode
+
 
 class BatchSemanticsConfig(Protocol):
     """PPO 批量语义所需的最小配置接口。"""
@@ -15,9 +17,9 @@ def resolve_effective_ppo_batch_size(
     requested_batch_size: int,
     config: BatchSemanticsConfig,
 ) -> int:
-    """解析实际 PPO batch；v2 的同形重放不受平台大图 batch 限幅。"""
+    """解析实际 PPO batch；v2 同形重放（含 Fast-Exact）不受平台大图 batch 限幅。"""
     requested = max(1, int(requested_batch_size))
-    if str(config.team_selection_mode) == "autoregressive_pressure_v2":
+    if is_worker_pointer_v2_mode(config):
         return requested
     platform_cap = max(0, int(config.ppo_batch_size_cap))
     return min(requested, platform_cap) if platform_cap > 0 else requested

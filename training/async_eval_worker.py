@@ -96,7 +96,20 @@ def _claim_next_job(paths: AsyncEvalPaths) -> tuple[Path, dict[str, Any]] | None
             pending_path.replace(running_path)
         except FileNotFoundError:
             continue
-        return running_path, json.loads(running_path.read_text(encoding="utf-8-sig"))
+        try:
+            payload = json.loads(
+                running_path.read_text(encoding="utf-8-sig")
+            )
+            return running_path, payload
+        except OSError:
+            # Windows 文件锁竞态：任务已移入 running 但读取被拒（可能正被
+            # 其他 worker 的 done/retry/failed 清理路径删除）。原子移回
+            # pending 等待后续轮次重试，避免 worker 因该异常整体退出。
+            try:
+                running_path.replace(pending_path)
+            except OSError:
+                pass
+            continue
     return None
 
 

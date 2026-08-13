@@ -11,6 +11,11 @@ from configs import Config, configs, load_training_config
 from runtime.artifacts import run_context as create_run_context
 from runtime.artifacts import uses_runs_layout
 from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
+from runtime.modes import (
+    V2_TEAM_SELECTION_MODES,
+    is_fast_exact_mode,
+    is_worker_pointer_v2_mode,
+)
 from runtime.paths import PROJECT_ROOT
 
 
@@ -63,7 +68,8 @@ _VALID_EXPERIMENT_MODES = {
     },
     "workforce_binding_mode": {"endogenous", "preallocated"},
     "team_selection_mode": {
-        "autoregressive", "autoregressive_pressure_v2", "static_topq",
+        "autoregressive", "autoregressive_pressure_v2",
+        "autoregressive_pressure_v2_fast_exact", "static_topq",
     },
     "graph_encoder_mode": {"hetero_gat", "homogeneous_graphsage", "none"},
     "actor_context_mode": {"attention", "mean_max", "local_only"},
@@ -218,6 +224,27 @@ def parse_runtime_args(
     return args
 
 
+def resolve_fast_exact_num_envs(
+    config: Config,
+    *,
+    cli_explicit_num_envs: bool,
+) -> int:
+    """解析 Fast-Exact 模式的最终环境数。
+
+    规则：
+    - 仅新模式生效；历史 v2 保持自身已解析的 num_envs；
+    - CLI 显式 --num_envs 时保持 CLI 值（最高优先级）；
+    - 未显式指定时使用平台 fast_exact 默认（Windows 4 / Linux 16）。
+    """
+    if not is_fast_exact_mode(config):
+        return int(config.num_envs)
+    if cli_explicit_num_envs:
+        return int(config.num_envs)
+    return int(
+        getattr(config, "worker_pointer_v2_fast_default_num_envs", 4)
+    )
+
+
 def validate_runtime_config(config: Config) -> None:
     for field_name, choices in _VALID_EXPERIMENT_MODES.items():
         value = str(getattr(config, field_name)).lower()
@@ -226,14 +253,15 @@ def validate_runtime_config(config: Config) -> None:
                 f"{field_name} 无效: {value!r}；允许值={sorted(choices)}"
             )
         setattr(config, field_name, value)
-    if config.team_selection_mode == "autoregressive_pressure_v2":
+    if is_worker_pointer_v2_mode(config):
         if config.policy_action_scope != "operation_station_worker":
             raise ValueError(
-                "autoregressive_pressure_v2 仅允许 policy_action_scope=operation_station_worker"
+                f"{config.team_selection_mode} 仅允许 "
+                "policy_action_scope=operation_station_worker"
             )
         if config.actor_context_mode != "attention":
             raise ValueError(
-                "autoregressive_pressure_v2 要求 actor_context_mode=attention"
+                f"{config.team_selection_mode} 要求 actor_context_mode=attention"
             )
         temperature = float(config.worker_pointer_pressure_temperature)
         epsilon = float(config.worker_pointer_supply_epsilon)
@@ -247,14 +275,34 @@ def validate_runtime_config(config: Config) -> None:
             )
         if int(config.worker_pointer_v2_init_seed_offset) < 0:
             raise ValueError("worker_pointer_v2_init_seed_offset 不能为负数")
-        if not bool(config.worker_pointer_v2_behavior_replay):
-            raise ValueError(
-                "autoregressive_pressure_v2 要求启用 worker_pointer_v2_behavior_replay"
-            )
-        if str(config.worker_pointer_v2_replay_mode) != "behavior_group_exact_v1":
-            raise ValueError(
-                "worker_pointer_v2_replay_mode 仅支持 behavior_group_exact_v1"
-            )
+        if is_fast_exact_mode(config):
+            if (
+                str(config.worker_pointer_v2_replay_mode)
+                != "behavior_group_exact_gpu_template_v2"
+            ):
+                raise ValueError(
+                    "worker_pointer_v2_replay_mode 仅支持 "
+                    "behavior_group_exact_gpu_template_v2"
+                )
+            if int(config.num_envs) > 16:
+                raise ValueError(
+                    "autoregressive_pressure_v2_fast_exact 的 num_envs 最大为 16 "
+                    f"（Linux 正式配置上限），收到 {int(config.num_envs)}"
+                )
+            if int(config.worker_pointer_v2_rollout_group_upper_bound) > 16:
+                raise ValueError(
+                    "worker_pointer_v2_rollout_group_upper_bound 最大为 16，"
+                    f"收到 {int(config.worker_pointer_v2_rollout_group_upper_bound)}"
+                )
+        else:
+            if not bool(config.worker_pointer_v2_behavior_replay):
+                raise ValueError(
+                    "autoregressive_pressure_v2 要求启用 worker_pointer_v2_behavior_replay"
+                )
+            if str(config.worker_pointer_v2_replay_mode) != "behavior_group_exact_v1":
+                raise ValueError(
+                    "worker_pointer_v2_replay_mode 仅支持 behavior_group_exact_v1"
+                )
         if int(config.worker_pointer_v2_logical_batch_cap) < 1:
             raise ValueError("worker_pointer_v2_logical_batch_cap 必须大于 0")
         if int(config.worker_pointer_v2_rollout_group_upper_bound) < 1:

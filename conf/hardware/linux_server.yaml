@@ -1,5 +1,6 @@
 hardware:
   num_envs: 16
+  worker_pointer_v2_fast_default_num_envs: 16
   ddqn_num_envs: 8
   vector_env_start_method: forkserver
   vector_env_worker_threads: 1

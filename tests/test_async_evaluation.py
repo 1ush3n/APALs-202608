@@ -338,6 +338,29 @@ def test_two_workers_claim_different_pending_jobs_atomically(tmp_path: Path) -> 
     assert len(list(paths.running.glob("episode_*.json"))) == 2
 
 
+def test_claim_next_job_survives_permission_error_on_running_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows 文件锁竞态：任务已移入 running 但读取被拒时，任务必须移回
+    pending 且不崩溃（否则 worker 异常退出导致 AsyncEvaluationError）。"""
+    from training.async_eval_worker import _claim_next_job
+
+    paths = AsyncEvalPaths.create(tmp_path / "async_eval")
+    pending = paths.pending / "episode_000009.json"
+    atomic_write_json(pending, {"episode": 9, "attempt": 0})
+
+    def flaky_loads(*_args, **_kwargs) -> object:
+        raise PermissionError("simulated Windows file lock on running job")
+
+    monkeypatch.setattr("training.async_eval_worker.json.loads", flaky_loads)
+    claimed = _claim_next_job(paths)
+
+    assert claimed is None
+    # 任务未丢失：被原子移回 pending，等待后续轮次重试。
+    assert (paths.pending / "episode_000009.json").exists()
+    assert not (paths.running / "episode_000009.json").exists()
+
+
 def test_cached_observation_matches_canonical_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(configs, "enable_reschedule_mode", False)
     monkeypatch.setattr(configs, "use_skill_hub", True)
