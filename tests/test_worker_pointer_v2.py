@@ -669,6 +669,40 @@ def test_run_manifest_records_model_and_runtime_semantics(
     assert payload["runtime"]["deterministic_algorithms_warn_only"] is True
 
 
+def test_fast_exact_run_manifest_records_v2_runtime_semantics() -> None:
+    from runtime.artifacts import build_run_manifest_payload
+
+    cfg = _pointer_config("autoregressive_pressure_v2_fast_exact")
+    cfg.worker_pointer_v2_replay_mode = "behavior_group_exact_gpu_template_v2"
+    cfg.worker_pointer_v2_rollout_group_upper_bound = 16
+    cfg.batch_size = 256
+    cfg.accumulation_steps = 16
+    cfg.num_envs = 16
+    cfg.async_eval_enabled = True
+    cfg.async_eval_device = "cuda"
+    cfg.async_eval_worker_count = 2
+    cfg.async_eval_queue_capacity = 4
+    cfg.async_eval_submit_every_episodes = 2
+    cfg.async_eval_wait_on_finish = True
+
+    payload = build_run_manifest_payload(cfg, command="pytest")
+
+    assert payload["runtime"]["worker_pointer_v2_replay_mode"] == (
+        "behavior_group_exact_gpu_template_v2"
+    )
+    assert payload["runtime"]["requested_logical_batch_cap"] == 256
+    assert payload["runtime"]["effective_logical_batch_cap"] == 256
+    assert payload["runtime"]["rollout_group_upper_bound"] == 16
+    assert payload["runtime"]["target_max_samples_per_optimizer_step"] == 4096
+    assert payload["runtime"]["worker_pointer_v2_init_seed"] == 1051
+    assert payload["runtime"]["async_eval_enabled"] is True
+    assert payload["runtime"]["async_eval_device"] == "cuda"
+    assert payload["runtime"]["async_eval_worker_count"] == 2
+    assert payload["runtime"]["async_eval_queue_capacity"] == 4
+    assert payload["runtime"]["async_eval_submit_every_episodes"] == 2
+    assert payload["runtime"]["async_eval_wait_on_finish"] is True
+
+
 def test_training_entry_sets_cublas_workspace_before_framework_import() -> None:
     import os
     import subprocess

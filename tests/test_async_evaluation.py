@@ -57,7 +57,10 @@ def test_async_eval_config_accepts_initial_standard_and_rejects_unsupported_opti
     validate_runtime_config(config)
 
     config.async_eval_worker_count = 2
-    with pytest.raises(ValueError, match="worker_count=1"):
+    validate_runtime_config(config)
+
+    config.async_eval_worker_count = 3
+    with pytest.raises(ValueError, match="worker_count"):
         validate_runtime_config(config)
 
     config.async_eval_device = "cpu"
@@ -279,6 +282,80 @@ def test_worker_rejects_hash_mismatch_before_loading_candidate(tmp_path: Path) -
 def test_process_liveness_probe_is_side_effect_free() -> None:
     assert process_is_alive(os.getpid())
     assert not process_is_alive(2_000_000_000)
+
+
+def test_cuda_two_workers_reuse_legacy_attached_process_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """双 CUDA worker 仅替换设备，进程启动方式保持旧版实现。"""
+    config = Config(async_eval_enabled=True)
+    config.async_eval_device = "cuda"
+    config.async_eval_worker_count = 2
+    manager = AsyncEvaluationManager(
+        config=config,
+        latest_path=tmp_path / "checkpoints" / "last.ckpt",
+        best_path=tmp_path / "checkpoints" / "best.ckpt",
+        project_root=PROJECT_ROOT,
+    )
+    captured: list[tuple[list[str], dict[str, object]]] = []
+
+    class _Process:
+        pid = 12345
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+    def _popen(command, **kwargs):
+        captured.append((command, kwargs))
+        return _Process()
+
+    monkeypatch.setattr("training.async_evaluation.subprocess.Popen", _popen)
+    manager._start_workers()
+
+    assert len(captured) == 2
+    for command, kwargs in captured:
+        device_index = command.index("--device")
+        assert command[device_index + 1] == "cuda"
+        assert kwargs["cwd"] == str(PROJECT_ROOT)
+        assert kwargs["text"] is True
+        assert "stdin" not in kwargs
+        assert "stdout" not in kwargs
+        assert "stderr" not in kwargs
+
+
+def test_cuda_oom_falls_back_only_for_current_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from training.async_eval_worker import _evaluate_job_with_cuda_oom_fallback
+
+    devices: list[str] = []
+
+    def _evaluate(job, project_root, *, device):
+        devices.append(device.type)
+        if len(devices) == 1:
+            raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+        return {"episode": int(job["episode"]), "eligible": 1.0}, []
+
+    cache_clears: list[bool] = []
+    monkeypatch.setattr("training.async_eval_worker._evaluate_job", _evaluate)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: cache_clears.append(True))
+
+    first_result, _ = _evaluate_job_with_cuda_oom_fallback(
+        {"episode": 2}, tmp_path, device=torch.device("cuda")
+    )
+    second_result, _ = _evaluate_job_with_cuda_oom_fallback(
+        {"episode": 4}, tmp_path, device=torch.device("cuda")
+    )
+
+    assert devices == ["cuda", "cpu", "cuda"]
+    assert cache_clears == [True]
+    assert first_result["evaluation_device"] == "cpu"
+    assert first_result["cuda_oom_cpu_fallback"] == 1.0
+    assert second_result["evaluation_device"] == "cuda"
+    assert second_result["cuda_oom_cpu_fallback"] == 0.0
 
 
 def test_atomic_link_or_copy_publishes_complete_file(tmp_path: Path) -> None:

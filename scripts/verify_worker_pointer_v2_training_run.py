@@ -15,10 +15,11 @@ from tensorboard.backend.event_processing import event_accumulator
 
 
 V2_MODE = "autoregressive_pressure_v2"
+FAST_EXACT_MODE = "autoregressive_pressure_v2_fast_exact"
+V2_MODES = frozenset({V2_MODE, FAST_EXACT_MODE})
 LEGACY_MODE = "autoregressive"
 REQUIRED_V2_SCALARS = (
     "Rollout/CompletionRate",
-    "Eval/completion_rate",
     "Rollout/StepsPerSecond",
     "Memory/PeakAllocatedMiB",
     "Policy/ApproxKL",
@@ -32,6 +33,48 @@ REQUIRED_V2_SCALARS = (
     "PointerV2/GradScalerEnabled",
     "PointerV2/NonFiniteCount",
 )
+
+
+def _check_async_evaluation(run_dir: Path) -> dict[str, Any]:
+    """以持久化队列产物审计后台验证，不依赖训练进程内的同步标量。"""
+    root = run_dir / "checkpoints" / "async_eval"
+    failed_paths = sorted((root / "queue" / "failed").glob("*.json"))
+    pending_paths = sorted((root / "queue" / "pending").glob("*.json"))
+    running_paths = sorted((root / "queue" / "running").glob("*.json"))
+    done_paths = sorted((root / "queue" / "done").glob("*.json"))
+    invalid_results: list[str] = []
+    episodes: list[int] = []
+    for done_path in done_paths:
+        payload = json.loads(done_path.read_text(encoding="utf-8-sig"))
+        result = payload.get("result") if isinstance(payload, Mapping) else None
+        if not isinstance(result, Mapping):
+            invalid_results.append(done_path.name)
+            continue
+        episode = int(payload.get("episode", result.get("episode", -1)))
+        eligible = float(result.get("eligible", result.get("complete", 0.0)))
+        score = float(result.get("selection_score", float("inf")))
+        result_path = root / "results" / f"episode_{episode:06d}.json"
+        if episode < 0 or eligible < 1.0 - 1.0e-9 or not math.isfinite(score) or not result_path.is_file():
+            invalid_results.append(done_path.name)
+            continue
+        episodes.append(episode)
+    passed = bool(
+        not failed_paths
+        and not pending_paths
+        and not running_paths
+        and done_paths
+        and not invalid_results
+        and len(episodes) == len(set(episodes))
+    )
+    return _check(
+        passed,
+        "异步验证队列必须排空，且所有已提交任务均成功、合法并发布结果",
+        done_episodes=episodes,
+        failed_jobs=[path.name for path in failed_paths],
+        pending_jobs=[path.name for path in pending_paths],
+        running_jobs=[path.name for path in running_paths],
+        invalid_results=invalid_results,
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -123,27 +166,54 @@ def _run_checks(
         observed_mode=model_spec.get("team_selection_mode"),
         observed_scope=model_spec.get("policy_action_scope"),
     )
+    configured_num_envs = int(config.get("num_envs", runtime.get("num_envs", 0)))
     runtime_ok = (
-        int(runtime.get("num_envs", 0)) == 4
+        int(runtime.get("num_envs", 0)) == configured_num_envs
+        and configured_num_envs > 0
         and runtime.get("lightning_precision") == "bf16-mixed"
         and runtime.get("autocast_dtype") == "bfloat16"
         and runtime.get("grad_scaler_enabled") is False
     )
     if require_v2:
+        is_fast_exact = expected_mode == FAST_EXACT_MODE
+        configured_batch_size = int(
+            config.get("batch_size", runtime.get("batch_size", 0))
+        )
+        configured_accumulation = int(
+            config.get("accumulation_steps", runtime.get("accumulation_steps", 0))
+        )
+        expected_replay_mode = str(
+            config.get(
+                "worker_pointer_v2_replay_mode",
+                "behavior_group_exact_gpu_template_v2"
+                if is_fast_exact
+                else "behavior_group_exact_v1",
+            )
+        )
+        expected_group_bound = int(
+            config.get(
+                "worker_pointer_v2_rollout_group_upper_bound",
+                16 if is_fast_exact else 4,
+            )
+        )
         runtime_ok = runtime_ok and (
-            int(runtime.get("batch_size", 0)) == 256
-            and int(runtime.get("accumulation_steps", 0)) == 16
+            configured_batch_size > 0
+            and configured_accumulation > 0
+            and int(runtime.get("batch_size", 0)) == configured_batch_size
+            and int(runtime.get("accumulation_steps", 0)) == configured_accumulation
             and runtime.get("worker_pointer_v2_replay_mode")
-            == "behavior_group_exact_v1"
-            and int(runtime.get("requested_logical_batch_cap", 0)) == 256
-            and int(runtime.get("effective_logical_batch_cap", 0)) == 256
-            and int(runtime.get("rollout_group_upper_bound", 0)) == 4
+            == expected_replay_mode
+            and int(runtime.get("requested_logical_batch_cap", 0))
+            == configured_batch_size
+            and int(runtime.get("effective_logical_batch_cap", 0))
+            == configured_batch_size
+            and int(runtime.get("rollout_group_upper_bound", 0)) == expected_group_bound
             and int(runtime.get("target_max_samples_per_optimizer_step", 0))
-            == 4096
+            == configured_batch_size * configured_accumulation
         )
     checks["runtime"] = _check(
         runtime_ok,
-        "运行必须为 4 环境 bf16、禁用 GradScaler；v2 还必须采用 256×16 的 behavior_group_exact_v1",
+        "运行参数、bf16、GradScaler 与所选 v2 重放模式必须一致",
         observed=dict(runtime),
     )
     manifest_file = _resolve_manifest_path(run_dir, manifest.get("training_manifest_path"))
@@ -184,18 +254,24 @@ def _run_checks(
         "resolved config 缺少正数 max_episodes",
         expected_updates=updates,
     )
+    async_eval_enabled = bool(config.get("async_eval_enabled", False))
     required = REQUIRED_V2_SCALARS if require_v2 else (
         "Rollout/CompletionRate",
-        "Eval/completion_rate",
         "Rollout/StepsPerSecond",
         "Memory/PeakAllocatedMiB",
     )
+    if not async_eval_enabled:
+        required = (*required, "Eval/completion_rate")
     missing = [tag for tag in required if len(scalars.get(tag, [])) < updates]
     finite_tags = [tag for tag in required if tag in scalars and not all(math.isfinite(value) for value in scalars[tag])]
     scalar_ok = updates > 0 and not missing and not finite_tags
     if scalar_ok:
         rollout_completion = scalars["Rollout/CompletionRate"][-updates:]
-        eval_completion = scalars["Eval/completion_rate"][-updates:]
+        eval_completion = (
+            []
+            if async_eval_enabled
+            else scalars["Eval/completion_rate"][-updates:]
+        )
         scalar_ok = all(value == 1.0 for value in rollout_completion + eval_completion)
     checks["scalar_contract"] = _check(
         scalar_ok,
@@ -205,6 +281,8 @@ def _run_checks(
         observed_rollout_completion=scalars.get("Rollout/CompletionRate", [])[-updates:],
         observed_eval_completion=scalars.get("Eval/completion_rate", [])[-updates:],
     )
+    if async_eval_enabled:
+        checks["async_evaluation"] = _check_async_evaluation(run_dir)
     if require_v2 and scalar_ok:
         kl_limit = float(config.get("kl_early_stop", 0.0))
         v2_ok = (
@@ -234,8 +312,18 @@ def evaluate_training_run(run_dir: Path, *, legacy_run_dir: Path | None = None) 
     report_path = run_dir / "artifacts" / "training_gate_report.json"
     checks: dict[str, Any] = {}
     try:
+        manifest_path = run_dir / "configs" / "run_manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+        model_spec = manifest.get("model_spec") if isinstance(manifest, Mapping) else None
+        observed_mode = (
+            str(model_spec.get("team_selection_mode", ""))
+            if isinstance(model_spec, Mapping)
+            else ""
+        )
+        if observed_mode not in V2_MODES:
+            raise ValueError(f"不支持的 WorkerPointer v2 模式: {observed_mode!r}")
         checks, scalars, updates = _run_checks(
-            run_dir, expected_mode=V2_MODE, require_v2=True
+            run_dir, expected_mode=observed_mode, require_v2=True
         )
         if legacy_run_dir is not None:
             legacy_checks, legacy_scalars, legacy_updates = _run_checks(

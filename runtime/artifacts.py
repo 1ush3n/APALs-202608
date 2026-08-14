@@ -11,6 +11,7 @@ from typing import Any
 
 from configs import Config
 from runtime.checkpoints import build_model_spec
+from runtime.modes import is_worker_pointer_v2_mode
 
 
 def resolve_path(path_like: str | Path, project_root: Path) -> Path:
@@ -183,10 +184,7 @@ def build_run_manifest_payload(
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(chunk)
         training_manifest_sha256 = digest.hexdigest()
-    v2_mode = (
-        str(getattr(config, "team_selection_mode", "autoregressive"))
-        == "autoregressive_pressure_v2"
-    )
+    v2_mode = is_worker_pointer_v2_mode(config)
     requested_logical_cap = (
         int(getattr(config, "batch_size", 1))
         if v2_mode
@@ -264,9 +262,26 @@ def build_run_manifest_payload(
             "worker_pointer_v2_init_seed": (
                 int(getattr(config, "seed", 0))
                 + int(getattr(config, "worker_pointer_v2_init_seed_offset", 1009))
-                if str(getattr(config, "team_selection_mode", "autoregressive"))
-                == "autoregressive_pressure_v2"
+                if v2_mode
                 else None
+            ),
+            "async_eval_enabled": bool(
+                getattr(config, "async_eval_enabled", False)
+            ),
+            "async_eval_device": str(
+                getattr(config, "async_eval_device", "cpu")
+            ),
+            "async_eval_worker_count": int(
+                getattr(config, "async_eval_worker_count", 1)
+            ),
+            "async_eval_queue_capacity": int(
+                getattr(config, "async_eval_queue_capacity", 4)
+            ),
+            "async_eval_submit_every_episodes": int(
+                getattr(config, "async_eval_submit_every_episodes", 1)
+            ),
+            "async_eval_wait_on_finish": bool(
+                getattr(config, "async_eval_wait_on_finish", True)
             ),
         },
         **(extra or {}),

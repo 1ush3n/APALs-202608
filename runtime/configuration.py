@@ -416,8 +416,8 @@ def validate_runtime_config(config: Config) -> None:
             raise ValueError("async_eval_queue_capacity 必须大于 0")
         if int(getattr(config, "async_eval_worker_count", 1)) < 1:
             raise ValueError("async_eval_worker_count 必须大于 0")
-        if async_device.startswith("cuda") and int(getattr(config, "async_eval_worker_count", 1)) != 1:
-            raise ValueError("CUDA 异步验证必须使用 async_eval_worker_count=1")
+        if async_device.startswith("cuda") and int(getattr(config, "async_eval_worker_count", 1)) > 2:
+            raise ValueError("CUDA 异步验证的 async_eval_worker_count 最大为 2")
         if int(getattr(config, "async_eval_submit_every_episodes", 1)) < 1:
             raise ValueError("async_eval_submit_every_episodes 必须大于 0")
         if bool(getattr(config, "enable_reschedule_mode", False)):

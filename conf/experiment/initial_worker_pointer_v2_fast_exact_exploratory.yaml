@@ -47,11 +47,11 @@ train:
   eval_freq: 1
   eval_temperature: 0.0
   async_eval_enabled: true
-  async_eval_device: cpu
+  async_eval_device: cuda
   async_eval_cpu_threads: 4
   async_eval_worker_count: 2
   async_eval_queue_capacity: 4
-  async_eval_submit_every_episodes: 3
+  async_eval_submit_every_episodes: 2
   async_eval_wait_on_finish: true
   async_eval_failure_policy: fail
   async_eval_max_retries: 1

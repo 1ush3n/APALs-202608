@@ -18,6 +18,8 @@ def _write_run(
     completion: float = 1.0,
     sps: float = 100.0,
     peak_memory_mib: float = 1024.0,
+    async_eval: bool = False,
+    batch_size: int = 256,
 ) -> None:
     import torch
     import yaml
@@ -38,7 +40,23 @@ def _write_run(
     log_dir = run_dir / "logs" / "tensorboard"
     config_dir.mkdir(parents=True)
     checkpoint_dir.mkdir(parents=True)
-    resolved = {"max_episodes": updates, "kl_early_stop": 0.02}
+    resolved = {
+        "max_episodes": updates,
+        "kl_early_stop": 0.02,
+        "async_eval_enabled": async_eval,
+        "async_eval_submit_every_episodes": 2,
+        "batch_size": batch_size,
+        "accumulation_steps": 16,
+        "num_envs": 16 if mode == "autoregressive_pressure_v2_fast_exact" else 4,
+        "worker_pointer_v2_replay_mode": (
+            "behavior_group_exact_gpu_template_v2"
+            if mode == "autoregressive_pressure_v2_fast_exact"
+            else "behavior_group_exact_v1"
+        ),
+        "worker_pointer_v2_rollout_group_upper_bound": (
+            16 if mode == "autoregressive_pressure_v2_fast_exact" else 4
+        ),
+    }
     (config_dir / "resolved_config.yaml").write_text(
         yaml.safe_dump(resolved), encoding="utf-8"
     )
@@ -50,6 +68,11 @@ def _write_run(
         "worker_pointer_supply_epsilon": 1.0e-6,
         "worker_pointer_wait_discount_mode": "physical_wait_exponential_v1",
     }
+    is_v2 = mode in {
+        "autoregressive_pressure_v2",
+        "autoregressive_pressure_v2_fast_exact",
+    }
+    is_fast_exact = mode == "autoregressive_pressure_v2_fast_exact"
     (config_dir / "run_manifest.json").write_text(
         json.dumps(
             {
@@ -58,28 +81,30 @@ def _write_run(
                 "training_manifest_path": str(manifest_path),
                 "training_manifest_sha256": manifest_sha256,
                 "runtime": {
-                    "num_envs": 4,
-                    "batch_size": 256,
+                    "num_envs": 16 if is_fast_exact else 4,
+                    "batch_size": batch_size,
                     "accumulation_steps": 16,
                     "lightning_precision": "bf16-mixed",
                     "autocast_dtype": "bfloat16",
                     "grad_scaler_enabled": False,
                     "worker_pointer_v2_replay_mode": (
-                        "behavior_group_exact_v1"
-                        if mode == "autoregressive_pressure_v2"
+                        "behavior_group_exact_gpu_template_v2"
+                        if is_fast_exact
+                        else "behavior_group_exact_v1"
+                        if is_v2
                         else None
                     ),
                     "requested_logical_batch_cap": (
-                        256 if mode == "autoregressive_pressure_v2" else None
+                        batch_size if is_v2 else None
                     ),
                     "effective_logical_batch_cap": (
-                        256 if mode == "autoregressive_pressure_v2" else None
+                        batch_size if is_v2 else None
                     ),
                     "rollout_group_upper_bound": (
-                        4 if mode == "autoregressive_pressure_v2" else None
+                        16 if is_fast_exact else 4 if is_v2 else None
                     ),
                     "target_max_samples_per_optimizer_step": (
-                        4096 if mode == "autoregressive_pressure_v2" else None
+                        batch_size * 16 if is_v2 else None
                     ),
                 },
             }
@@ -90,11 +115,12 @@ def _write_run(
     writer = SummaryWriter(log_dir)
     for step in range(updates):
         writer.add_scalar("Rollout/CompletionRate", completion, step)
-        writer.add_scalar("Eval/completion_rate", completion, step)
+        if not async_eval:
+            writer.add_scalar("Eval/completion_rate", completion, step)
         writer.add_scalar("Rollout/StepsPerSecond", sps, step)
         writer.add_scalar("Memory/PeakAllocatedMiB", peak_memory_mib, step)
         writer.add_scalar("Policy/ApproxKL", 0.01, step)
-        if mode == "autoregressive_pressure_v2":
+        if is_v2:
             for tag, value in {
                 "PPO/GradientsFinite": 1.0,
                 "PointerV2/GradientNorm": 1.0,
@@ -109,6 +135,25 @@ def _write_run(
                 writer.add_scalar(tag, value, step)
     writer.flush()
     writer.close()
+    if async_eval:
+        async_root = checkpoint_dir / "async_eval"
+        done_dir = async_root / "queue" / "done"
+        result_dir = async_root / "results"
+        done_dir.mkdir(parents=True)
+        result_dir.mkdir(parents=True)
+        result = {
+            "episode": updates,
+            "eligible": completion,
+            "complete": completion,
+            "selection_score": 100.0,
+            "makespan": 100.0,
+        }
+        (result_dir / f"episode_{updates:06d}.json").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
+        (done_dir / f"episode_{updates:06d}.json").write_text(
+            json.dumps({"episode": updates, "result": result}), encoding="utf-8"
+        )
 
 
 def test_training_gate_report_passes_and_compares_legacy(tmp_path: Path) -> None:
@@ -156,3 +201,42 @@ def test_training_gate_report_fails_closed_for_missing_group_replay_semantics(
 
     assert report["status"] == "failed"
     assert report["checks"]["runtime"]["passed"] is False
+
+
+def test_fast_exact_async_training_gate_uses_drained_queue_results(
+    tmp_path: Path,
+) -> None:
+    from scripts.verify_worker_pointer_v2_training_run import evaluate_training_run
+
+    run_dir = tmp_path / "results" / "initial_worker_pointer_v2_fast_exact" / "run"
+    _write_run(
+        run_dir,
+        mode="autoregressive_pressure_v2_fast_exact",
+        async_eval=True,
+    )
+
+    report = evaluate_training_run(run_dir)
+
+    assert report["status"] == "passed"
+    assert report["checks"]["model_mode"]["passed"] is True
+    assert report["checks"]["runtime"]["passed"] is True
+    assert report["checks"]["async_evaluation"]["passed"] is True
+
+
+def test_fast_exact_training_gate_respects_resolved_cli_batch_size(
+    tmp_path: Path,
+) -> None:
+    from scripts.verify_worker_pointer_v2_training_run import evaluate_training_run
+
+    run_dir = tmp_path / "results" / "initial_worker_pointer_v2_fast_exact" / "run"
+    _write_run(
+        run_dir,
+        mode="autoregressive_pressure_v2_fast_exact",
+        async_eval=True,
+        batch_size=128,
+    )
+
+    report = evaluate_training_run(run_dir)
+
+    assert report["status"] == "passed"
+    assert report["checks"]["runtime"]["passed"] is True

@@ -197,6 +197,12 @@ def test_fast_exact_experiment_linux_resolves_16_envs() -> None:
     assert is_fast_exact_mode(target)
     assert target.worker_pointer_v2_fast_default_num_envs == 16
     assert resolved == 16
+    assert target.async_eval_enabled is True
+    assert target.async_eval_device == "cuda"
+    assert target.async_eval_worker_count == 2
+    assert target.async_eval_queue_capacity == 4
+    assert target.async_eval_submit_every_episodes == 2
+    assert target.async_eval_wait_on_finish is True
 
 
 def test_fast_exact_experiment_windows_resolves_4_envs() -> None:

@@ -200,8 +200,8 @@ class AsyncEvaluationManager:
         self.device = str(getattr(config, "async_eval_device", "cpu")).strip().lower()
         if self.device not in {"cpu", "cuda", "cuda:0"}:
             raise AsyncEvaluationError(f"async_eval_device 仅允许 cpu、cuda 或 cuda:0，实际为 {self.device!r}")
-        if self.device.startswith("cuda") and self.worker_count != 1:
-            raise AsyncEvaluationError("CUDA 异步验证只允许 async_eval_worker_count=1，避免与训练争抢显存")
+        if self.device.startswith("cuda") and self.worker_count > 2:
+            raise AsyncEvaluationError("CUDA 异步验证的 async_eval_worker_count 最大为 2")
         self.poll_interval = float(config.async_eval_poll_interval_sec)
         self.heartbeat_interval = float(config.async_eval_heartbeat_interval_sec)
         self.stale_timeout = float(config.async_eval_stale_timeout_sec)

@@ -574,7 +574,50 @@ def _record_result(paths: AsyncEvalPaths, job: dict[str, Any], result: dict[str,
         )
 
 
-def run_worker(queue_root: Path, project_root: Path, *, heartbeat_interval: float = 30.0, worker_id: str = "worker", device_name: str = "cpu") -> int:
+def _evaluate_job_with_cuda_oom_fallback(
+    job: dict[str, Any],
+    project_root: Path,
+    *,
+    device: "torch.device",
+) -> tuple[dict[str, Any], list[Any]]:
+    """CUDA OOM 时仅将当前验证任务降级到 CPU，后续任务仍使用原设备。"""
+    import gc
+    import torch
+
+    try:
+        result, schedule = _evaluate_job(job, project_root, device=device)
+        result = dict(result)
+        result["evaluation_device"] = str(device)
+        result["cuda_oom_cpu_fallback"] = 0.0
+        return result, schedule
+    except torch.cuda.OutOfMemoryError:
+        if device.type != "cuda":
+            raise
+        gc.collect()
+        torch.cuda.empty_cache()
+        print(
+            f"[AsyncEval][CUDAOOM] ep={int(job['episode'])} 当前任务降级到 CPU",
+            flush=True,
+        )
+        result, schedule = _evaluate_job(
+            job,
+            project_root,
+            device=torch.device("cpu"),
+        )
+        result = dict(result)
+        result["evaluation_device"] = "cpu"
+        result["cuda_oom_cpu_fallback"] = 1.0
+        return result, schedule
+
+
+def run_worker(
+    queue_root: Path,
+    project_root: Path,
+    *,
+    heartbeat_interval: float = 30.0,
+    worker_id: str = "worker",
+    device_name: str = "cpu",
+) -> int:
     import torch
     from torch.utils.tensorboard import SummaryWriter
 
@@ -605,7 +648,11 @@ def run_worker(queue_root: Path, project_root: Path, *, heartbeat_interval: floa
                     episode = int(job["episode"])
                     start_time = time.time()
                     try:
-                        result, schedule = _evaluate_job(job, project_root, device=device)
+                        result, schedule = _evaluate_job_with_cuda_oom_fallback(
+                            job,
+                            project_root,
+                            device=device,
+                        )
                         _record_result(paths, job, result, schedule, writer)
                         done_payload = {**job, "completed_at": time.time(), "worker_duration_sec": time.time() - start_time, "result": result}
                         atomic_write_json(paths.done / running_path.name, done_payload)
