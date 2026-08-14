@@ -9,7 +9,11 @@ import torch
 from configs import Config
 from environment import AirLineEnv_Graph
 from runtime.evaluation import compute_apal_rollout_diagnostics, evaluate_model
-from runtime.modes import is_fast_exact_mode, is_worker_pointer_v2_mode
+from runtime.modes import (
+    is_fast_exact_mode,
+    is_worker_pointer_v2_mode,
+    uses_behavior_group_exact_replay,
+)
 from runtime.multiscale import BenchmarkScore, parse_reference_makespans, score_multi_benchmark
 from runtime.paths import resolve_workspace_path
 from runtime.reschedule_eval import evaluate_reschedule_model
@@ -335,7 +339,7 @@ class APALRolloutService:
 
                 # WorkerPointer v2 行为组：本次 select_actions_batch 的 active env 顺序即 group 成员。
                 behavior_traces = []
-                if v2_mode:
+                if v2_mode and uses_behavior_group_exact_replay(self.config):
                     behavior_traces = make_behavior_traces(
                         group_id=(episode, rollout_call_index),
                         env_indices=list(active),

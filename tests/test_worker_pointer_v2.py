@@ -162,6 +162,7 @@ def test_runtime_validation_accepts_only_attention_worker_scope_for_v2() -> None
     valid.policy_action_scope = "operation_station_worker"
     valid.actor_context_mode = "attention"
     valid.worker_pointer_v2_behavior_replay = True
+    valid.worker_pointer_v2_replay_mode = "behavior_group_exact_v1"
     validate_runtime_config(valid)
 
     wrong_scope = Config()
@@ -177,6 +178,50 @@ def test_runtime_validation_accepts_only_attention_worker_scope_for_v2() -> None
     wrong_context.actor_context_mode = "mean_max"
     with pytest.raises(ValueError, match="actor_context_mode=attention"):
         validate_runtime_config(wrong_context)
+
+
+def _batched_v2_config() -> Config:
+    cfg = Config()
+    cfg.team_selection_mode = "autoregressive_pressure_v2"
+    cfg.policy_action_scope = "operation_station_worker"
+    cfg.actor_context_mode = "attention"
+    cfg.worker_pointer_v2_behavior_replay = False
+    cfg.worker_pointer_v2_replay_mode = "batched_vectorized_v2"
+    return cfg
+
+
+def test_runtime_validation_accepts_batched_vectorized_v2_without_behavior_trace() -> None:
+    from runtime.configuration import validate_runtime_config
+
+    validate_runtime_config(_batched_v2_config())
+
+
+def test_runtime_validation_rejects_batched_v2_with_behavior_trace_enabled() -> None:
+    from runtime.configuration import validate_runtime_config
+
+    cfg = _batched_v2_config()
+    cfg.worker_pointer_v2_behavior_replay = True
+    with pytest.raises(ValueError, match="batched_vectorized_v2"):
+        validate_runtime_config(cfg)
+
+
+def test_runtime_validation_rejects_group_exact_without_behavior_trace() -> None:
+    from runtime.configuration import validate_runtime_config
+
+    cfg = _batched_v2_config()
+    cfg.worker_pointer_v2_replay_mode = "behavior_group_exact_v1"
+    with pytest.raises(ValueError, match="behavior_group_exact_v1"):
+        validate_runtime_config(cfg)
+
+
+def test_legacy_mode_never_uses_v2_behavior_group_exact_replay() -> None:
+    from runtime.modes import uses_behavior_group_exact_replay
+
+    cfg = Config()
+    cfg.team_selection_mode = "autoregressive"
+    cfg.worker_pointer_v2_replay_mode = "behavior_group_exact_v1"
+
+    assert uses_behavior_group_exact_replay(cfg) is False
 
 
 def _pointer_config(mode: str) -> Config:
@@ -450,6 +495,7 @@ def test_v2_single_and_deterministic_paths_call_v2_pointer(
         actor_context_mode="attention",
         batch_size=1,
         worker_pointer_v2_behavior_replay=True,
+        worker_pointer_v2_replay_mode="behavior_group_exact_v1",
         worker_pointer_v2_logical_batch_cap=1,
     )
     with temporary_config(configs, overrides):
@@ -495,6 +541,7 @@ def test_v2_batch_path_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> None
         actor_context_mode="attention",
         batch_size=1,
         worker_pointer_v2_behavior_replay=True,
+        worker_pointer_v2_replay_mode="behavior_group_exact_v1",
         worker_pointer_v2_logical_batch_cap=1,
     )
     with temporary_config(configs, overrides):
@@ -519,6 +566,7 @@ def test_v2_ppo_recompute_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> N
         actor_context_mode="attention",
         batch_size=1,
         worker_pointer_v2_behavior_replay=True,
+        worker_pointer_v2_replay_mode="behavior_group_exact_v1",
         worker_pointer_v2_logical_batch_cap=1,
     )
     with temporary_config(configs, overrides):
@@ -653,6 +701,7 @@ def test_run_manifest_records_model_and_runtime_semantics(
     cfg.batch_size = 256
     cfg.accumulation_steps = 16
     cfg.worker_pointer_v2_behavior_replay = True
+    cfg.worker_pointer_v2_replay_mode = "behavior_group_exact_v1"
     payload = build_run_manifest_payload(cfg, command="pytest")
 
     assert payload["model_spec"]["team_selection_mode"] == "autoregressive_pressure_v2"

@@ -234,6 +234,26 @@ def test_worker_pointer_v2_linux_config_keeps_256_by_16_training_semantics() -> 
     assert Path(paths[-1]).name == "linux_server.yaml"
 
 
+def test_batched_v2_exploratory_config_resolves_without_async_gpu_evaluation() -> None:
+    """批量 v2 实验配置必须保持轻量本地验证语义。"""
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_batched_exploratory"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.team_selection_mode == "autoregressive_pressure_v2"
+    assert cfg.worker_pointer_v2_replay_mode == "batched_vectorized_v2"
+    assert cfg.worker_pointer_v2_behavior_replay is False
+    assert cfg.worker_pointer_v2_strict_gpu_replay is False
+    assert cfg.async_eval_enabled is False
+    assert cfg.batch_size == 16
+    assert cfg.accumulation_steps == 16
+
+
 def test_experiments_do_not_embed_hardware_profiles() -> None:
     experiment_dir = PROJECT_ROOT / "conf" / "experiment"
     for path in experiment_dir.glob("*.yaml"):

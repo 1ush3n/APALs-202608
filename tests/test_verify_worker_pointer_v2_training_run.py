@@ -20,6 +20,7 @@ def _write_run(
     peak_memory_mib: float = 1024.0,
     async_eval: bool = False,
     batch_size: int = 256,
+    replay_mode: str | None = None,
 ) -> None:
     import torch
     import yaml
@@ -48,7 +49,7 @@ def _write_run(
         "batch_size": batch_size,
         "accumulation_steps": 16,
         "num_envs": 16 if mode == "autoregressive_pressure_v2_fast_exact" else 4,
-        "worker_pointer_v2_replay_mode": (
+        "worker_pointer_v2_replay_mode": replay_mode or (
             "behavior_group_exact_gpu_template_v2"
             if mode == "autoregressive_pressure_v2_fast_exact"
             else "behavior_group_exact_v1"
@@ -87,7 +88,7 @@ def _write_run(
                     "lightning_precision": "bf16-mixed",
                     "autocast_dtype": "bfloat16",
                     "grad_scaler_enabled": False,
-                    "worker_pointer_v2_replay_mode": (
+                    "worker_pointer_v2_replay_mode": replay_mode or (
                         "behavior_group_exact_gpu_template_v2"
                         if is_fast_exact
                         else "behavior_group_exact_v1"
@@ -125,14 +126,17 @@ def _write_run(
                 "PPO/GradientsFinite": 1.0,
                 "PointerV2/GradientNorm": 1.0,
                 "PointerV2/GradientCoverage": 0.5,
-                "PointerV2/PPOFirstRecomputeMaxAE": 1.0e-4,
-                "PointerV2/PPOFirstRecomputeMAE": 1.0e-5,
                 "PointerV2/AutocastEnabled": 1.0,
                 "PointerV2/AutocastBF16": 1.0,
                 "PointerV2/GradScalerEnabled": 0.0,
                 "PointerV2/NonFiniteCount": 0.0,
             }.items():
                 writer.add_scalar(tag, value, step)
+            if replay_mode != "batched_vectorized_v2":
+                writer.add_scalar("PointerV2/PPOFirstRecomputeMaxAE", 1.0e-4, step)
+                writer.add_scalar("PointerV2/PPOFirstRecomputeMAE", 1.0e-5, step)
+            else:
+                writer.add_scalar("V2/BatchedReplayUpdateSeconds", 1.0, step)
     writer.flush()
     writer.close()
     if async_eval:
@@ -240,3 +244,19 @@ def test_fast_exact_training_gate_respects_resolved_cli_batch_size(
 
     assert report["status"] == "passed"
     assert report["checks"]["runtime"]["passed"] is True
+
+
+def test_training_gate_accepts_batched_v2_without_group_contract(tmp_path: Path) -> None:
+    from scripts.verify_worker_pointer_v2_training_run import evaluate_training_run
+
+    run_dir = tmp_path / "results" / "batched_v2" / "run"
+    _write_run(
+        run_dir,
+        mode="autoregressive_pressure_v2",
+        replay_mode="batched_vectorized_v2",
+    )
+
+    report = evaluate_training_run(run_dir)
+
+    assert report["status"] == "passed"
+    assert report["checks"]["v2_numerical_contract"]["passed"] is True

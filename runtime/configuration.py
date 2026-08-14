@@ -12,6 +12,9 @@ from runtime.artifacts import run_context as create_run_context
 from runtime.artifacts import uses_runs_layout
 from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
 from runtime.modes import (
+    BATCHED_V2_REPLAY_MODE,
+    BEHAVIOR_GROUP_EXACT_REPLAY_MODE,
+    FAST_EXACT_REPLAY_MODE,
     V2_TEAM_SELECTION_MODES,
     is_fast_exact_mode,
     is_worker_pointer_v2_mode,
@@ -278,7 +281,7 @@ def validate_runtime_config(config: Config) -> None:
         if is_fast_exact_mode(config):
             if (
                 str(config.worker_pointer_v2_replay_mode)
-                != "behavior_group_exact_gpu_template_v2"
+                != FAST_EXACT_REPLAY_MODE
             ):
                 raise ValueError(
                     "worker_pointer_v2_replay_mode 仅支持 "
@@ -295,13 +298,23 @@ def validate_runtime_config(config: Config) -> None:
                     f"收到 {int(config.worker_pointer_v2_rollout_group_upper_bound)}"
                 )
         else:
-            if not bool(config.worker_pointer_v2_behavior_replay):
+            replay_mode = str(config.worker_pointer_v2_replay_mode)
+            if replay_mode == BATCHED_V2_REPLAY_MODE:
+                if bool(config.worker_pointer_v2_behavior_replay):
+                    raise ValueError(
+                        "batched_vectorized_v2 不保存行为组轨迹；请将 "
+                        "worker_pointer_v2_behavior_replay 设为 false"
+                    )
+            elif replay_mode == BEHAVIOR_GROUP_EXACT_REPLAY_MODE:
+                if not bool(config.worker_pointer_v2_behavior_replay):
+                    raise ValueError(
+                        "behavior_group_exact_v1 要求启用 "
+                        "worker_pointer_v2_behavior_replay"
+                    )
+            else:
                 raise ValueError(
-                    "autoregressive_pressure_v2 要求启用 worker_pointer_v2_behavior_replay"
-                )
-            if str(config.worker_pointer_v2_replay_mode) != "behavior_group_exact_v1":
-                raise ValueError(
-                    "worker_pointer_v2_replay_mode 仅支持 behavior_group_exact_v1"
+                    "autoregressive_pressure_v2 仅支持 batched_vectorized_v2 或 "
+                    "behavior_group_exact_v1"
                 )
         if int(config.worker_pointer_v2_logical_batch_cap) < 1:
             raise ValueError("worker_pointer_v2_logical_batch_cap 必须大于 0")

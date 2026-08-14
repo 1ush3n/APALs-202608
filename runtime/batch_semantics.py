@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from runtime.modes import is_worker_pointer_v2_mode
+from runtime.modes import uses_behavior_group_exact_replay
 
 
 class BatchSemanticsConfig(Protocol):
@@ -19,7 +19,7 @@ def resolve_effective_ppo_batch_size(
 ) -> int:
     """解析实际 PPO batch；v2 同形重放（含 Fast-Exact）不受平台大图 batch 限幅。"""
     requested = max(1, int(requested_batch_size))
-    if is_worker_pointer_v2_mode(config):
+    if uses_behavior_group_exact_replay(config):
         return requested
     platform_cap = max(0, int(config.ppo_batch_size_cap))
     return min(requested, platform_cap) if platform_cap > 0 else requested

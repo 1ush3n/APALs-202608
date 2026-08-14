@@ -25,7 +25,12 @@ from runtime.batch_semantics import (
     resolve_effective_ppo_batch_size,
     resolve_v2_logical_batch_size,
 )
-from runtime.modes import is_fast_exact_mode, is_worker_pointer_v2_mode
+from runtime.modes import (
+    is_batched_vectorized_v2_replay,
+    is_fast_exact_mode,
+    is_worker_pointer_v2_mode,
+    uses_behavior_group_exact_replay,
+)
 try:
     from schedulefree import AdamWScheduleFree
 except ImportError:
@@ -2752,6 +2757,7 @@ class PPOAgent:
 
     def _update_once(self, memory: Any, env: Any = None, current_ep: int = 1) -> Dict[str, float]:
         """执行一次 PPO 更新，并返回 TensorBoard 指标。"""
+        update_started = time.perf_counter()
         # 无引用缓存清理只能缓解碎片化；活跃张量由显式生命周期管理。
         self.clear_device_cache()
         distill_lifecycle = {
@@ -2991,11 +2997,6 @@ class PPOAgent:
         total_batches_diagnosed = 0 
         kl_exceeded_count = 0
 
-        v2_behavior_replay = (
-            action_scope == "operation_station_worker"
-            and is_worker_pointer_v2_mode(self.config)
-            and bool(getattr(self.config, "worker_pointer_v2_behavior_replay", False))
-        )
         if is_fast_exact_mode(self.config):
             if env is None:
                 raise RuntimeError(
@@ -3013,7 +3014,10 @@ class PPOAgent:
                 b_team=b_team,
                 action_scope=action_scope,
             )
-        if v2_behavior_replay:
+        if (
+            action_scope == "operation_station_worker"
+            and uses_behavior_group_exact_replay(self.config)
+        ):
             if env is None:
                 raise RuntimeError("v2 行为同形重放要求提供 env 实例（snapshot 重建依赖 env）")
             return self._run_v2_behavior_replay_update(
@@ -3704,6 +3708,10 @@ class PPOAgent:
                 }
             )
         metrics.update(distill_lifecycle)
+        if is_batched_vectorized_v2_replay(self.config):
+            metrics["V2/BatchedReplayUpdateSeconds"] = float(
+                time.perf_counter() - update_started
+            )
         return metrics
 
     def _build_v2_behavior_group_batch(

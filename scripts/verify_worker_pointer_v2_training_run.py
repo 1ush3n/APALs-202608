@@ -18,6 +18,10 @@ V2_MODE = "autoregressive_pressure_v2"
 FAST_EXACT_MODE = "autoregressive_pressure_v2_fast_exact"
 V2_MODES = frozenset({V2_MODE, FAST_EXACT_MODE})
 LEGACY_MODE = "autoregressive"
+BATCHED_V2_REPLAY_MODE = "batched_vectorized_v2"
+GROUP_EXACT_REPLAY_MODES = frozenset(
+    {"behavior_group_exact_v1", "behavior_group_exact_gpu_template_v2"}
+)
 REQUIRED_V2_SCALARS = (
     "Rollout/CompletionRate",
     "Rollout/StepsPerSecond",
@@ -196,6 +200,11 @@ def _run_checks(
                 16 if is_fast_exact else 4,
             )
         )
+        is_batched_v2 = expected_replay_mode == BATCHED_V2_REPLAY_MODE
+        known_replay_mode = (
+            expected_replay_mode == BATCHED_V2_REPLAY_MODE
+            or expected_replay_mode in GROUP_EXACT_REPLAY_MODES
+        )
         runtime_ok = runtime_ok and (
             configured_batch_size > 0
             and configured_accumulation > 0
@@ -203,14 +212,18 @@ def _run_checks(
             and int(runtime.get("accumulation_steps", 0)) == configured_accumulation
             and runtime.get("worker_pointer_v2_replay_mode")
             == expected_replay_mode
-            and int(runtime.get("requested_logical_batch_cap", 0))
-            == configured_batch_size
-            and int(runtime.get("effective_logical_batch_cap", 0))
-            == configured_batch_size
-            and int(runtime.get("rollout_group_upper_bound", 0)) == expected_group_bound
-            and int(runtime.get("target_max_samples_per_optimizer_step", 0))
-            == configured_batch_size * configured_accumulation
+            and known_replay_mode
         )
+        if not is_batched_v2:
+            runtime_ok = runtime_ok and (
+                int(runtime.get("requested_logical_batch_cap", 0))
+                == configured_batch_size
+                and int(runtime.get("effective_logical_batch_cap", 0))
+                == configured_batch_size
+                and int(runtime.get("rollout_group_upper_bound", 0)) == expected_group_bound
+                and int(runtime.get("target_max_samples_per_optimizer_step", 0))
+                == configured_batch_size * configured_accumulation
+            )
     checks["runtime"] = _check(
         runtime_ok,
         "运行参数、bf16、GradScaler 与所选 v2 重放模式必须一致",
@@ -255,11 +268,24 @@ def _run_checks(
         expected_updates=updates,
     )
     async_eval_enabled = bool(config.get("async_eval_enabled", False))
+    is_batched_v2 = require_v2 and (
+        str(config.get("worker_pointer_v2_replay_mode", ""))
+        == BATCHED_V2_REPLAY_MODE
+    )
     required = REQUIRED_V2_SCALARS if require_v2 else (
         "Rollout/CompletionRate",
         "Rollout/StepsPerSecond",
         "Memory/PeakAllocatedMiB",
     )
+    if is_batched_v2:
+        required = tuple(
+            tag
+            for tag in REQUIRED_V2_SCALARS
+            if tag not in {
+                "PointerV2/PPOFirstRecomputeMAE",
+                "PointerV2/PPOFirstRecomputeMaxAE",
+            }
+        ) + ("V2/BatchedReplayUpdateSeconds",)
     if not async_eval_enabled:
         required = (*required, "Eval/completion_rate")
     missing = [tag for tag in required if len(scalars.get(tag, [])) < updates]
@@ -289,19 +315,32 @@ def _run_checks(
             all(value == 1.0 for value in scalars["PPO/GradientsFinite"][-updates:])
             and all(value > 0.0 for value in scalars["PointerV2/GradientNorm"][-updates:])
             and all(value > 0.0 for value in scalars["PointerV2/GradientCoverage"][-updates:])
-            and max(scalars["PointerV2/PPOFirstRecomputeMaxAE"][-updates:]) <= 1.0e-3
             and all(value == 1.0 for value in scalars["PointerV2/AutocastEnabled"][-updates:])
             and all(value == 1.0 for value in scalars["PointerV2/AutocastBF16"][-updates:])
             and all(value == 0.0 for value in scalars["PointerV2/GradScalerEnabled"][-updates:])
             and all(value == 0.0 for value in scalars["PointerV2/NonFiniteCount"][-updates:])
             and max(scalars["Policy/ApproxKL"][-updates:]) <= kl_limit
         )
+        if is_batched_v2:
+            v2_ok = v2_ok and all(
+                value > 0.0
+                for value in scalars["V2/BatchedReplayUpdateSeconds"][-updates:]
+            )
+        else:
+            v2_ok = v2_ok and (
+                max(scalars["PointerV2/PPOFirstRecomputeMaxAE"][-updates:])
+                <= 1.0e-3
+            )
         checks["v2_numerical_contract"] = _check(
             v2_ok,
             "v2 梯度、重算、AMP、KL 或非有限计数不符合门槛",
             kl_early_stop=kl_limit,
             max_kl=max(scalars["Policy/ApproxKL"][-updates:]),
-            max_recompute_error=max(scalars["PointerV2/PPOFirstRecomputeMaxAE"][-updates:]),
+            max_recompute_error=(
+                None
+                if is_batched_v2
+                else max(scalars["PointerV2/PPOFirstRecomputeMaxAE"][-updates:])
+            ),
         )
     return checks, scalars, updates
 
