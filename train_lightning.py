@@ -10,6 +10,7 @@ import math
 import platform
 import re
 from pathlib import Path
+from typing import Any, Mapping
 
 import lightning.pytorch as pl
 import torch
@@ -217,6 +218,24 @@ def _resume_start_episode(checkpoint_payload: object) -> int:
                 "该 checkpoint 可能来自旧版错误续训，拒绝继续以避免训练、异步评估和 checkpoint 标签错位。"
             )
     return completed_episode + 1
+
+
+def _resolve_resume_checkpoint_path(
+    args: object,
+    checkpoint_paths: Mapping[str, Path],
+) -> Path:
+    """解析唯一的完整续训源，防止预检查与 Lightning 恢复路径错配。"""
+    configured_path = str(getattr(args, "resume_checkpoint_path", "") or "").strip()
+    if configured_path and not bool(getattr(args, "resume", False)):
+        raise ValueError("runtime.resume_checkpoint_path 只能与 resume=true 一起使用")
+    resume_path = (
+        resolve_workspace_path(configured_path)
+        if configured_path
+        else Path(checkpoint_paths["lightning_latest"])
+    )
+    if not resume_path.is_file():
+        raise FileNotFoundError(f"找不到可恢复的 Lightning checkpoint: {resume_path}")
+    return resume_path
 
 
 def _apply_reschedule_eval_manifest_override() -> None:
@@ -577,10 +596,11 @@ def run(args, *, config_initialized: bool = False) -> None:
     checkpoint_dir = checkpoint_paths["lightning_dir"]
     start_episode = 1
     resume_batch_semantics = None
+    resume_path: Path | None = None
+    if str(getattr(args, "resume_checkpoint_path", "") or "").strip() and not args.resume:
+        _resolve_resume_checkpoint_path(args, checkpoint_paths)
     if args.resume:
-        resume_path = checkpoint_paths["lightning_latest"]
-        if not resume_path.exists():
-            raise FileNotFoundError(f"找不到可恢复的 Lightning checkpoint: {resume_path}")
+        resume_path = _resolve_resume_checkpoint_path(args, checkpoint_paths)
         resume_checkpoint = load_checkpoint(resume_path)
         _guard_resume_scope_against_apcf(resume_checkpoint.model_spec)
         apply_checkpoint_model_spec(
@@ -619,6 +639,7 @@ def run(args, *, config_initialized: bool = False) -> None:
             command="train_lightning",
             extra={
                 "resume": bool(args.resume),
+                "resume_checkpoint_path": str(resume_path) if resume_path else "",
                 "resume_batch_semantics": resume_batch_semantics,
             },
         )
@@ -629,6 +650,7 @@ def run(args, *, config_initialized: bool = False) -> None:
             command="train_lightning",
             extra={
                 "resume": bool(args.resume),
+                "resume_checkpoint_path": str(resume_path) if resume_path else "",
                 "resume_batch_semantics": resume_batch_semantics,
             },
         )
@@ -756,7 +778,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     trainer.fit(
         module,
         datamodule=data_module,
-        ckpt_path=str(checkpoint_paths["lightning_latest"]) if args.resume else None,
+        ckpt_path=str(resume_path) if resume_path is not None else None,
     )
 
 

@@ -393,6 +393,22 @@ def test_compat_async_cadence_cli_has_final_priority() -> None:
     assert "async_eval_submit_every_episodes" in args.explicit_config_fields
 
 
+def test_hydra_accepts_explicit_resume_checkpoint_path() -> None:
+    from runtime.hydra_config import parse_hydra_args
+
+    args = parse_hydra_args(
+        [
+            "experiment=initial_worker_pointer_v2_exploratory",
+            "resume=true",
+            "runtime.resume_checkpoint_path=checkpoints/best.ckpt",
+        ],
+        system_name="Linux",
+    )
+
+    assert args.resume is True
+    assert args.resume_checkpoint_path == "checkpoints/best.ckpt"
+
+
 def test_compat_batch_size_cli_disables_windows_platform_cap() -> None:
     cfg = Config()
     initialize_hydra_runtime(

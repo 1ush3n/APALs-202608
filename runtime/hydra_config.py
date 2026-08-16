@@ -36,6 +36,7 @@ class ParsedHydraArgs:
     experiment: str
     hardware: str
     resume: bool
+    resume_checkpoint_path: str
     config_overrides: tuple[str, ...]
     final_overrides: dict[str, Any] = field(default_factory=dict)
     extra_values: dict[str, Any] = field(default_factory=dict)
@@ -170,6 +171,7 @@ def parse_hydra_args(
     experiment = default_experiment
     hardware = hardware_name_for_platform(system_name)
     resume = False
+    resume_checkpoint_path = ""
     config_overrides: list[str] = []
     extra_values: dict[str, Any] = {
         key: spec.default for key, spec in (extra_arguments or {}).items()
@@ -199,6 +201,12 @@ def parse_hydra_args(
         if normalized_key in {"resume", "runtime.resume"}:
             resume = _parse_bool(raw_value)
             continue
+        if normalized_key in {
+            "resume_checkpoint_path",
+            "runtime.resume_checkpoint_path",
+        }:
+            resume_checkpoint_path = str(raw_value).strip()
+            continue
 
         if extra_arguments and leaf in extra_arguments:
             extra_values[leaf] = _parse_value(raw_value)
@@ -218,6 +226,7 @@ def parse_hydra_args(
         experiment=experiment,
         hardware=hardware,
         resume=resume,
+        resume_checkpoint_path=resume_checkpoint_path,
         config_overrides=tuple(config_overrides),
         final_overrides=final_overrides,
         extra_values=extra_values,
@@ -346,6 +355,7 @@ def initialize_hydra_runtime(
 
     runtime_args = Namespace(
         resume=parsed.resume,
+        resume_checkpoint_path=parsed.resume_checkpoint_path,
         explicit_config_fields=parsed.explicit_fields,
         hydra_experiment=parsed.experiment,
         hydra_hardware=parsed.hardware,

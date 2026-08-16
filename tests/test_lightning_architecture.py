@@ -130,6 +130,42 @@ def test_resume_start_episode_rejects_misaligned_checkpoint() -> None:
         _resume_start_episode(corrupted)
 
 
+def test_resume_checkpoint_path_uses_explicit_file_without_overwriting_latest(tmp_path) -> None:
+    from train_lightning import _resolve_resume_checkpoint_path
+
+    latest = tmp_path / "last.ckpt"
+    explicit = tmp_path / "best.ckpt"
+    latest.write_bytes(b"episode-40")
+    explicit.write_bytes(b"episode-38")
+
+    resolved = _resolve_resume_checkpoint_path(
+        SimpleNamespace(resume=True, resume_checkpoint_path=str(explicit)),
+        {"lightning_latest": latest},
+    )
+
+    assert resolved == explicit
+    assert latest.read_bytes() == b"episode-40"
+
+
+def test_resume_checkpoint_path_defaults_to_latest_and_requires_resume(tmp_path) -> None:
+    from train_lightning import _resolve_resume_checkpoint_path
+
+    latest = tmp_path / "last.ckpt"
+    explicit = tmp_path / "best.ckpt"
+    latest.touch()
+    explicit.touch()
+
+    assert _resolve_resume_checkpoint_path(
+        SimpleNamespace(resume=True, resume_checkpoint_path=""),
+        {"lightning_latest": latest},
+    ) == latest
+    with pytest.raises(ValueError, match="resume=true"):
+        _resolve_resume_checkpoint_path(
+            SimpleNamespace(resume=False, resume_checkpoint_path=str(explicit)),
+            {"lightning_latest": latest},
+        )
+
+
 def test_lightning_module_skips_logging_and_eval_on_oom_update() -> None:
     agent = _OOMAgent()
     service = _RolloutService()
