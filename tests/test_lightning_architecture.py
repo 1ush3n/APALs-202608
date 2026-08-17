@@ -103,14 +103,14 @@ def test_lightning_module_uses_manual_optimization_contract() -> None:
     assert module.last_eval_metrics == {"makespan": 1.0}
 
 
-def test_rollout_data_module_uses_absolute_episode_range_after_resume() -> None:
+def test_rollout_data_module_keeps_full_absolute_range_for_lightning_resume() -> None:
     service = _RolloutService()
-    data = APALDataModule(service, max_episodes=10, start_episode=7)
+    data = APALDataModule(service, max_episodes=60)
 
     updates = list(data.train_dataloader())
 
-    assert [update.episode for update in updates] == [7, 8, 9, 10]
-    assert len(data) == 4
+    assert [update.episode for update in updates] == list(range(1, 61))
+    assert len(data) == 60
 
 
 def test_resume_start_episode_rejects_misaligned_checkpoint() -> None:

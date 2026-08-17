@@ -68,25 +68,16 @@ class _RolloutDataset(IterableDataset):
         self,
         rollout_service: RolloutService,
         max_episodes: int,
-        *,
-        start_episode: int = 1,
     ):
         self.rollout_service = rollout_service
         self.max_episodes = int(max_episodes)
-        self.start_episode = int(start_episode)
-        if self.start_episode < 1:
-            raise ValueError(f"start_episode 必须大于等于 1，当前为 {self.start_episode}")
-        if self.start_episode > self.max_episodes + 1:
-            raise ValueError(
-                f"start_episode={self.start_episode} 超过训练上限 {self.max_episodes}"
-            )
 
     def __iter__(self):
-        for episode in range(self.start_episode, self.max_episodes + 1):
+        for episode in range(1, self.max_episodes + 1):
             yield self.rollout_service.collect(episode)
 
     def __len__(self) -> int:
-        return max(0, self.max_episodes - self.start_episode + 1)
+        return self.max_episodes
 
 
 class APALDataModule(pl.LightningDataModule):
@@ -96,27 +87,23 @@ class APALDataModule(pl.LightningDataModule):
         self,
         rollout_service: RolloutService,
         max_episodes: int,
-        *,
-        start_episode: int = 1,
     ):
         super().__init__()
         self.rollout_service = rollout_service
         self.max_episodes = int(max_episodes)
-        self.start_episode = int(start_episode)
 
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
             _RolloutDataset(
                 self.rollout_service,
                 self.max_episodes,
-                start_episode=self.start_episode,
             ),
             batch_size=None,
             num_workers=0,
         )
 
     def __len__(self) -> int:
-        return max(0, self.max_episodes - self.start_episode + 1)
+        return self.max_episodes
 
 
 class APALLightningModule(pl.LightningModule):

@@ -594,7 +594,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     checkpoint_paths = resolve_checkpoint_paths(configs)
     _validate_apcf_smoke_output_paths(checkpoint_paths)
     checkpoint_dir = checkpoint_paths["lightning_dir"]
-    start_episode = 1
+    next_episode = 1
     resume_batch_semantics = None
     resume_path: Path | None = None
     if str(getattr(args, "resume_checkpoint_path", "") or "").strip() and not args.resume:
@@ -621,14 +621,14 @@ def run(args, *, config_initialized: bool = False) -> None:
             resume_checkpoint.payload,
             current_batch_size=int(configs.batch_size),
         )
-        start_episode = _resume_start_episode(resume_checkpoint.payload)
-        if start_episode > int(configs.max_episodes):
+        next_episode = _resume_start_episode(resume_checkpoint.payload)
+        if next_episode > int(configs.max_episodes):
             raise ValueError(
-                f"续训 checkpoint 已完成 episode={start_episode - 1}，"
+                f"续训 checkpoint 已完成 episode={next_episode - 1}，"
                 f"不小于 train.max_episodes={int(configs.max_episodes)}；无需继续训练。"
             )
         print(
-            f"[Resume] 已验证 checkpoint 连续性，将从 absolute_episode={start_episode} 继续训练。",
+            f"[Resume] 已验证 checkpoint 连续性，将从 absolute_episode={next_episode} 继续训练。",
             flush=True,
         )
     if uses_runs_layout(configs) and str(getattr(configs, "run_dir", "") or "").strip():
@@ -749,7 +749,6 @@ def run(args, *, config_initialized: bool = False) -> None:
     data_module = APALDataModule(
         service,
         max_episodes=total_updates,
-        start_episode=start_episode,
     )
     callbacks = [
         RolloutCheckpoint(
