@@ -124,6 +124,60 @@ def test_worker_pressure_context_near_demand_respects_action_mask_without_changi
     assert unmasked.demand_near[0, 1].item() == 0.0  # not-ready task remains excluded
 
 
+def test_v2_diagnostics_summarize_action_space_and_eft_rank() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+    from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
+
+    diagnostics = WorkerPointerV2Diagnostics(num_skills=5)
+    diagnostics.record_context(
+        build_worker_pressure_context(
+            **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+        ),
+        host_elapsed_ms=1.0,
+    )
+    diagnostics.record_action_space(
+        ready_task_count=torch.tensor([2.0]),
+        legal_station_count=torch.tensor([3.0]),
+        legal_worker_count=torch.tensor([4.0]),
+    )
+    diagnostics.record_selection(
+        selected_exposure=torch.zeros((1, 12)),
+        entropy=torch.tensor([0.5]),
+        dynamic_eft_features=torch.tensor([[[0.0, -1.0], [0.2, 0.0], [0.8, 1.0]]]),
+        selected_worker_index=1,
+        worker_invalid_mask=torch.tensor([[False, False, False]]),
+    )
+
+    metrics = diagnostics.finalize(require_coverage=False)
+
+    assert metrics["PointerV2/ActionSpace/ReadyTaskMean"] == 2.0
+    assert metrics["PointerV2/ActionSpace/LegalStationMean"] == 3.0
+    assert metrics["PointerV2/ActionSpace/LegalWorkerMean"] == 4.0
+    assert metrics["PointerV2/ActionSpace/LegalWorkerP10"] == 4.0
+    assert metrics["PointerV2/EFT/SelectedRankPercentileMean"] == 0.5
+
+
+def test_v2_gradient_diagnostics_separate_dynamic_eft_projection() -> None:
+    from ppo_agent import PPOAgent
+
+    eft_projection = torch.nn.Parameter(torch.tensor([1.0, 1.0]))
+    eft_projection.grad = torch.tensor([3.0, 4.0])
+    v2_attention = torch.nn.Parameter(torch.tensor([3.0]))
+    v2_attention.grad = torch.tensor([4.0])
+
+    metrics = PPOAgent._collect_gradient_diagnostics(
+        (
+            ("worker_head.v2_eft_proj.weight", eft_projection),
+            ("worker_head.v2_attn.weight", v2_attention),
+        )
+    )
+
+    assert metrics["dynamic_eft_projection_grad_norm"] == pytest.approx(5.0)
+    assert metrics["dynamic_eft_projection_param_norm"] == pytest.approx(2.0**0.5)
+    assert metrics["dynamic_eft_projection_grad_to_param"] == pytest.approx(5.0 / 2.0**0.5)
+    assert metrics["worker_v2_grad_to_param"] == pytest.approx(41.0**0.5 / 11.0**0.5)
+
+
 def test_v2_model_spec_records_pressure_semantics_and_rejects_cross_mode_resume() -> None:
     cfg = Config()
     cfg.team_selection_mode = "autoregressive_pressure_v2"
@@ -140,6 +194,7 @@ def test_v2_model_spec_records_pressure_semantics_and_rejects_cross_mode_resume(
     assert spec.worker_pointer_pressure_temperature == 1.0
     assert spec.worker_pointer_supply_epsilon == 1.0e-6
     assert spec.worker_pointer_wait_discount_mode == "physical_wait_exponential_v1"
+    assert spec.worker_pointer_v2_dynamic_eft_features is False
 
     legacy = Config()
     with pytest.raises(ValueError, match="team_selection_mode"):
@@ -152,6 +207,26 @@ def test_v2_model_spec_records_pressure_semantics_and_rejects_cross_mode_resume(
     legacy_spec = replace(spec, team_selection_mode="autoregressive")
     with pytest.raises(ValueError, match="team_selection_mode"):
         apply_checkpoint_model_spec(v2, legacy_spec)
+
+
+def test_v2_dynamic_eft_checkpoint_semantics_reject_cross_mode_resume() -> None:
+    cfg = Config()
+    cfg.team_selection_mode = "autoregressive_pressure_v2"
+    cfg.policy_action_scope = "operation_station_worker"
+    cfg.actor_context_mode = "attention"
+    cfg.worker_pointer_v2_dynamic_eft_features = True
+    cfg.worker_pointer_v2_dynamic_eft_feature_clip = 10.0
+    spec = build_model_spec(cfg)
+
+    assert spec.worker_pointer_v2_dynamic_eft_features is True
+    assert spec.worker_pointer_v2_dynamic_eft_feature_clip == 10.0
+
+    incompatible = Config()
+    incompatible.team_selection_mode = "autoregressive_pressure_v2"
+    incompatible.policy_action_scope = "operation_station_worker"
+    incompatible.actor_context_mode = "attention"
+    with pytest.raises(ValueError, match="dynamic_eft"):
+        apply_checkpoint_model_spec(incompatible, spec)
 
 
 def test_runtime_validation_accepts_only_attention_worker_scope_for_v2() -> None:
@@ -284,6 +359,68 @@ def test_worker_pointer_v2_scores_enriched_context_and_preserves_mask() -> None:
     assert logits[0, 2].item() == pytest.approx(-1.0e4)
 
 
+def test_v2_dynamic_eft_features_rank_legal_workers_and_zero_masked() -> None:
+    from models.worker_pointer_context import build_worker_eft_features
+
+    head = WorkerPointer(_pointer_config("autoregressive_pressure_v2"))
+    state = head.initialize_v2_state(batch_size=1, device=torch.device("cpu"))
+    state = head.advance_v2_state(
+        state,
+        torch.zeros((1, 8)),
+        torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0]]),
+        selected_wait=torch.tensor([0.5]),
+        selected_capacity=torch.tensor([1.0]),
+    )
+    features = build_worker_eft_features(
+        team_state=state,
+        worker_wait=torch.tensor([[0.0, 2.0, 1.0]]),
+        worker_capacity=torch.tensor([[1.0, 0.5, 2.0]]),
+        station_wait=torch.tensor([1.0]),
+        task_duration=torch.tensor([4.0]),
+        demand=torch.tensor([2.0]),
+        mask=torch.tensor([[False, False, True]]),
+        clip=10.0,
+    )
+
+    assert features.shape == (1, 3, 2)
+    torch.testing.assert_close(features[0, 0], torch.tensor([0.0, -1.0]))
+    torch.testing.assert_close(
+        features[0, 1], torch.tensor([0.6008772, 1.0]), atol=1.0e-6, rtol=0.0
+    )
+    torch.testing.assert_close(features[0, 2], torch.zeros(2))
+
+
+def test_v2_dynamic_eft_late_fusion_is_zero_initialized_and_trainable() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    cfg = _pointer_config("autoregressive_pressure_v2")
+    cfg.worker_pointer_v2_dynamic_eft_features = True
+    head = WorkerPointer(cfg)
+    context = build_worker_pressure_context(
+        **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+    )
+    state = head.initialize_v2_state(batch_size=1, device=torch.device("cpu"))
+    kwargs = {
+        "task_emb": torch.randn(1, 8),
+        "station_emb": torch.randn(1, 8),
+        "global_context": torch.randn(1, 24),
+        "worker_embs": torch.randn(1, 3, 8),
+        "pressure_context": context,
+        "team_state": state,
+        "demand": torch.tensor([2.0]),
+        "mask": torch.tensor([[False, False, True]]),
+    }
+    dynamic_eft = torch.tensor([[[0.0, -1.0], [1.0, 1.0], [0.0, 0.0]]])
+
+    baseline = head.forward_choice_v2(**kwargs)
+    fused = head.forward_choice_v2(**kwargs, dynamic_eft_features=dynamic_eft)
+
+    torch.testing.assert_close(fused, baseline, atol=0.0, rtol=0.0)
+    fused[:, :2].sum().backward()
+    assert head.v2_eft_proj.weight.grad is not None
+    assert torch.isfinite(head.v2_eft_proj.weight.grad).all()
+
+
 def test_v2_decode_cache_preserves_logits_and_projection_gradients() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
 
@@ -396,6 +533,12 @@ def test_v2_initialization_does_not_advance_legacy_rng_or_change_legacy_keys() -
     assert torch.equal(legacy_rng, v2_rng)
     assert not any(key.startswith("v2_") for key in legacy_keys)
     assert any(key.startswith("v2_") for key in v2.state_dict())
+    assert not any(key.startswith("v2_eft_proj") for key in v2.state_dict())
+
+    guided_cfg = _pointer_config("autoregressive_pressure_v2")
+    guided_cfg.worker_pointer_v2_dynamic_eft_features = True
+    guided = WorkerPointer(guided_cfg)
+    assert any(key.startswith("v2_eft_proj") for key in guided.state_dict())
 
 
 def _v2_agent_and_ready_env(
@@ -636,6 +779,126 @@ def test_v2_ppo_recompute_calls_v2_pointer(monkeypatch: pytest.MonkeyPatch) -> N
     assert metrics["V2/FirstContractTotalMaxAE"] <= 1.0e-4
     assert calls and all(cache is not None for cache in calls)
     assert len(cache_build_calls) >= 3
+
+
+def test_v2_dynamic_eft_features_are_forwarded_to_rollout_and_recompute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from configs import configs
+    from tests.test_joint_experiment_architecture import _small_overrides
+    from training.memory import Memory
+    from training.worker_pointer_v2_behavior import make_behavior_traces
+
+    forwarded: list[torch.Tensor | None] = []
+    original = WorkerPointer.forward_choice_v2
+
+    def spy(self: WorkerPointer, **kwargs: object) -> torch.Tensor:
+        forwarded.append(kwargs.get("dynamic_eft_features"))
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(WorkerPointer, "forward_choice_v2", spy)
+    overrides = _small_overrides(
+        team_selection_mode="autoregressive_pressure_v2",
+        policy_action_scope="operation_station_worker",
+        actor_context_mode="attention",
+        batch_size=1,
+        worker_pointer_v2_behavior_replay=True,
+        worker_pointer_v2_replay_mode="behavior_group_exact_v1",
+        worker_pointer_v2_logical_batch_cap=1,
+        worker_pointer_v2_dynamic_eft_features=True,
+    )
+    with temporary_config(configs, overrides):
+        agent, env, prepared = _v2_agent_and_ready_env()
+        obs, task_mask, station_mask, worker_mask = prepared
+        action, logprob, value, _smask, invalid = agent.select_actions_batch(
+            [obs], [task_mask], [station_mask], [worker_mask], deterministic=False
+        )[0]
+        assert action is not None and not invalid
+        memory = Memory()
+        memory.states.append(env.get_state_snapshot())
+        memory.actions.append(action)
+        memory.logprobs.append(logprob)
+        memory.values.append(value)
+        memory.masks.append((task_mask, station_mask, worker_mask))
+        traces = make_behavior_traces(
+            group_id=(0, 0), env_indices=[0], behavior_logprobs=agent.last_v2_behavior_logprobs
+        )
+        memory.worker_pointer_v2_behavior_traces.append(traces[0])
+        _obs, reward, done, info = env.step(action)
+        assert not info.get("invalid_action", False)
+        memory.rewards.append(float(reward))
+        memory.is_terminals.append(bool(done))
+        metrics = agent.update(memory, env, current_ep=1)
+
+    assert torch.isfinite(torch.tensor(metrics["PPO/Loss"]))
+    assert forwarded and all(features is not None for features in forwarded)
+    assert all(features.shape[-1] == 2 and torch.isfinite(features).all() for features in forwarded)
+
+
+def test_v2_dynamic_eft_features_are_forwarded_to_batched_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from configs import configs
+    from environment import AirLineEnv_Graph
+    from models.hb_gat_pn import HBGATPN
+    from ppo_agent import PPOAgent
+    from tests.test_joint_experiment_architecture import DATA_PATH, _advance_to_ready_physical_task, _small_overrides
+    from training.memory import Memory
+
+    forwarded: list[torch.Tensor | None] = []
+    original = WorkerPointer.forward_choice_v2
+
+    def spy(self: WorkerPointer, **kwargs: object) -> torch.Tensor:
+        forwarded.append(kwargs.get("dynamic_eft_features"))
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(WorkerPointer, "forward_choice_v2", spy)
+    overrides = _small_overrides(
+        team_selection_mode="autoregressive_pressure_v2",
+        policy_action_scope="operation_station_worker",
+        actor_context_mode="attention",
+        batch_size=2,
+        accumulation_steps=1,
+        worker_pointer_v2_behavior_replay=False,
+        worker_pointer_v2_replay_mode="batched_vectorized_v2",
+        worker_pointer_v2_dynamic_eft_features=True,
+    )
+    with temporary_config(configs, overrides):
+        environments = [AirLineEnv_Graph(DATA_PATH, seed=seed) for seed in (42, 43)]
+        prepared = [_advance_to_ready_physical_task(env) for env in environments]
+        agent = PPOAgent(
+            HBGATPN(configs), lr=1.0e-4, gamma=0.99, k_epochs=1, eps_clip=0.2,
+            device=torch.device("cpu"), batch_size=2, total_timesteps=2, config=configs,
+        )
+        results = agent.select_actions_batch(
+            [item[0] for item in prepared],
+            [item[1][0] for item in prepared],
+            [item[1][1] for item in prepared],
+            [item[1][2] for item in prepared],
+            deterministic=False,
+        )
+        memory = Memory()
+        for env, item, result in zip(environments, prepared, results):
+            action, logprob, value, _station_mask, invalid = result
+            assert action is not None and not invalid
+            if isinstance(logprob, (list, tuple)):
+                logprob = logprob[0]
+            if isinstance(value, (list, tuple)):
+                value = value[0]
+            task_mask, station_mask, worker_mask = item[1]
+            memory.states.append(env.get_state_snapshot())
+            memory.actions.append(action)
+            memory.logprobs.append(float(logprob))
+            memory.values.append(float(value))
+            memory.masks.append((task_mask, station_mask, worker_mask))
+            memory.rewards.append(0.0)
+            memory.is_terminals.append(True)
+            memory.is_truncated.append(False)
+        metrics = agent.update(memory, env=environments[0], current_ep=1)
+
+    assert metrics["PPO/GradientsFinite"] == 1.0
+    assert forwarded and all(features is not None for features in forwarded)
+    assert all(features.shape[-1] == 2 and torch.isfinite(features).all() for features in forwarded)
 
 
 @pytest.mark.parametrize(

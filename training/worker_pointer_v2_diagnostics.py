@@ -23,6 +23,10 @@ class WorkerPointerV2Diagnostics:
     _selected_exposures: list[torch.Tensor] = field(default_factory=list)
     _entropies: list[torch.Tensor] = field(default_factory=list)
     _team_consumptions: list[torch.Tensor] = field(default_factory=list)
+    _ready_task_counts: list[torch.Tensor] = field(default_factory=list)
+    _legal_station_counts: list[torch.Tensor] = field(default_factory=list)
+    _legal_worker_counts: list[torch.Tensor] = field(default_factory=list)
+    _selected_eft_rank_percentiles: list[torch.Tensor] = field(default_factory=list)
     _host_elapsed_ms: list[float] = field(default_factory=list)
 
     def reset(self) -> None:
@@ -37,6 +41,10 @@ class WorkerPointerV2Diagnostics:
         self._selected_exposures.clear()
         self._entropies.clear()
         self._team_consumptions.clear()
+        self._ready_task_counts.clear()
+        self._legal_station_counts.clear()
+        self._legal_worker_counts.clear()
+        self._selected_eft_rank_percentiles.clear()
         self._host_elapsed_ms.clear()
 
     @property
@@ -54,6 +62,10 @@ class WorkerPointerV2Diagnostics:
         tensors.extend(self._selected_exposures)
         tensors.extend(self._entropies)
         tensors.extend(self._team_consumptions)
+        tensors.extend(self._ready_task_counts)
+        tensors.extend(self._legal_station_counts)
+        tensors.extend(self._legal_worker_counts)
+        tensors.extend(self._selected_eft_rank_percentiles)
         return sum(tensor.numel() for tensor in tensors)
 
     def record_context(
@@ -77,10 +89,57 @@ class WorkerPointerV2Diagnostics:
         *,
         selected_exposure: torch.Tensor,
         entropy: torch.Tensor,
+        dynamic_eft_features: torch.Tensor | None = None,
+        selected_worker_index: int | torch.Tensor | None = None,
+        worker_invalid_mask: torch.Tensor | None = None,
     ) -> None:
         assert selected_exposure.shape[-1] == 12
         self._selected_exposures.append(selected_exposure.detach())
         self._entropies.append(entropy.detach().reshape(-1))
+        if dynamic_eft_features is None:
+            return
+        assert selected_worker_index is not None and worker_invalid_mask is not None
+        assert dynamic_eft_features.ndim == 3 and dynamic_eft_features.shape[-1] == 2
+        batch_size, num_workers, _ = dynamic_eft_features.shape
+        assert worker_invalid_mask.shape == (batch_size, num_workers)
+        selected = torch.as_tensor(
+            selected_worker_index,
+            device=dynamic_eft_features.device,
+            dtype=torch.long,
+        ).reshape(-1)
+        if selected.numel() == 1:
+            selected = selected.expand(batch_size)
+        assert selected.shape == (batch_size,)
+        assert torch.all((selected >= 0) & (selected < num_workers))
+        batch_indices = torch.arange(batch_size, device=dynamic_eft_features.device)
+        assert not bool(worker_invalid_mask[batch_indices, selected].any())
+        relative_eft = dynamic_eft_features[:, :, 0]
+        selected_eft = relative_eft[batch_indices, selected].unsqueeze(1)
+        legal = ~worker_invalid_mask
+        lower = ((relative_eft < selected_eft) & legal).sum(dim=1).float()
+        equal = ((relative_eft == selected_eft) & legal).sum(dim=1).float()
+        # 并列候选采用平均秩，单一合法候选的排名固定为 0。
+        rank = lower + 0.5 * (equal - 1.0)
+        legal_count = legal.sum(dim=1).float()
+        percentile = rank / (legal_count - 1.0).clamp_min(1.0)
+        self._selected_eft_rank_percentiles.append(percentile.detach())
+
+    def record_action_space(
+        self,
+        *,
+        ready_task_count: torch.Tensor | None = None,
+        legal_station_count: torch.Tensor | None = None,
+        legal_worker_count: torch.Tensor | None = None,
+    ) -> None:
+        """记录策略可见的候选规模；各阶段样本数可不同。"""
+        for value, target in (
+            (ready_task_count, self._ready_task_counts),
+            (legal_station_count, self._legal_station_counts),
+            (legal_worker_count, self._legal_worker_counts),
+        ):
+            if value is not None:
+                assert value.numel() > 0
+                target.append(value.detach().reshape(-1).float())
 
     def record_team(self, team_consumption: torch.Tensor) -> None:
         assert team_consumption.shape[-1] == self.num_skills
@@ -167,6 +226,23 @@ class WorkerPointerV2Diagnostics:
             consumption = self._cpu_cat(self._team_consumptions)
             metrics["PointerV2/TeamConsumptionMean"] = float(consumption.mean())
             metrics["PointerV2/TeamConsumptionMax"] = float(consumption.max())
+        if self._ready_task_counts:
+            ready = self._cpu_cat([value.reshape(-1, 1) for value in self._ready_task_counts])
+            metrics["PointerV2/ActionSpace/ReadyTaskMean"] = float(ready.mean())
+        if self._legal_station_counts:
+            station = self._cpu_cat([value.reshape(-1, 1) for value in self._legal_station_counts])
+            metrics["PointerV2/ActionSpace/LegalStationMean"] = float(station.mean())
+        if self._legal_worker_counts:
+            worker = self._cpu_cat([value.reshape(-1, 1) for value in self._legal_worker_counts])
+            metrics["PointerV2/ActionSpace/LegalWorkerMean"] = float(worker.mean())
+            metrics["PointerV2/ActionSpace/LegalWorkerP10"] = float(
+                torch.quantile(worker.reshape(-1), 0.1)
+            )
+        if self._selected_eft_rank_percentiles:
+            eft_rank = self._cpu_cat(
+                [value.reshape(-1, 1) for value in self._selected_eft_rank_percentiles]
+            )
+            metrics["PointerV2/EFT/SelectedRankPercentileMean"] = float(eft_rank.mean())
         self.reset()
         return metrics
 

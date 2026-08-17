@@ -401,6 +401,9 @@ class WorkerPointer(nn.Module):
                 self.v2_query_proj = nn.Linear(hidden_dim * 6 + 17, hidden_dim)
                 # key shape: worker H + long/near exposure 10 + two maximum exposures
                 self.v2_key_proj = nn.Linear(hidden_dim + 12, hidden_dim)
+                if bool(getattr(config, "worker_pointer_v2_dynamic_eft_features", False)):
+                    self.v2_eft_proj = nn.Linear(2, hidden_dim, bias=False)
+                    nn.init.zeros_(self.v2_eft_proj.weight)
                 self.v2_attn = nn.Linear(hidden_dim, 1)
 
     def forward_choice(self, task_emb, worker_embs, mask=None, current_team_emb=None):
@@ -464,6 +467,8 @@ class WorkerPointer(nn.Module):
             selected_skill_sum=torch.zeros(
                 (batch_size, 5), device=device, dtype=torch.float32
             ),
+            selected_max_wait=torch.zeros((batch_size, 1), device=device, dtype=torch.float32),
+            selected_capacity_sum=torch.zeros((batch_size, 1), device=device, dtype=torch.float32),
         )
 
     def advance_v2_state(
@@ -472,6 +477,8 @@ class WorkerPointer(nn.Module):
         selected_worker_emb: torch.Tensor,
         selected_worker_skills: torch.Tensor,
         valid: torch.Tensor | None = None,
+        selected_wait: torch.Tensor | None = None,
+        selected_capacity: torch.Tensor | None = None,
     ) -> WorkerPointerV2State:
         """以一个自回归选择增量更新 sum/max/count 和技能消耗。"""
 
@@ -499,7 +506,26 @@ class WorkerPointer(nn.Module):
         next_skills = state.selected_skill_sum + (
             selected_worker_skills.float() * valid_mask.float()
         )
-        return WorkerPointerV2State(next_sum, next_max, next_count, next_skills)
+        wait = (
+            torch.zeros((batch_size, 1), device=selected_worker_emb.device, dtype=torch.float32)
+            if selected_wait is None
+            else selected_wait.to(device=selected_worker_emb.device, dtype=torch.float32).reshape(batch_size, 1).clamp_min(0.0)
+        )
+        capacity = (
+            torch.zeros((batch_size, 1), device=selected_worker_emb.device, dtype=torch.float32)
+            if selected_capacity is None
+            else selected_capacity.to(device=selected_worker_emb.device, dtype=torch.float32).reshape(batch_size, 1).clamp_min(1.0e-6)
+        )
+        next_wait = torch.where(valid_mask, torch.maximum(state.selected_max_wait, wait), state.selected_max_wait)
+        next_capacity = state.selected_capacity_sum + capacity * valid_mask.float()
+        return WorkerPointerV2State(
+            next_sum,
+            next_max,
+            next_count,
+            next_skills,
+            next_wait,
+            next_capacity,
+        )
 
     def v2_team_representation(self, state: WorkerPointerV2State) -> torch.Tensor:
         """返回顺序不敏感的 sum+mean+max 团队表示。"""
@@ -587,6 +613,7 @@ class WorkerPointer(nn.Module):
         demand: torch.Tensor,
         mask: torch.Tensor | None,
         decode_cache: WorkerPointerV2DecodeCache | None = None,
+        dynamic_eft_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """以增强状态表达执行原始 ``tanh(query + key)`` pointer 打分。"""
 
@@ -609,6 +636,10 @@ class WorkerPointer(nn.Module):
         assert cache.pressure_features.shape == (batch_size, 10)
         assert cache.supply_all.shape == (batch_size, 5)
         assert cache.demand.shape == (batch_size,)
+        if dynamic_eft_features is not None:
+            assert dynamic_eft_features.shape == (batch_size, num_workers, 2)
+            if not hasattr(self, "v2_eft_proj"):
+                raise RuntimeError("动态 EFT 特征未在当前 WorkerPointer v2 中启用")
         with torch.autocast(device_type=task_emb.device.type, enabled=False):
             team_repr = self.v2_team_representation(team_state)
             epsilon = float(getattr(self.config, "worker_pointer_supply_epsilon", 1.0e-6))
@@ -635,7 +666,12 @@ class WorkerPointer(nn.Module):
                 dim=-1,
             )  # [B,6H+17]
             query = self.v2_query_proj(query_features).unsqueeze(1)  # [B,1,H]
-            scores = self.v2_attn(torch.tanh(query + cache.candidate_keys)).squeeze(-1)  # [B,N]
+            dynamic_keys = (
+                torch.zeros_like(cache.candidate_keys)
+                if dynamic_eft_features is None
+                else self.v2_eft_proj(dynamic_eft_features.float())
+            )
+            scores = self.v2_attn(torch.tanh(query + cache.candidate_keys + dynamic_keys)).squeeze(-1)  # [B,N]
         # 后续可控消融可比较 query-candidate 交互 MLP 或 legacy score+压力残差；本轮不实现。
         if mask is not None:
             assert mask.shape == (batch_size, num_workers)

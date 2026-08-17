@@ -228,16 +228,24 @@ class APALLightningModule(pl.LightningModule):
             self.agent.advance_apcf_update()
 
         for rollout_metrics in batch.rollout_metrics:
-            # 记录详细指标
             for name, value in rollout_metrics.as_log_dict().items():
                 self.log(name, value, on_step=True, on_epoch=False)
-            # 显式推送到 Lightning 终端进度条
-            self.log("Rew", float(rollout_metrics.average_reward), on_step=True, on_epoch=False, prog_bar=True)
-            self.log("Mk", float(rollout_metrics.average_makespan), on_step=True, on_epoch=False, prog_bar=True)
-            self.log("SPS", float(rollout_metrics.steps_per_second), on_step=True, on_epoch=False, prog_bar=True)
 
+        config = getattr(self.rollout_service, "config", None)
+        is_batched_v2 = (
+            str(getattr(config, "team_selection_mode", ""))
+            == "autoregressive_pressure_v2"
+            and str(getattr(config, "worker_pointer_v2_replay_mode", ""))
+            == "batched_vectorized_v2"
+        )
+        suppress_batched_only_metrics = {
+            "PointerV2/PPOFirstRecomputeMAE",
+            "PointerV2/PPOFirstRecomputeMaxAE",
+        }
         for name, value in metrics.items():
             if str(name).startswith("_"):
+                continue
+            if is_batched_v2 and name in suppress_batched_only_metrics:
                 continue
             if isinstance(value, (int, float)):
                 scalar = torch.tensor(float(value))
@@ -245,7 +253,14 @@ class APALLightningModule(pl.LightningModule):
                     self.log(name, float(value), on_step=True, on_epoch=False)
                     # 将总损失也展示到进度条
                     if name == "Loss/Total":
-                        self.log("loss", float(value), on_step=True, on_epoch=False, prog_bar=True)
+                        self.log(
+                            "loss",
+                            float(value),
+                            on_step=True,
+                            on_epoch=False,
+                            prog_bar=True,
+                            logger=False,
+                        )
 
         async_eval_enabled = bool(
             getattr(getattr(self.rollout_service, "config", None), "async_eval_enabled", False)

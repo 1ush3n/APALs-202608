@@ -252,6 +252,24 @@ def test_batched_v2_exploratory_config_resolves_without_async_gpu_evaluation() -
     assert cfg.async_eval_enabled is False
     assert cfg.batch_size == 16
     assert cfg.accumulation_steps == 16
+    assert cfg.worker_pointer_v2_dynamic_eft_features is False
+
+
+def test_batched_v2_dynamic_eft_feature_can_be_enabled_from_hydra_cli() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        [
+            "experiment=initial_worker_pointer_v2_batched_exploratory",
+            "model.worker_pointer_v2_dynamic_eft_features=true",
+        ],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_dynamic_eft_features is True
+    assert cfg.worker_pointer_v2_dynamic_eft_feature_clip == 10.0
 
 
 def test_experiments_do_not_embed_hardware_profiles() -> None:

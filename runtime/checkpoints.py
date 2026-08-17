@@ -43,6 +43,8 @@ class ModelSpec:
     worker_pointer_pressure_temperature: float | None = None
     worker_pointer_supply_epsilon: float | None = None
     worker_pointer_wait_discount_mode: str | None = None
+    worker_pointer_v2_dynamic_eft_features: bool = False
+    worker_pointer_v2_dynamic_eft_feature_clip: float = 10.0
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
     hidden_dim: int | None = None
@@ -126,6 +128,12 @@ def build_model_spec(config: Config) -> ModelSpec:
             "worker_pointer_supply_epsilon": float(config.worker_pointer_supply_epsilon),
             "worker_pointer_wait_discount_mode": str(
                 config.worker_pointer_wait_discount_mode
+            ),
+            "worker_pointer_v2_dynamic_eft_features": bool(
+                config.worker_pointer_v2_dynamic_eft_features
+            ),
+            "worker_pointer_v2_dynamic_eft_feature_clip": float(
+                config.worker_pointer_v2_dynamic_eft_feature_clip
             ),
         }
     return ModelSpec(
@@ -365,6 +373,8 @@ def apply_checkpoint_model_spec(
             "worker_pointer_pressure_temperature",
             "worker_pointer_supply_epsilon",
             "worker_pointer_wait_discount_mode",
+            "worker_pointer_v2_dynamic_eft_features",
+            "worker_pointer_v2_dynamic_eft_feature_clip",
         )
         conflicts = {
             key: (getattr(config, key), getattr(spec, key))
@@ -429,6 +439,8 @@ def apply_checkpoint_model_spec(
         "worker_pointer_pressure_temperature",
         "worker_pointer_supply_epsilon",
         "worker_pointer_wait_discount_mode",
+        "worker_pointer_v2_dynamic_eft_features",
+        "worker_pointer_v2_dynamic_eft_feature_clip",
     ):
         value = getattr(spec, key)
         if value is not None:

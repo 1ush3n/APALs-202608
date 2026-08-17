@@ -38,6 +38,8 @@ class WorkerPointerV2State:
     mapped_max: torch.Tensor
     count: torch.Tensor
     selected_skill_sum: torch.Tensor
+    selected_max_wait: torch.Tensor
+    selected_capacity_sum: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,62 @@ class WorkerPointerV2DecodeCache:
     pressure_features: torch.Tensor
     supply_all: torch.Tensor
     demand: torch.Tensor
+
+
+def build_worker_eft_features(
+    *,
+    team_state: WorkerPointerV2State,
+    worker_wait: torch.Tensor,
+    worker_capacity: torch.Tensor,
+    station_wait: torch.Tensor,
+    task_duration: torch.Tensor,
+    demand: torch.Tensor,
+    mask: torch.Tensor,
+    clip: float,
+) -> torch.Tensor:
+    """按当前部分团队计算每名工人的动态 EFT 特征。"""
+
+    if not torch.isfinite(torch.tensor(float(clip))) or float(clip) <= 0.0:
+        raise ValueError("worker_pointer_v2_dynamic_eft_feature_clip 必须是大于 0 的有限数")
+    assert worker_wait.ndim == worker_capacity.ndim == mask.ndim == 2
+    batch_size, num_workers = worker_wait.shape
+    assert worker_capacity.shape == mask.shape == (batch_size, num_workers)
+    assert station_wait.reshape(-1).shape == task_duration.reshape(-1).shape == demand.reshape(-1).shape == (batch_size,)
+    assert team_state.count.shape == team_state.selected_max_wait.shape == team_state.selected_capacity_sum.shape == (batch_size, 1)
+
+    with torch.autocast(device_type=worker_wait.device.type, enabled=False):
+        legal = ~mask.bool()
+        duration = task_duration.float().reshape(batch_size, 1).clamp_min(1.0e-6)
+        task_demand = demand.float().reshape(batch_size, 1).clamp_min(1.0)
+        station = station_wait.float().reshape(batch_size, 1).clamp_min(0.0)
+        candidate_ready = torch.maximum(
+            torch.maximum(team_state.selected_max_wait.float(), worker_wait.float().clamp_min(0.0)),
+            station,
+        )
+        candidate_capacity = (
+            team_state.selected_capacity_sum.float()
+            + worker_capacity.float().clamp_min(1.0e-6)
+        )
+        synergy = torch.pow(
+            torch.tensor(0.95, device=worker_wait.device, dtype=torch.float32),
+            team_state.count.float(),
+        )
+        finish = candidate_ready + duration * task_demand / (candidate_capacity * synergy)
+        legal_finish = finish.masked_fill(~legal, float("inf"))
+        minimum = legal_finish.amin(dim=1, keepdim=True)
+        legal_count = legal.sum(dim=1, keepdim=True)
+        safe_minimum = torch.where(legal_count > 0, minimum, torch.zeros_like(minimum))
+        legal_sum = torch.where(legal, finish, torch.zeros_like(finish)).sum(dim=1, keepdim=True)
+        mean = legal_sum / legal_count.clamp_min(1).to(dtype=torch.float32)
+        variance = torch.where(legal, (finish - mean).square(), torch.zeros_like(finish)).sum(dim=1, keepdim=True)
+        std = torch.sqrt(variance / legal_count.clamp_min(1).to(dtype=torch.float32))
+        relative = ((finish - safe_minimum) / duration).clamp(0.0, float(clip))
+        zscore = ((finish - mean) / std.clamp_min(1.0e-6)).clamp(-float(clip), float(clip))
+        features = torch.stack([relative, zscore], dim=-1)
+        features = torch.where(legal.unsqueeze(-1), features, torch.zeros_like(features))
+    assert features.shape == (batch_size, num_workers, 2)
+    assert torch.isfinite(features).all()
+    return features
 
 
 def build_worker_pressure_context(
@@ -144,5 +202,6 @@ __all__ = [
     "WorkerPointerV2State",
     "WorkerPressureContext",
     "WorkerPointerV2DecodeCache",
+    "build_worker_eft_features",
     "build_worker_pressure_context",
 ]

@@ -85,6 +85,8 @@ class Config:
     worker_pointer_supply_epsilon: float = 1.0e-6
     worker_pointer_wait_discount_mode: str = "physical_wait_exponential_v1"
     worker_pointer_v2_init_seed_offset: int = 1009
+    worker_pointer_v2_dynamic_eft_features: bool = False
+    worker_pointer_v2_dynamic_eft_feature_clip: float = 10.0
     # WorkerPointer v2 默认批量向量化重放；exact 模式仅供诊断与对照实验。
     worker_pointer_v2_behavior_replay: bool = False
     worker_pointer_v2_logical_batch_cap: int = 64

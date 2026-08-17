@@ -97,3 +97,39 @@ def test_batched_v2_update_uses_vectorized_path_not_exact_replay(
     assert metrics["PPO/GradientsFinite"] == 1.0
     assert metrics["V2/BatchedReplayUpdateSeconds"] > 0.0
     assert 2 in policy_batch_sizes
+
+
+def test_batched_v2_records_recompute_difference_without_exact_replay_abort() -> None:
+    """批量近似重放允许记录行为与批量重算之间的数值差异。"""
+    overrides = _small_overrides(
+        team_selection_mode="autoregressive_pressure_v2",
+        policy_action_scope="operation_station_worker",
+        actor_context_mode="attention",
+        worker_pointer_v2_behavior_replay=False,
+        worker_pointer_v2_replay_mode="batched_vectorized_v2",
+        batch_size=2,
+        accumulation_steps=1,
+    )
+    with temporary_config(configs, overrides):
+        env_a = AirLineEnv_Graph(DATA_PATH, seed=42)
+        env_b = AirLineEnv_Graph(DATA_PATH, seed=43)
+        agent = PPOAgent(
+            HBGATPN(configs),
+            lr=1.0e-4,
+            gamma=0.99,
+            k_epochs=1,
+            eps_clip=0.2,
+            device=torch.device("cpu"),
+            batch_size=2,
+            total_timesteps=2,
+            config=configs,
+        )
+        memory = Memory()
+        _append_ready_transition(memory, agent, env_a)
+        _append_ready_transition(memory, agent, env_b)
+        memory.logprobs[0] += 2.0e-3
+
+        metrics = agent.update(memory, env=env_a, current_ep=1)
+
+    assert metrics["PPO/GradientsFinite"] == 1.0
+    assert metrics["PointerV2/PPOFirstRecomputeMaxAE"] > 1.0e-3

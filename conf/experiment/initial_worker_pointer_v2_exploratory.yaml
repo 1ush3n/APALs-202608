@@ -38,6 +38,8 @@ model:
   worker_pointer_supply_epsilon: 1.0e-6
   worker_pointer_wait_discount_mode: physical_wait_exponential_v1
   worker_pointer_v2_init_seed_offset: 1009
+  worker_pointer_v2_dynamic_eft_features: false
+  worker_pointer_v2_dynamic_eft_feature_clip: 10.0
 
 train:
   batch_size: 256

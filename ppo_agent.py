@@ -17,7 +17,12 @@ from torch_geometric.data import HeteroData
 from torch_geometric.utils import to_dense_batch
 from configs import configs
 from core.action_completion import EarliestFinishActionCompleter, TeamCandidates
-from models.worker_pointer_context import WorkerPressureContext, build_worker_pressure_context
+from models.worker_pointer_context import (
+    WorkerPointerV2State,
+    WorkerPressureContext,
+    build_worker_eft_features,
+    build_worker_pressure_context,
+)
 from worker_feature_layout import resolve_worker_feature_layout
 from training.best_anchor_teacher import BestAnchorTeacherManager
 from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
@@ -286,6 +291,55 @@ class PPOAgent:
             worker_queue_invalid=worker_queue_invalid.to(self.device).reshape(batch_size, num_workers),
             temperature=float(self.config.worker_pointer_pressure_temperature),
             supply_epsilon=float(self.config.worker_pointer_supply_epsilon),
+        )
+
+    def _build_v2_dynamic_eft_features(
+        self,
+        *,
+        team_state: WorkerPointerV2State,
+        worker_features: torch.Tensor,
+        station_features: torch.Tensor,
+        selected_station: torch.Tensor,
+        task_duration: torch.Tensor,
+        demand: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """为 v2 pointer 构造末端融合的、随部分团队更新的 EFT 特征。"""
+
+        if not bool(getattr(self.config, "worker_pointer_v2_dynamic_eft_features", False)):
+            return None
+        if worker_features.ndim == 2:
+            worker_features = worker_features.unsqueeze(0)
+        if station_features.ndim == 2:
+            station_features = station_features.unsqueeze(0)
+        batch_size, num_workers, _ = worker_features.shape
+        assert station_features.ndim == 3 and station_features.size(0) == batch_size
+        assert mask.shape == (batch_size, num_workers)
+        station_ids = selected_station.to(self.device, dtype=torch.long).reshape(batch_size)
+        assert torch.all((station_ids >= 0) & (station_ids < station_features.size(1)))
+        layout = resolve_worker_feature_layout(self.config)
+        raw_worker = worker_features.to(self.device)
+        raw_station = station_features.to(self.device)
+        worker_wait = torch.expm1(
+            raw_worker[:, :, layout.wait_idx].float().clamp_min(0.0)
+        )
+        worker_capacity = (
+            raw_worker[:, :, layout.efficiency_idx].float()
+            * raw_worker[:, :, layout.fatigue_idx].float()
+        ).clamp_min(1.0e-6)
+        batch_indices = torch.arange(batch_size, device=self.device)
+        station_wait = torch.expm1(
+            raw_station[batch_indices, station_ids, 4].float().clamp_min(0.0)
+        )
+        return build_worker_eft_features(
+            team_state=team_state,
+            worker_wait=worker_wait,
+            worker_capacity=worker_capacity,
+            station_wait=station_wait,
+            task_duration=task_duration.to(self.device),
+            demand=demand.to(self.device),
+            mask=mask.to(self.device),
+            clip=float(self.config.worker_pointer_v2_dynamic_eft_feature_clip),
         )
 
     def reset_worker_pointer_v2_diagnostics(self) -> None:
@@ -1363,8 +1417,34 @@ class PPOAgent:
         v2_sq = 0.0
         v2_total = 0
         v2_nonzero = 0
+        module_gradient_sq = {
+            "gat_encoder": 0.0,
+            "task_head": 0.0,
+            "station_head": 0.0,
+            "worker_v2": 0.0,
+            "critic": 0.0,
+            "dynamic_eft_projection": 0.0,
+        }
+        module_parameter_sq = dict.fromkeys(module_gradient_sq, 0.0)
         for name, parameter in named_parameters:
             is_v2_parameter = name.startswith("worker_head.v2_")
+            module_name = None
+            if name.startswith("encoder."):
+                module_name = "gat_encoder"
+            elif name.startswith("task_head."):
+                module_name = "task_head"
+            elif name.startswith("station_head."):
+                module_name = "station_head"
+            elif is_v2_parameter:
+                module_name = "worker_v2"
+            elif name.startswith("critic"):
+                module_name = "critic"
+            if module_name is not None:
+                parameter_norm = float(torch.linalg.vector_norm(parameter.detach().float()).item())
+                module_parameter_sq[module_name] += parameter_norm * parameter_norm
+            if name.startswith("worker_head.v2_eft_proj."):
+                parameter_norm = float(torch.linalg.vector_norm(parameter.detach().float()).item())
+                module_parameter_sq["dynamic_eft_projection"] += parameter_norm * parameter_norm
             if is_v2_parameter:
                 v2_total += 1
             gradient = parameter.grad
@@ -1375,6 +1455,10 @@ class PPOAgent:
                 finite = False
                 continue
             norm = float(torch.linalg.vector_norm(gradient_float).item())
+            if module_name is not None:
+                module_gradient_sq[module_name] += norm * norm
+            if name.startswith("worker_head.v2_eft_proj."):
+                module_gradient_sq["dynamic_eft_projection"] += norm * norm
             if is_v2_parameter:
                 v2_sq += norm * norm
                 if norm > 0.0:
@@ -1390,7 +1474,7 @@ class PPOAgent:
                 trunk_sq += norm * norm
                 if norm > 0.0:
                     trunk_nonzero += 1
-        return {
+        metrics = {
             "finite": 1.0 if finite else 0.0,
             "actor_grad_norm": float(actor_sq ** 0.5),
             "critic_grad_norm": float(critic_sq ** 0.5),
@@ -1401,6 +1485,15 @@ class PPOAgent:
             "v2_grad_norm": float(v2_sq ** 0.5),
             "v2_gradient_coverage": float(v2_nonzero / max(1, v2_total)),
         }
+        for module_name, gradient_sq in module_gradient_sq.items():
+            gradient_norm = float(gradient_sq ** 0.5)
+            parameter_norm = float(module_parameter_sq[module_name] ** 0.5)
+            metrics[f"{module_name}_grad_norm"] = gradient_norm
+            metrics[f"{module_name}_param_norm"] = parameter_norm
+            metrics[f"{module_name}_grad_to_param"] = gradient_norm / max(
+                parameter_norm, 1.0e-12
+            )
+        return metrics
     def _capture_update_transaction(self) -> Dict[str, Any]:
         """保存可完整回滚一次 PPO 更新所需的训练与随机状态。"""
         transaction = {
@@ -1968,6 +2061,15 @@ class PPOAgent:
                             demand=v2_demand,
                             mask=current_worker_mask.unsqueeze(0),
                             decode_cache=v2_decode_cache,
+                            dynamic_eft_features=self._build_v2_dynamic_eft_features(
+                                team_state=v2_team_state,
+                                worker_features=worker_feats,
+                                station_features=obs['station'].x,
+                                selected_station=station_action.reshape(1),
+                                task_duration=obs['task'].x[t_idx, 0].reshape(1),
+                                demand=v2_demand,
+                                mask=current_worker_mask.unsqueeze(0),
+                            ),
                         )
                     else:
                         worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs, mask=current_worker_mask, current_team_emb=current_team_emb)
@@ -2005,6 +2107,13 @@ class PPOAgent:
                         v2_team_state,
                         worker_embs[:, w_idx, :],
                         worker_skills[w_idx].unsqueeze(0).to(self.device),
+                        selected_wait=torch.expm1(
+                            worker_feats[w_idx, worker_layout.wait_idx].float().clamp_min(0.0)
+                        ).reshape(1),
+                        selected_capacity=(
+                            worker_feats[w_idx, worker_layout.efficiency_idx].float()
+                            * worker_feats[w_idx, worker_layout.fatigue_idx].float()
+                        ).reshape(1),
                     )
                 else:
                     selected_worker_feats = worker_embs[0, team_indices, :]
@@ -2208,6 +2317,7 @@ class PPOAgent:
                 station_embs = x_dict_batch['station'][station_start:station_end]
                 worker_embs = x_dict_batch['worker'][worker_start:worker_end]
                 raw_task_features = batch_obs['task'].x[task_start:task_end]
+                raw_station_features = batch_obs['station'].x[station_start:station_end]
                 raw_worker_features = batch_obs['worker'].x[worker_start:worker_end]
                 if fast_batch is not None:
                     per_graph_task_x = fast_batch.raw_task_slices[i]
@@ -2322,6 +2432,22 @@ class PPOAgent:
                 specific_station_mask = None
                 if m_station is not None:
                     specific_station_mask = m_station[t_idx].unsqueeze(0).to(self.device)
+
+                if is_worker_pointer_v2_mode(self.config):
+                    ready_task_count = (
+                        (~m_task).sum()
+                        if m_task is not None
+                        else torch.tensor(task_embs.size(0), device=self.device)
+                    )
+                    legal_station_count = (
+                        (~specific_station_mask).sum()
+                        if specific_station_mask is not None
+                        else torch.tensor(station_embs.size(0), device=self.device)
+                    )
+                    self.worker_pointer_v2_diagnostics.record_action_space(
+                        ready_task_count=ready_task_count,
+                        legal_station_count=legal_station_count,
+                    )
                 
                 with self.autocast_context():
                     station_embs_i = station_embs.unsqueeze(0) # [1, S, H]
@@ -2522,6 +2648,24 @@ class PPOAgent:
                     
                     if current_worker_mask.all():
                         break
+
+                    if v2_mode:
+                        self.worker_pointer_v2_diagnostics.record_action_space(
+                            legal_worker_count=(~current_worker_mask).sum()
+                        )
+
+                    dynamic_eft_features = None
+                    if v2_mode:
+                        assert v2_team_state is not None and v2_demand is not None
+                        dynamic_eft_features = self._build_v2_dynamic_eft_features(
+                            team_state=v2_team_state,
+                            worker_features=raw_worker_features,
+                            station_features=raw_station_features,
+                            selected_station=station_action.reshape(1),
+                            task_duration=source_task_x[t_idx, 0].reshape(1),
+                            demand=v2_demand,
+                            mask=current_worker_mask.unsqueeze(0),
+                        )
                     
                     with self.autocast_context():
                         if v2_mode:
@@ -2537,6 +2681,7 @@ class PPOAgent:
                                 demand=v2_demand,
                                 mask=current_worker_mask.unsqueeze(0),
                                 decode_cache=v2_decode_cache,
+                                dynamic_eft_features=dynamic_eft_features,
                             )
                         else:
                             worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs_i, mask=current_worker_mask, current_team_emb=current_team_emb)
@@ -2584,11 +2729,21 @@ class PPOAgent:
                         self.worker_pointer_v2_diagnostics.record_selection(
                             selected_exposure=selected_exposure,
                             entropy=entropy,
+                            dynamic_eft_features=dynamic_eft_features,
+                            selected_worker_index=w_idx,
+                            worker_invalid_mask=current_worker_mask.unsqueeze(0),
                         )
                         v2_team_state = active_policy.worker_head.advance_v2_state(
                             v2_team_state,
                             worker_embs_i[:, w_idx, :],
                             v2_worker_skills[w_idx].unsqueeze(0),
+                            selected_wait=torch.expm1(
+                                raw_worker_features[w_idx, worker_layout.wait_idx].float().clamp_min(0.0)
+                            ).reshape(1),
+                            selected_capacity=(
+                                raw_worker_features[w_idx, worker_layout.efficiency_idx].float()
+                                * raw_worker_features[w_idx, worker_layout.fatigue_idx].float()
+                            ).reshape(1),
                         )
                     else:
                         selected_worker_feats = worker_embs_i[0, team_indices, :]
@@ -2973,6 +3128,16 @@ class PPOAgent:
         trunk_gradient_norms = []
         v2_gradient_norms = []
         v2_gradient_coverages = []
+        module_grad_to_param_ratios = {
+            "gat_encoder": [],
+            "task_head": [],
+            "station_head": [],
+            "worker_v2": [],
+            "critic": [],
+        }
+        dynamic_eft_projection_grad_norms = []
+        dynamic_eft_projection_param_norms = []
+        dynamic_eft_projection_grad_to_param_ratios = []
         apcf_first_recompute_mae = 0.0
         apcf_first_recompute_max_abs_error = 0.0
         apcf_recompute_checked = False
@@ -3168,6 +3333,8 @@ class PPOAgent:
                     v2_team_state = None
                     v2_decode_cache = None
                     raw_worker_x_v2 = None
+                    raw_station_x_v2 = None
+                    worker_layout = resolve_worker_feature_layout(self.config)
                     selected_station_emb_v2 = None
                     selected_demand_v2 = None
                     if v2_mode:
@@ -3176,6 +3343,9 @@ class PPOAgent:
                         )
                         raw_worker_x_v2, raw_worker_present = to_dense_batch(
                             batch['worker'].x, batch['worker'].batch
+                        )
+                        raw_station_x_v2, _ = to_dense_batch(
+                            batch['station'].x, batch['station'].batch
                         )
                         v2_pressure = self._build_v2_pressure_context(
                             task_features=raw_task_x_v2,
@@ -3219,6 +3389,8 @@ class PPOAgent:
                             assert selected_station_emb_v2 is not None
                             assert selected_demand_v2 is not None
                             assert v2_decode_cache is not None
+                            assert raw_task_x_v2 is not None and raw_worker_x_v2 is not None
+                            assert raw_station_x_v2 is not None
                             logits = self.policy.worker_head.forward_choice_v2(
                                 task_emb=sel_task_emb,
                                 station_emb=selected_station_emb_v2,
@@ -3229,6 +3401,17 @@ class PPOAgent:
                                 demand=selected_demand_v2,
                                 mask=curr_mask,
                                 decode_cache=v2_decode_cache,
+                                dynamic_eft_features=self._build_v2_dynamic_eft_features(
+                                    team_state=v2_team_state,
+                                    worker_features=raw_worker_x_v2,
+                                    station_features=raw_station_x_v2,
+                                    selected_station=batch.y_station,
+                                    task_duration=raw_task_x_v2[
+                                        batch_indices, batch.y_task, 0
+                                    ],
+                                    demand=selected_demand_v2,
+                                    mask=curr_mask,
+                                ),
                             )
                         else:
                             logits = self.policy.worker_head.forward_choice(sel_task_emb, worker_x, mask=curr_mask, current_team_emb=current_team_emb)
@@ -3280,6 +3463,19 @@ class PPOAgent:
                                 selected_emb_all,
                                 selected_skills_all,
                                 valid=valid_step,
+                                selected_wait=torch.expm1(
+                                    raw_worker_x_v2[
+                                        batch_indices, safe_target, worker_layout.wait_idx
+                                    ].float().clamp_min(0.0)
+                                ),
+                                selected_capacity=(
+                                    raw_worker_x_v2[
+                                        batch_indices, safe_target, worker_layout.efficiency_idx
+                                    ].float()
+                                    * raw_worker_x_v2[
+                                        batch_indices, safe_target, worker_layout.fatigue_idx
+                                    ].float()
+                                ),
                             )
                         
                         # Update mask for next worker in team
@@ -3391,13 +3587,14 @@ class PPOAgent:
                         recompute_error = torch.abs(total_lp.detach().float() - old_lp.float())
                         v2_first_recompute_mae = float(recompute_error.mean().cpu())
                         v2_first_recompute_max_abs_error = float(recompute_error.max().cpu())
-                        v2_threshold = 1.0e-3 if self.amp_dtype == torch.bfloat16 else 1.0e-4
-                        if v2_first_recompute_max_abs_error > v2_threshold:
-                            raise RuntimeError(
-                                "WorkerPointer v2 首次 PPO 重算与行为策略不一致："
-                                f"max_abs_error={v2_first_recompute_max_abs_error:.6g}，"
-                                f"threshold={v2_threshold:.6g}"
-                            )
+                        if uses_behavior_group_exact_replay(self.config):
+                            v2_threshold = 1.0e-3 if self.amp_dtype == torch.bfloat16 else 1.0e-4
+                            if v2_first_recompute_max_abs_error > v2_threshold:
+                                raise RuntimeError(
+                                    "WorkerPointer v2 首次 PPO 重算与行为策略不一致："
+                                    f"max_abs_error={v2_first_recompute_max_abs_error:.6g}，"
+                                    f"threshold={v2_threshold:.6g}"
+                                )
                         v2_recompute_checked = True
                     log_ratio, safe_log_ratio, ratios = self.compute_stable_log_ratio_and_ratio(total_lp, old_lp)
                     
@@ -3547,6 +3744,17 @@ class PPOAgent:
                     v2_gradient_coverages.append(
                         gradient_diagnostics["v2_gradient_coverage"]
                     )
+                    for module_name, values in module_grad_to_param_ratios.items():
+                        values.append(gradient_diagnostics[f"{module_name}_grad_to_param"])
+                    dynamic_eft_projection_grad_norms.append(
+                        gradient_diagnostics["dynamic_eft_projection_grad_norm"]
+                    )
+                    dynamic_eft_projection_param_norms.append(
+                        gradient_diagnostics["dynamic_eft_projection_param_norm"]
+                    )
+                    dynamic_eft_projection_grad_to_param_ratios.append(
+                        gradient_diagnostics["dynamic_eft_projection_grad_to_param"]
+                    )
                     # 鐙珛鍙傛暟姊害瑁佸壀
                     torch.nn.utils.clip_grad_norm_(self.actor_parameters, max_norm=0.5)
                     # 缁?Critic 鎸傝杩滄瘮 Actor 鏇磋杽寮辩殑瑁呯敳锛岄槻姝㈠眬閮ㄨ剦鍐插甫宕╁叏鐩?
@@ -3606,7 +3814,14 @@ class PPOAgent:
         def _mean_scalar(values, default: float) -> float:
             if not values:
                 return float(default)
-            return float(torch.stack([value.detach().float() for value in values]).mean().cpu().item())
+            if isinstance(values[0], torch.Tensor):
+                return float(
+                    torch.stack([value.detach().float() for value in values])
+                    .mean()
+                    .cpu()
+                    .item()
+                )
+            return float(sum(float(value) for value in values) / len(values))
 
         mean_kl = _mean_scalar(approx_kls, 0.0)
         mean_ratio = _mean_scalar(ratio_means, 1.0)
@@ -3638,10 +3853,6 @@ class PPOAgent:
             'Entropy/Task': _mean_scalar(task_entropy_values, 0.0),
             'Entropy/Station': _mean_scalar(station_entropy_values, 0.0),
             'Entropy/WorkerTeam': _mean_scalar(team_entropy_values, 0.0),
-            'Distill/KLTask': _mean_scalar(distill_task_values, 0.0),
-            'Distill/KLStation': _mean_scalar(distill_station_values, 0.0),
-            'Distill/WeightedLoss': _mean_scalar(distill_weighted_values, 0.0),
-            'Distill/Lambda': _mean_scalar(distill_lambda_values, 0.0),
             'Critic/Explained_Variance': mean_exp_var,
             'Critic/Value_Predictions_Mean': mean_pred_val,
             'Critic/Target_Returns_Mean': mean_target_ret,
@@ -3655,7 +3866,6 @@ class PPOAgent:
             'Policy/Meltdown_Count': kl_exceeded_count,
             'PPO/GPURebuildFallbackCount': gpu_rebuild_fallback_count,
             'PPO/BatchVectorRepairCount': batch_vector_repair_count,
-            'Train/LearningRate': self.optimizer.param_groups[0]['lr'],
             'PPO/GradientsFinite': float(min(gradient_finite_values)) if gradient_finite_values else 1.0,
             'PPO/ActorGradNorm': float(sum(actor_gradient_norms) / len(actor_gradient_norms)) if actor_gradient_norms else 0.0,
             'PPO/CriticGradNorm': float(sum(critic_gradient_norms) / len(critic_gradient_norms)) if critic_gradient_norms else 0.0,
@@ -3663,19 +3873,26 @@ class PPOAgent:
             'PointerV2/GradientCoverage': float(sum(v2_gradient_coverages) / len(v2_gradient_coverages)) if v2_gradient_coverages else 0.0,
             'PointerV2/PPOFirstRecomputeMAE': v2_first_recompute_mae,
             'PointerV2/PPOFirstRecomputeMaxAE': v2_first_recompute_max_abs_error,
-            'APCF/GradientNorm': float(sum(apcf_gradient_norms) / len(apcf_gradient_norms)) if apcf_gradient_norms else 0.0,
-            'APCF/PPOProposalBranchRecomputeMAE': apcf_first_recompute_mae,
-            'APCF/PPOProposalBranchRecomputeMaxAE': apcf_first_recompute_max_abs_error,
-            'APCF/AutocastEnabled': 1.0 if self.amp_enabled else 0.0,
-            'APCF/AutocastBF16Target': 1.0 if self.amp_enabled and self.amp_dtype == torch.bfloat16 else 0.0,
-            'APCF/TrunkGradientNorm': float(sum(trunk_gradient_norms) / len(trunk_gradient_norms)) if trunk_gradient_norms else 0.0,
-            'APCF/PretrainLoadedModelKeyCount': float(getattr(self.config, 'apcf_pretrain_loaded_model_key_count', 0) or 0),
             'Train/ActorLearningRate': self.optimizer.param_groups[0]['lr'],
             'Train/CriticLearningRate': self.optimizer.param_groups[1]['lr'] if len(self.optimizer.param_groups) > 1 else self.optimizer.param_groups[0]['lr'],
             'Train/ScheduleFreeEnabled': 1.0 if self.use_schedule_free else 0.0,
             'Memory/Allocated_GB': memory_snapshot['allocated_gb'],
             'Memory/Reserved_GB': memory_snapshot['reserved_gb'],
         }
+        metrics.update(
+            {
+                f"Gradient/{label}GradToParamRatio": _mean_scalar(
+                    module_grad_to_param_ratios[module_name], 0.0
+                )
+                for module_name, label in (
+                    ("gat_encoder", "GATEncoder"),
+                    ("task_head", "TaskHead"),
+                    ("station_head", "StationHead"),
+                    ("worker_v2", "WorkerV2"),
+                    ("critic", "Critic"),
+                )
+            }
+        )
         if action_scope == "operation_station_worker" and is_worker_pointer_v2_mode(
             self.config
         ):
@@ -3689,6 +3906,32 @@ class PPOAgent:
                     if self.scaler.is_enabled()
                     else 0.0,
                     "PointerV2/NonFiniteCount": 0.0,
+                }
+            )
+            if bool(getattr(self.config, "worker_pointer_v2_dynamic_eft_features", False)):
+                metrics.update(
+                    {
+                        "PointerV2/DynamicEFT/ProjectionGradNorm": _mean_scalar(
+                            dynamic_eft_projection_grad_norms, 0.0
+                        ),
+                        "PointerV2/DynamicEFT/ProjectionWeightNorm": _mean_scalar(
+                            dynamic_eft_projection_param_norms, 0.0
+                        ),
+                        "PointerV2/DynamicEFT/ProjectionGradToParamRatio": _mean_scalar(
+                            dynamic_eft_projection_grad_to_param_ratios, 0.0
+                        ),
+                    }
+                )
+        if action_scope == "operation_station_anchor_proposal_team":
+            metrics.update(
+                {
+                    'APCF/GradientNorm': float(sum(apcf_gradient_norms) / len(apcf_gradient_norms)) if apcf_gradient_norms else 0.0,
+                    'APCF/PPOProposalBranchRecomputeMAE': apcf_first_recompute_mae,
+                    'APCF/PPOProposalBranchRecomputeMaxAE': apcf_first_recompute_max_abs_error,
+                    'APCF/AutocastEnabled': 1.0 if self.amp_enabled else 0.0,
+                    'APCF/AutocastBF16Target': 1.0 if self.amp_enabled and self.amp_dtype == torch.bfloat16 else 0.0,
+                    'APCF/TrunkGradientNorm': float(sum(trunk_gradient_norms) / len(trunk_gradient_norms)) if trunk_gradient_norms else 0.0,
+                    'APCF/PretrainLoadedModelKeyCount': float(getattr(self.config, 'apcf_pretrain_loaded_model_key_count', 0) or 0),
                 }
             )
         if action_scope == "operation_station_gated_team":
@@ -3707,7 +3950,16 @@ class PPOAgent:
                     ),
                 }
             )
-        metrics.update(distill_lifecycle)
+        if self.best_anchor_teacher is not None:
+            metrics.update(
+                {
+                    'Distill/KLTask': _mean_scalar(distill_task_values, 0.0),
+                    'Distill/KLStation': _mean_scalar(distill_station_values, 0.0),
+                    'Distill/WeightedLoss': _mean_scalar(distill_weighted_values, 0.0),
+                    'Distill/Lambda': _mean_scalar(distill_lambda_values, 0.0),
+                }
+            )
+            metrics.update(distill_lifecycle)
         if is_batched_vectorized_v2_replay(self.config):
             metrics["V2/BatchedReplayUpdateSeconds"] = float(
                 time.perf_counter() - update_started
@@ -3799,6 +4051,7 @@ class PPOAgent:
             worker_embs = x_dict["worker"][worker_start:worker_end]
             raw_task = batch["task"].x[task_start:task_end]
             raw_worker = batch["worker"].x[worker_start:worker_end]
+            raw_station = batch["station"].x[station_start:station_end]
             task_mask = batch.y_task_mask[task_start:task_end].bool()
             station_mask_matrix = batch.y_station_mask[task_start:task_end].bool()
             worker_queue_mask = batch.y_worker_mask[worker_start:worker_end].bool()
@@ -3912,6 +4165,15 @@ class PPOAgent:
                         demand=demand,
                         mask=current_mask.unsqueeze(0),
                         decode_cache=decode_cache,
+                        dynamic_eft_features=self._build_v2_dynamic_eft_features(
+                            team_state=team_state,
+                            worker_features=raw_worker,
+                            station_features=raw_station,
+                            selected_station=station_target,
+                            task_duration=raw_task[task_id, 0].reshape(1),
+                            demand=demand,
+                            mask=current_mask.unsqueeze(0),
+                        ),
                     )
                 worker_logits = torch.nan_to_num(worker_logits, nan=-1.0e4)
                 worker_dist = Categorical(logits=worker_logits.float())
@@ -3928,6 +4190,13 @@ class PPOAgent:
                     team_state,
                     worker_embs_i[:, worker_id, :],
                     worker_skills[worker_id].unsqueeze(0),
+                    selected_wait=torch.expm1(
+                        raw_worker[worker_id, worker_layout.wait_idx].float().clamp_min(0.0)
+                    ).reshape(1),
+                    selected_capacity=(
+                        raw_worker[worker_id, worker_layout.efficiency_idx].float()
+                        * raw_worker[worker_id, worker_layout.fatigue_idx].float()
+                    ).reshape(1),
                 )
                 current_mask = current_mask.clone()
                 current_mask[worker_id] = True
@@ -4901,6 +5170,7 @@ class PPOAgent:
             worker_embs = x_dict["worker"][worker_start:worker_end]
             raw_task = fast_batch.raw_task_slices[sample_index]
             raw_worker = fast_batch.raw_worker_slices[sample_index]
+            raw_station = batch["station"].x[station_start:station_end]
             task_mask = batch.y_task_mask[task_start:task_end].bool()
             station_mask_matrix = batch.y_station_mask[task_start:task_end].bool()
             worker_queue_mask = batch.y_worker_mask[worker_start:worker_end].bool()
@@ -5022,6 +5292,17 @@ class PPOAgent:
                         demand=demand,
                         mask=current_mask.unsqueeze(0),
                         decode_cache=decode_cache,
+                        dynamic_eft_features=self._build_v2_dynamic_eft_features(
+                            team_state=team_state,
+                            worker_features=raw_worker,
+                            station_features=raw_station,
+                            selected_station=station_target,
+                            task_duration=raw_task.index_select(
+                                0, y_task[sample_index].reshape(1)
+                            )[:, 0],
+                            demand=demand,
+                            mask=current_mask.unsqueeze(0),
+                        ),
                     )
                 worker_logits = torch.nan_to_num(worker_logits, nan=-1.0e4)
                 worker_dist = Categorical(logits=worker_logits.float())
@@ -5053,6 +5334,19 @@ class PPOAgent:
                     worker_emb_i,
                     # 1-dim 索引规避 CUDA index_add_ 对 0-dim 索引的快速路径 bug。
                     worker_skills.index_select(0, worker_id_t.reshape(1)),
+                    selected_wait=torch.expm1(
+                        raw_worker.index_select(0, worker_id_t.reshape(1))[
+                            :, worker_layout.wait_idx
+                        ].float().clamp_min(0.0)
+                    ).reshape(1),
+                    selected_capacity=(
+                        raw_worker.index_select(0, worker_id_t.reshape(1))[
+                            :, worker_layout.efficiency_idx
+                        ].float()
+                        * raw_worker.index_select(0, worker_id_t.reshape(1))[
+                            :, worker_layout.fatigue_idx
+                        ].float()
+                    ).reshape(1),
                 )
                 current_mask = current_mask.clone()
                 current_mask[worker_id_t] = True

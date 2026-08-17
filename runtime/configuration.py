@@ -278,6 +278,11 @@ def validate_runtime_config(config: Config) -> None:
             )
         if int(config.worker_pointer_v2_init_seed_offset) < 0:
             raise ValueError("worker_pointer_v2_init_seed_offset 不能为负数")
+        eft_clip = float(config.worker_pointer_v2_dynamic_eft_feature_clip)
+        if not math.isfinite(eft_clip) or eft_clip <= 0.0:
+            raise ValueError(
+                "worker_pointer_v2_dynamic_eft_feature_clip 必须是大于 0 的有限数"
+            )
         if is_fast_exact_mode(config):
             if (
                 str(config.worker_pointer_v2_replay_mode)
