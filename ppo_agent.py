@@ -316,7 +316,9 @@ class PPOAgent:
         assert station_features.ndim == 3 and station_features.size(0) == batch_size
         assert mask.shape == (batch_size, num_workers)
         station_ids = selected_station.to(self.device, dtype=torch.long).reshape(batch_size)
-        assert torch.all((station_ids >= 0) & (station_ids < station_features.size(1)))
+        virtual_rows = station_ids == -1
+        assert torch.all((station_ids >= -1) & (station_ids < station_features.size(1)))
+        safe_station_ids = station_ids.clamp_min(0)
         layout = resolve_worker_feature_layout(self.config)
         raw_worker = worker_features.to(self.device)
         raw_station = station_features.to(self.device)
@@ -329,9 +331,9 @@ class PPOAgent:
         ).clamp_min(1.0e-6)
         batch_indices = torch.arange(batch_size, device=self.device)
         station_wait = torch.expm1(
-            raw_station[batch_indices, station_ids, 4].float().clamp_min(0.0)
+            raw_station[batch_indices, safe_station_ids, 4].float().clamp_min(0.0)
         )
-        return build_worker_eft_features(
+        features = build_worker_eft_features(
             team_state=team_state,
             worker_wait=worker_wait,
             worker_capacity=worker_capacity,
@@ -341,6 +343,7 @@ class PPOAgent:
             mask=mask.to(self.device),
             clip=float(self.config.worker_pointer_v2_dynamic_eft_feature_clip),
         )
+        return torch.where(virtual_rows[:, None, None], torch.zeros_like(features), features)
 
     def reset_worker_pointer_v2_diagnostics(self) -> None:
         self.worker_pointer_v2_diagnostics.reset()

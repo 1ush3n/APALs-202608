@@ -390,6 +390,34 @@ def test_v2_dynamic_eft_features_rank_legal_workers_and_zero_masked() -> None:
     torch.testing.assert_close(features[0, 2], torch.zeros(2))
 
 
+def test_v2_dynamic_eft_ignores_virtual_station_rows_in_mixed_ppo_batch() -> None:
+    from ppo_agent import PPOAgent
+
+    cfg = _pointer_config("autoregressive_pressure_v2")
+    cfg.worker_pointer_v2_dynamic_eft_features = True
+    agent = object.__new__(PPOAgent)
+    agent.config = cfg
+    agent.device = torch.device("cpu")
+    head = WorkerPointer(cfg)
+    team_state = head.initialize_v2_state(batch_size=2, device=torch.device("cpu"))
+    worker_features = torch.zeros((2, 3, 17))
+    worker_features[:, :, 0] = 1.0
+    worker_features[:, :, 16] = 1.0
+    features = agent._build_v2_dynamic_eft_features(
+        team_state=team_state,
+        worker_features=worker_features,
+        station_features=torch.zeros((2, 5, 15)),
+        selected_station=torch.tensor([-1, 4]),
+        task_duration=torch.tensor([0.0, 4.0]),
+        demand=torch.tensor([0.0, 1.0]),
+        mask=torch.zeros((2, 3), dtype=torch.bool),
+    )
+
+    assert features is not None
+    torch.testing.assert_close(features[0], torch.zeros_like(features[0]))
+    assert torch.isfinite(features[1]).all()
+
+
 def test_v2_dynamic_eft_late_fusion_is_zero_initialized_and_trainable() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
 
