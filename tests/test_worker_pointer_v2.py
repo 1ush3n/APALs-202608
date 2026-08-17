@@ -582,6 +582,16 @@ def test_v2_dynamic_eft_does_not_change_existing_v2_initialization() -> None:
             torch.testing.assert_close(guided_state[name], value, atol=0.0, rtol=0.0)
 
 
+def test_v2_dynamic_eft_keeps_legacy_optimizer_parameter_order() -> None:
+    guided_cfg = _pointer_config("autoregressive_pressure_v2")
+    guided_cfg.worker_pointer_v2_dynamic_eft_features = True
+    guided = WorkerPointer(guided_cfg)
+
+    parameter_names = [name for name, _parameter in guided.named_parameters()]
+
+    assert parameter_names.index("v2_eft_proj.weight") < parameter_names.index("v2_attn.weight")
+
+
 def _v2_agent_and_ready_env(
     device: torch.device | None = None,
 ) -> tuple[object, object, tuple[torch.Tensor, ...]]:
