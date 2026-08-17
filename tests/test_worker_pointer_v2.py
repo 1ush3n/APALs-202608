@@ -569,6 +569,19 @@ def test_v2_initialization_does_not_advance_legacy_rng_or_change_legacy_keys() -
     assert any(key.startswith("v2_eft_proj") for key in guided.state_dict())
 
 
+def test_v2_dynamic_eft_does_not_change_existing_v2_initialization() -> None:
+    baseline = WorkerPointer(_pointer_config("autoregressive_pressure_v2"))
+    guided_cfg = _pointer_config("autoregressive_pressure_v2")
+    guided_cfg.worker_pointer_v2_dynamic_eft_features = True
+    guided = WorkerPointer(guided_cfg)
+
+    baseline_state = baseline.state_dict()
+    guided_state = guided.state_dict()
+    for name, value in baseline_state.items():
+        if name.startswith("v2_"):
+            torch.testing.assert_close(guided_state[name], value, atol=0.0, rtol=0.0)
+
+
 def _v2_agent_and_ready_env(
     device: torch.device | None = None,
 ) -> tuple[object, object, tuple[torch.Tensor, ...]]:
