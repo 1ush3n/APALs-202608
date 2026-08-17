@@ -67,6 +67,12 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_normalized_text_file(path: Path) -> str:
+    """返回以 LF 规范化换行后的文本文件 SHA-256。"""
+    content = Path(path).read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(content).hexdigest()
+
+
 def _require_mapping(value: object, field_name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} 必须是对象")
@@ -115,7 +121,7 @@ def load_initial_checkpoint_selection_manifest(
         data_path = resolve_workspace_path(relative_path).resolve()
         if not data_path.is_file():
             raise FileNotFoundError(f"选择实例数据不存在: {data_path}")
-        actual_hash = sha256_file(data_path)
+        actual_hash = sha256_normalized_text_file(data_path)
         if actual_hash != expected_hash:
             raise ValueError(
                 f"选择实例数据哈希不一致: {instance_id}; "
@@ -160,7 +166,7 @@ def parse_job_selection_manifest(payload: object) -> InitialCheckpointSelectionM
         if not data_path.is_file():
             raise FileNotFoundError(f"异步任务选择数据不存在: {data_path}")
         expected_hash = str(entry["sha256"]).lower()
-        actual_hash = sha256_file(data_path)
+        actual_hash = sha256_normalized_text_file(data_path)
         if actual_hash != expected_hash:
             raise ValueError(f"异步任务选择数据哈希不一致: {data_path}")
         entries.append(
@@ -188,4 +194,5 @@ __all__ = [
     "load_initial_checkpoint_selection_manifest",
     "parse_job_selection_manifest",
     "sha256_file",
+    "sha256_normalized_text_file",
 ]

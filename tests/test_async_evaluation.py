@@ -14,7 +14,7 @@ from environment import AirLineEnv_Graph
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
 from runtime.configuration import validate_runtime_config
-from runtime.initial_checkpoint_selection import sha256_file
+from runtime.initial_checkpoint_selection import sha256_file, sha256_normalized_text_file
 from runtime.reschedule_eval import evaluate_reschedule_model
 from training.async_eval_worker import _record_result, _restore_interrupted_jobs, _verified_candidate_path
 from training.async_evaluation import (
@@ -29,6 +29,16 @@ from training.observation import CachedEnvironmentObservation
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_selection_csv_hash_normalizes_windows_and_linux_newlines(tmp_path: Path) -> None:
+    linux_csv = tmp_path / "linux.csv"
+    windows_csv = tmp_path / "windows.csv"
+    linux_csv.write_bytes(b"task,station\n1,2\n")
+    windows_csv.write_bytes(b"task,station\r\n1,2\r\n")
+
+    assert sha256_file(linux_csv) != sha256_file(windows_csv)
+    assert sha256_normalized_text_file(linux_csv) == sha256_normalized_text_file(windows_csv)
 
 
 def _assert_graph_equal(left, right) -> None:
