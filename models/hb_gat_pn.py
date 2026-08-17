@@ -401,11 +401,10 @@ class WorkerPointer(nn.Module):
                 self.v2_query_proj = nn.Linear(hidden_dim * 6 + 17, hidden_dim)
                 # key shape: worker H + long/near exposure 10 + two maximum exposures
                 self.v2_key_proj = nn.Linear(hidden_dim + 12, hidden_dim)
-                v2_attn = nn.Linear(hidden_dim, 1)
+                self.v2_attn = nn.Linear(hidden_dim, 1)
                 if bool(getattr(config, "worker_pointer_v2_dynamic_eft_features", False)):
                     self.v2_eft_proj = nn.Linear(2, hidden_dim, bias=False)
                     nn.init.zeros_(self.v2_eft_proj.weight)
-                self.v2_attn = v2_attn
 
     def forward_choice(self, task_emb, worker_embs, mask=None, current_team_emb=None):
         """选择下一个工人"""
