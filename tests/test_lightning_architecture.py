@@ -130,6 +130,35 @@ def test_resume_start_episode_rejects_misaligned_checkpoint() -> None:
         _resume_start_episode(corrupted)
 
 
+def test_iterable_resume_checkpoint_clears_stale_last_batch_flag(tmp_path) -> None:
+    import torch
+
+    from train_lightning import _prepare_iterable_resume_checkpoint
+
+    source = tmp_path / "last.ckpt"
+    payload = {
+        "state_dict": {"weight": torch.tensor([1.0])},
+        "loops": {
+            "fit_loop": {
+                "epoch_loop.batch_progress": {
+                    "total": {"completed": 32},
+                    "is_last_batch": True,
+                }
+            }
+        },
+    }
+    torch.save(payload, source)
+
+    prepared = _prepare_iterable_resume_checkpoint(source, payload, tmp_path)
+
+    original = torch.load(source, map_location="cpu", weights_only=False)
+    resumed = torch.load(prepared, map_location="cpu", weights_only=False)
+    original_progress = original["loops"]["fit_loop"]["epoch_loop.batch_progress"]
+    resumed_progress = resumed["loops"]["fit_loop"]["epoch_loop.batch_progress"]
+    assert original_progress["is_last_batch"] is True
+    assert resumed_progress["is_last_batch"] is False
+
+
 def test_resume_checkpoint_path_uses_explicit_file_without_overwriting_latest(tmp_path) -> None:
     from train_lightning import _resolve_resume_checkpoint_path
 

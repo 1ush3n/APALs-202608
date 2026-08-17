@@ -220,6 +220,33 @@ def _resume_start_episode(checkpoint_payload: object) -> int:
     return completed_episode + 1
 
 
+def _prepare_iterable_resume_checkpoint(
+    resume_path: Path,
+    checkpoint_payload: dict[str, Any],
+    checkpoint_dir: Path,
+) -> Path:
+    """复位中断续训遗留的末 batch 标记，且绝不改写原 checkpoint。"""
+    loops = checkpoint_payload.get("loops", {})
+    fit_loop = loops.get("fit_loop", {}) if isinstance(loops, dict) else {}
+    progress = (
+        fit_loop.get("epoch_loop.batch_progress", {})
+        if isinstance(fit_loop, dict)
+        else {}
+    )
+    if not isinstance(progress, dict) or not bool(progress.get("is_last_batch", False)):
+        return resume_path
+
+    progress["is_last_batch"] = False
+    prepared_path = checkpoint_dir / ".resume" / f"{resume_path.stem}_iterable.ckpt"
+    prepared_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(checkpoint_payload, prepared_path)
+    print(
+        f"[Resume] 已复位 IterableDataset 遗留末 batch 标记: {prepared_path}",
+        flush=True,
+    )
+    return prepared_path
+
+
 def _resolve_resume_checkpoint_path(
     args: object,
     checkpoint_paths: Mapping[str, Path],
@@ -597,6 +624,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     next_episode = 1
     resume_batch_semantics = None
     resume_path: Path | None = None
+    trainer_resume_path: Path | None = None
     if str(getattr(args, "resume_checkpoint_path", "") or "").strip() and not args.resume:
         _resolve_resume_checkpoint_path(args, checkpoint_paths)
     if args.resume:
@@ -630,6 +658,11 @@ def run(args, *, config_initialized: bool = False) -> None:
         print(
             f"[Resume] 已验证 checkpoint 连续性，将从 absolute_episode={next_episode} 继续训练。",
             flush=True,
+        )
+        trainer_resume_path = _prepare_iterable_resume_checkpoint(
+            resume_path,
+            resume_checkpoint.payload,
+            checkpoint_dir,
         )
     if uses_runs_layout(configs) and str(getattr(configs, "run_dir", "") or "").strip():
         context = create_run_context(configs, PROJECT_ROOT, create_dirs=True)
@@ -778,7 +811,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     trainer.fit(
         module,
         datamodule=data_module,
-        ckpt_path=str(resume_path) if resume_path is not None else None,
+        ckpt_path=str(trainer_resume_path) if trainer_resume_path is not None else None,
     )
 
 
