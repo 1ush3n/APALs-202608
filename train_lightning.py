@@ -749,6 +749,7 @@ def run(args, *, config_initialized: bool = False) -> None:
     data_module = APALDataModule(
         service,
         max_episodes=total_updates,
+        start_episode=next_episode,
     )
     callbacks = [
         RolloutCheckpoint(

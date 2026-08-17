@@ -105,11 +105,11 @@ def test_lightning_module_uses_manual_optimization_contract() -> None:
 
 def test_rollout_data_module_keeps_full_absolute_range_for_lightning_resume() -> None:
     service = _RolloutService()
-    data = APALDataModule(service, max_episodes=60)
+    data = APALDataModule(service, max_episodes=60, start_episode=34)
 
     updates = list(data.train_dataloader())
 
-    assert [update.episode for update in updates] == list(range(1, 61))
+    assert [update.episode for update in updates] == list(range(34, 61))
     assert len(data) == 60
 
 
