@@ -970,6 +970,36 @@ class HBGATPN(nn.Module):
         self.last_s_weights = None 
         self.last_s_var = 0.0      # [新增] 站位关注度方差，用于衡量 Critic 是否定位到瓶颈
 
+    def _policy_node_types(self) -> set[str]:
+        scope = str(getattr(self.config, "policy_observation_scope", "full"))
+        if scope == "task":
+            return {"task"}
+        if scope == "task_station":
+            return {"task", "station"}
+        if scope == "full":
+            return {"task", "station", "worker", "skill"}
+        raise ValueError(f"未知 policy_observation_scope: {scope!r}")
+
+    def _encode_policy_graph(
+        self,
+        batch_data: HeteroData,
+        embedder: FeatureEmbedder,
+        encoder: nn.Module | None,
+    ) -> dict[str, torch.Tensor]:
+        allowed = self._policy_node_types()
+        raw_x_dict = {
+            name: value for name, value in batch_data.x_dict.items() if name in allowed
+        }
+        x_dict = embedder(raw_x_dict)
+        edge_index_dict = {
+            edge_type: edge_index
+            for edge_type, edge_index in batch_data.edge_index_dict.items()
+            if edge_type[0] in allowed and edge_type[2] in allowed
+        }
+        if encoder is None:
+            return x_dict
+        return encoder(x_dict, edge_index_dict)
+
     def _compute_global_context(
         self,
         x_dict_encoded,
@@ -979,82 +1009,84 @@ class HBGATPN(nn.Module):
         station_attn: nn.Module,
         task_worker_attn: nn.Module,
     ):
+        from torch_geometric.nn import global_add_pool, global_max_pool, global_mean_pool
         from torch_geometric.utils import softmax
-        from configs import configs
-        from torch_geometric.nn import global_add_pool, global_mean_pool, global_max_pool
-        
-        if mode == "local_only":
-             batch_size = (
-                 int(batch_data['task'].batch.max().item()) + 1
-                 if hasattr(batch_data['task'], 'batch') and batch_data['task'].batch is not None
-                 else 1
-             )
-             return torch.zeros(
-                 (batch_size, self.config.hidden_dim * 3),
-                 dtype=x_dict_encoded['task'].dtype,
-                 device=x_dict_encoded['task'].device,
-             )
 
-        if mode == "attention" and hasattr(batch_data['station'], 'batch') and batch_data['station'].batch is not None:
-             s_batch = batch_data['station'].batch
-             t_batch = batch_data['task'].batch
-             w_batch = batch_data['worker'].batch
-             
-             s_weights = station_attn(x_dict_encoded['station'])
-             s_alphas = softmax(s_weights, s_batch)
-             station_ctx = global_add_pool(x_dict_encoded['station'] * s_alphas, s_batch)
-             
-             t_weights = task_worker_attn(x_dict_encoded['task'])
-             t_alphas = softmax(t_weights, t_batch)
-             task_ctx = global_add_pool(x_dict_encoded['task'] * t_alphas, t_batch)
-             
-             w_weights = task_worker_attn(x_dict_encoded['worker'])
-             w_alphas = softmax(w_weights, w_batch)
-             worker_ctx = global_add_pool(x_dict_encoded['worker'] * w_alphas, w_batch)
-             
-             global_context = torch.cat([station_ctx, task_ctx, worker_ctx], dim=1)
-             self.last_s_weights = s_alphas.detach()
-             self.last_s_var = torch.var(s_alphas.view(global_context.size(0), -1), dim=1).mean().item()
-             
-        elif mode == "attention":
-             s_weights = station_attn(x_dict_encoded['station'])
-             s_alphas = F.softmax(s_weights, dim=0)
-             station_ctx = torch.sum(x_dict_encoded['station'] * s_alphas, dim=0, keepdim=True)
-             
-             t_weights = task_worker_attn(x_dict_encoded['task'])
-             t_alphas = F.softmax(t_weights, dim=0)
-             task_ctx = torch.sum(x_dict_encoded['task'] * t_alphas, dim=0, keepdim=True)
-             
-             w_weights = task_worker_attn(x_dict_encoded['worker'])
-             w_alphas = F.softmax(w_weights, dim=0)
-             worker_ctx = torch.sum(x_dict_encoded['worker'] * w_alphas, dim=0, keepdim=True)
-             
-             global_context = torch.cat([station_ctx, task_ctx, worker_ctx], dim=1)
-             self.last_s_weights = s_alphas.detach()
-             self.last_s_var = torch.var(s_alphas).item()
-             
-        elif hasattr(batch_data['station'], 'batch') and batch_data['station'].batch is not None:
-             station_mean = global_mean_pool(x_dict_encoded['station'], batch_data['station'].batch)
-             task_mean = global_mean_pool(x_dict_encoded['task'], batch_data['task'].batch)
-             worker_mean = global_mean_pool(x_dict_encoded['worker'], batch_data['worker'].batch)
-             
-             station_max = global_max_pool(x_dict_encoded['station'], batch_data['station'].batch)
-             task_max = global_max_pool(x_dict_encoded['task'], batch_data['task'].batch)
-             worker_max = global_max_pool(x_dict_encoded['worker'], batch_data['worker'].batch)
-             
-             global_context = torch.cat([station_mean, task_mean, worker_mean, station_max, task_max, worker_max], dim=1)
-        else:
-             station_mean = torch.mean(x_dict_encoded['station'], dim=0, keepdim=True)
-             task_mean = torch.mean(x_dict_encoded['task'], dim=0, keepdim=True)
-             worker_mean = torch.mean(x_dict_encoded['worker'], dim=0, keepdim=True)
-             
-             station_max = torch.max(x_dict_encoded['station'], dim=0, keepdim=True)[0]
-             task_max = torch.max(x_dict_encoded['task'], dim=0, keepdim=True)[0]
-             worker_max = torch.max(x_dict_encoded['worker'], dim=0, keepdim=True)[0]
-             
-             global_context = torch.cat([station_mean, task_mean, worker_mean, station_max, task_max, worker_max], dim=1)
-             
-        return global_context
+        task_x = x_dict_encoded["task"]
+        task_batch = getattr(batch_data["task"], "batch", None)
+        batch_size = (
+            int(task_batch.max().item()) + 1
+            if task_batch is not None
+            else 1
+        )
+
+        def zeros() -> torch.Tensor:
+            return torch.zeros(
+                (batch_size, self.config.hidden_dim),
+                dtype=task_x.dtype,
+                device=task_x.device,
+            )
+
+        if mode == "local_only":
+            return torch.zeros(
+                (batch_size, self.config.hidden_dim * 3),
+                dtype=task_x.dtype,
+                device=task_x.device,
+            )
+
+        def attention_context(
+            node_type: str,
+            scorer: nn.Module,
+        ) -> tuple[torch.Tensor, torch.Tensor | None]:
+            node_x = x_dict_encoded.get(node_type)
+            if node_x is None:
+                return zeros(), None
+            node_batch = getattr(batch_data[node_type], "batch", None)
+            weights = scorer(node_x)
+            if node_batch is not None:
+                alphas = softmax(weights, node_batch)
+                context = global_add_pool(node_x * alphas, node_batch)
+            else:
+                alphas = F.softmax(weights, dim=0)
+                context = torch.sum(node_x * alphas, dim=0, keepdim=True)
+            return context, alphas
+
+        if mode == "attention":
+            station_ctx, station_weights = attention_context("station", station_attn)
+            task_ctx, _ = attention_context("task", task_worker_attn)
+            worker_ctx, _ = attention_context("worker", task_worker_attn)
+            self.last_s_weights = (
+                station_weights.detach() if station_weights is not None else None
+            )
+            self.last_s_var = (
+                float(torch.var(station_weights).item())
+                if station_weights is not None
+                else 0.0
+            )
+            return torch.cat([station_ctx, task_ctx, worker_ctx], dim=1)
+
+        def pooled_context(node_type: str) -> tuple[torch.Tensor, torch.Tensor]:
+            node_x = x_dict_encoded.get(node_type)
+            if node_x is None:
+                return zeros(), zeros()
+            node_batch = getattr(batch_data[node_type], "batch", None)
+            if node_batch is not None:
+                return (
+                    global_mean_pool(node_x, node_batch),
+                    global_max_pool(node_x, node_batch),
+                )
+            return (
+                torch.mean(node_x, dim=0, keepdim=True),
+                torch.max(node_x, dim=0, keepdim=True)[0],
+            )
+
+        station_mean, station_max = pooled_context("station")
+        task_mean, task_max = pooled_context("task")
+        worker_mean, worker_max = pooled_context("worker")
+        return torch.cat(
+            [station_mean, task_mean, worker_mean, station_max, task_max, worker_max],
+            dim=1,
+        )
 
     def forward(self, batch_data):
         """
@@ -1062,12 +1094,11 @@ class HBGATPN(nn.Module):
         具体的 Action Logits 计算在 Agent 中分步调用各个 Head。
         """
         # --- Step 1: 编码 ---
-        x_dict = self.embedder(batch_data.x_dict)
-        
-        if self.encoder is None:
-            x_dict_encoded = x_dict
-        else:
-            x_dict_encoded = self.encoder(x_dict, batch_data.edge_index_dict)
+        x_dict_encoded = self._encode_policy_graph(
+            batch_data,
+            self.embedder,
+            self.encoder,
+        )
         
         global_context = self._compute_global_context(
             x_dict_encoded,
@@ -1086,20 +1117,19 @@ class HBGATPN(nn.Module):
         """
         if getattr(self.config, 'use_shared_trunk', False):
             if actor_x_dict_encoded is None:
-                x_dict = self.embedder(batch_data.x_dict)
-                if self.encoder is None:
-                    actor_x_dict_encoded = x_dict
-                else:
-                    actor_x_dict_encoded = self.encoder(x_dict, batch_data.edge_index_dict)
+                actor_x_dict_encoded = self._encode_policy_graph(
+                    batch_data,
+                    self.embedder,
+                    self.encoder,
+                )
             c_x_dict_encoded = actor_x_dict_encoded
         else:
             # 1. 独立编码
-            c_x_dict = self.critic_embedder(batch_data.x_dict)
-            
-            if self.critic_encoder is None:
-                c_x_dict_encoded = c_x_dict
-            else:
-                c_x_dict_encoded = self.critic_encoder(c_x_dict, batch_data.edge_index_dict)
+            c_x_dict_encoded = self._encode_policy_graph(
+                batch_data,
+                self.critic_embedder,
+                self.critic_encoder,
+            )
             
         # 2. 独立池化 (Attention or Mean+Max)
         c_global_context = self._compute_global_context(

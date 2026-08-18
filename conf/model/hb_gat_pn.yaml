@@ -19,6 +19,7 @@ model:
   use_attention_critic: true
   use_autoregressive_worker: true
   policy_action_scope: operation_station_worker
+  policy_observation_scope: full
   conditional_team_max_candidates: 4
   conditional_team_gate_bias: -4.0
   conditional_team_nonbaseline_logit: -8.0

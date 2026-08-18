@@ -30,6 +30,7 @@ def _sha256_of(path: Path) -> str:
 class ModelSpec:
     resource_graph_mode: str
     policy_action_scope: str = "operation_station_worker"
+    policy_observation_scope: str = "full"
     conditional_team_max_candidates: int = 4
     conditional_team_gate_bias: float = -4.0
     conditional_team_nonbaseline_logit: float = -8.0
@@ -139,6 +140,7 @@ def build_model_spec(config: Config) -> ModelSpec:
     return ModelSpec(
         resource_graph_mode=mode,
         policy_action_scope=str(config.policy_action_scope),
+        policy_observation_scope=str(getattr(config, "policy_observation_scope", "full")),
         conditional_team_max_candidates=int(config.conditional_team_max_candidates),
         conditional_team_gate_bias=float(config.conditional_team_gate_bias),
         conditional_team_nonbaseline_logit=float(config.conditional_team_nonbaseline_logit),
@@ -422,6 +424,7 @@ def apply_checkpoint_model_spec(
         "use_skill_hub": spec.use_skill_hub,
         "skill_hub_bidirectional": spec.skill_hub_bidirectional,
         "policy_action_scope": spec.policy_action_scope,
+        "policy_observation_scope": getattr(spec, "policy_observation_scope", "full"),
         "conditional_team_max_candidates": spec.conditional_team_max_candidates,
         "conditional_team_gate_bias": spec.conditional_team_gate_bias,
         "conditional_team_nonbaseline_logit": spec.conditional_team_nonbaseline_logit,

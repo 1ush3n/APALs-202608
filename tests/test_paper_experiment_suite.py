@@ -179,3 +179,26 @@ def test_current_paper_suite_excludes_unavailable_and_replaced_methods() -> None
         "mean_max_pooling",
         "local_only",
     } <= active_ablations
+
+
+def test_policy_observation_scope_is_limited_to_two_node_scope_ablations() -> None:
+    config = load_paper_config(
+        PROJECT_ROOT / "conf" / "experiment" / "paper_experiment_suite.yaml",
+        PROJECT_ROOT,
+    )
+
+    assert config.ablations["operation_only"]["overrides"] == [
+        "policy_action_scope=operation",
+        "policy_observation_scope=task",
+    ]
+    assert config.ablations["operation_station"]["overrides"] == [
+        "policy_action_scope=operation_station",
+        "policy_observation_scope=task_station",
+    ]
+
+    for name, spec in config.ablations.items():
+        if name not in {"operation_only", "operation_station"}:
+            assert not any(
+                str(override).startswith("policy_observation_scope=")
+                for override in spec["overrides"]
+            )

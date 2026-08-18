@@ -39,6 +39,10 @@ class Config:
     # 联合决策与消融实验语义（checkpoint 结构字段）
     # ------------------
     policy_action_scope: str = "operation_station_worker"
+    # 策略网络可见节点范围；full 保持历史主方法与旧 checkpoint 语义。
+    policy_observation_scope: str = "full"
+    # 策略网络可见节点范围；full 保持历史主方法与旧 checkpoint 语义。
+    policy_observation_scope: str = "full"
     conditional_team_max_candidates: int = 4
     conditional_team_gate_bias: float = -4.0
     conditional_team_nonbaseline_logit: float = -8.0

@@ -30,6 +30,7 @@ PREFLIGHT_TESTS = (
     "tests/test_dynamic_events.py",
     "tests/test_vector_env_safety.py",
     "tests/test_reschedule_ablation_suite.py",
+    "tests/test_policy_observation_scope.py",
 )
 
 

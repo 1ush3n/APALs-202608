@@ -179,6 +179,7 @@ python train.py --help
 | `runs_root` | `runs_root` | `runs_root=runs` | 统一运行目录根路径 |
 | `use_skill_hub` | `use_skill_hub` | `use_skill_hub=true` | 启用 Skill Hub |
 | `skill_hub_bidirectional` | `skill_hub_bidirectional` | `skill_hub_bidirectional=true` | 启用 Skill Hub 反向关系 |
+| `policy_observation_scope` | `policy_observation_scope` | `policy_observation_scope=task` | 策略网络可见节点：`full`、`task` 或 `task_station`；默认 `full` |
 | `resume` | 恢复训练 | `resume=true` | Lightning 读取当前 run 的最近断点 |
 | `ablation_no_gat` | `ablation_no_gat` | `ablation_no_gat=true` | GAT 消融实验 |
 | `ablation_no_pointer` | `ablation_no_pointer` | `ablation_no_pointer=true` | Pointer 消融实验 |
@@ -964,6 +965,24 @@ python train.py \
 ```
 
 常用三类结构消融：
+
+节点范围对比消融的定义如下：`operation_only` 仅向策略网络编码工序节点，`operation_station` 仅编码工序和站位节点；工人、站位的真实负载、等待时间和可行性仍由环境用于动作掩码与完工时间计算，但不会作为这两种策略的图节点输入。主方法 `full_joint` 及其他方法保持 `policy_observation_scope=full`。
+
+```bash
+python train.py \
+  experiment=scale_400_800_schedule \
+  policy_action_scope=operation \
+  policy_observation_scope=task \
+  experiment_name=scale_400_800_operation_only \
+  enable_multi_benchmark_eval=false
+
+python train.py \
+  experiment=scale_400_800_schedule \
+  policy_action_scope=operation_station \
+  policy_observation_scope=task_station \
+  experiment_name=scale_400_800_operation_station \
+  enable_multi_benchmark_eval=false
+```
 
 ```bash
 python train.py \

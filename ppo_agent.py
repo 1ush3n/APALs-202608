@@ -2317,8 +2317,16 @@ class PPOAgent:
                 worker_start, worker_end = worker_ptr[i], worker_ptr[i + 1]
 
                 task_embs = x_dict_batch['task'][task_start:task_end]
-                station_embs = x_dict_batch['station'][station_start:station_end]
-                worker_embs = x_dict_batch['worker'][worker_start:worker_end]
+                station_embs = (
+                    x_dict_batch['station'][station_start:station_end]
+                    if 'station' in x_dict_batch
+                    else None
+                )
+                worker_embs = (
+                    x_dict_batch['worker'][worker_start:worker_end]
+                    if 'worker' in x_dict_batch
+                    else None
+                )
                 raw_task_features = batch_obs['task'].x[task_start:task_end]
                 raw_station_features = batch_obs['station'].x[station_start:station_end]
                 raw_worker_features = batch_obs['worker'].x[worker_start:worker_end]
@@ -2431,6 +2439,9 @@ class PPOAgent:
                 # ------------------
                 # 2.2 閫夋嫨绔欎綅 (Select Station)
                 # ------------------
+                assert station_embs is not None, (
+                    "非 operation scope 必须编码 station 节点"
+                )
                 m_station = mask_station_matrix_list[i]
                 specific_station_mask = None
                 if m_station is not None:
@@ -3273,7 +3284,17 @@ class PPOAgent:
                     batch_indices = torch.arange(batch.y_task.size(0)).to(self.device)
                     sel_task_emb = task_x[batch_indices, batch.y_task] 
                     
-                    station_x, s_p_mask = to_dense_batch(x_dict['station'], batch['station'].batch)
+                    if "station" in x_dict:
+                        station_x, s_p_mask = to_dense_batch(
+                            x_dict["station"],
+                            batch["station"].batch,
+                        )
+                    else:
+                        _, s_p_mask = to_dense_batch(
+                            batch["station"].x[:, :1],
+                            batch["station"].batch,
+                        )
+                        station_x = None
                     
                     if hasattr(batch, 'y_station_mask'):
                         dense_s_mask, _ = to_dense_batch(batch.y_station_mask, batch['task'].batch)
@@ -3287,6 +3308,9 @@ class PPOAgent:
                         station_lp = torch.zeros_like(task_lp)
                         station_entropy = torch.zeros_like(task_entropy)
                     else:
+                        assert station_x is not None, (
+                            "operation_station 及完整动作必须编码 station 节点"
+                        )
                         station_logits = self.policy.station_head(sel_task_emb, station_x, mask=curr_s_mask)
                         if torch.isnan(station_logits).any(): station_logits = torch.nan_to_num(station_logits, nan=(torch.finfo(station_logits.dtype).min / 2.0))
 
@@ -3298,7 +3322,25 @@ class PPOAgent:
                         station_entropy = station_entropy * physical_action.to(station_entropy.dtype)
                     
                     # C. Worker Team LogProb
-                    worker_x, w_p_mask = to_dense_batch(x_dict['worker'], batch['worker'].batch)
+                    if "worker" in x_dict:
+                        worker_x, w_p_mask = to_dense_batch(
+                            x_dict["worker"],
+                            batch["worker"].batch,
+                        )
+                    else:
+                        _, w_p_mask = to_dense_batch(
+                            batch["worker"].x[:, :1],
+                            batch["worker"].batch,
+                        )
+                        worker_x = torch.zeros(
+                            (
+                                w_p_mask.size(0),
+                                w_p_mask.size(1),
+                                int(self.config.hidden_dim),
+                            ),
+                            dtype=task_logits.dtype,
+                            device=task_logits.device,
+                        )
                     team_lp = torch.zeros_like(task_lp)
                     team_entropy = torch.zeros_like(task_entropy)
                     

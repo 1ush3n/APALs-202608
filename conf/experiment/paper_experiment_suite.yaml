@@ -61,10 +61,12 @@ ablations:
     experiment: scale_400_800_schedule
     overrides:
       - policy_action_scope=operation_station
+      - policy_observation_scope=task_station
   operation_only:
     experiment: scale_400_800_schedule
     overrides:
       - policy_action_scope=operation
+      - policy_observation_scope=task
   fixed_preallocation:
     experiment: scale_400_800_schedule
     overrides:

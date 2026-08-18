@@ -47,7 +47,7 @@ STRUCTURAL_FIELDS = {
     "skill_hub_bidirectional", "num_skill_types", "skill_feat_dim",
     "worker_skill_feature_slots",
     "use_input_layer_norm", "use_gat_layer_norm", "use_head_layer_norm",
-    "use_shared_trunk", "policy_action_scope", "conditional_team_max_candidates",
+    "use_shared_trunk", "policy_action_scope", "policy_observation_scope", "conditional_team_max_candidates",
     "conditional_team_gate_bias", "conditional_team_nonbaseline_logit",
     "conditional_team_scoring_mode", "conditional_team_prior_margin",
     "conditional_team_prior_weight", "workforce_binding_mode",
@@ -69,6 +69,7 @@ _VALID_EXPERIMENT_MODES = {
         "operation", "operation_station", "operation_station_worker",
         "operation_station_gated_team", "operation_station_anchor_proposal_team",
     },
+    "policy_observation_scope": {"full", "task", "task_station"},
     "workforce_binding_mode": {"endogenous", "preallocated"},
     "team_selection_mode": {
         "autoregressive", "autoregressive_pressure_v2",
@@ -257,6 +258,10 @@ def validate_runtime_config(config: Config) -> None:
             )
         setattr(config, field_name, value)
     if is_worker_pointer_v2_mode(config):
+        if str(getattr(config, "policy_observation_scope", "full")) != "full":
+            raise ValueError(
+                f"{config.team_selection_mode} 要求 policy_observation_scope=full"
+            )
         if config.policy_action_scope != "operation_station_worker":
             raise ValueError(
                 f"{config.team_selection_mode} 仅允许 "
