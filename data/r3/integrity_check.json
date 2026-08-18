@@ -1,0 +1,21 @@
+{
+  "schema_version": "r3_asset_integrity_v1",
+  "verified_at": "2026-07-28T16:23:05+08:00",
+  "verification_method": "Per-file SHA-256 source-to-copy comparison; this file records the scope and aggregate result.",
+  "sources": {
+    "training_data": "data/generated/reschedule_train_400_600",
+    "training_baselines": "data/generated/reschedule_baselines_400_600_fiveskill_v3/train",
+    "real_baselines": "data/generated/reschedule_baselines_400_600_fiveskill_v3/real",
+    "scenarios": "data/reschedule_scenarios_fiveskill_v3",
+    "checkpoint": "results/01_initial_main/conditional_team_gate_final_warmup50_seed42/conditional_team_gate_final_warmup50_seed42_20260727_164128/eval/initial_sixrun_cpu_temp0_seed42_temp001_seeds42_46_20260727/checkpoint_snapshot/best.ckpt"
+  },
+  "asset_groups": [
+    {"short_path": "data/r3/t", "file_count": 31, "mismatch_count": 0},
+    {"short_path": "data/r3/b/t", "file_count": 30, "mismatch_count": 0},
+    {"short_path": "data/r3/b/r", "file_count": 4, "mismatch_count": 0},
+    {"short_path": "data/r3/s", "file_count": 8, "mismatch_count": 0},
+    {"short_path": "checkpoints/init/g15.ckpt", "file_count": 1, "bytes": 127124342, "sha256": "9e8f9136ac99eaaff7efe1e8bbb14612e6327b03ff69c36f9fee1b6d1b6a3225", "mismatch_count": 0}
+  ],
+  "file_count": 74,
+  "all_match": true
+}
