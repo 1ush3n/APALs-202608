@@ -157,6 +157,41 @@ def test_v2_diagnostics_summarize_action_space_and_eft_rank() -> None:
     assert metrics["PointerV2/EFT/SelectedRankPercentileMean"] == 0.5
 
 
+def test_v2_diagnostics_summarize_legal_eft_feature_quantiles() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+    from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
+
+    diagnostics = WorkerPointerV2Diagnostics(num_skills=5)
+    diagnostics.record_context(
+        build_worker_pressure_context(
+            **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+        ),
+        host_elapsed_ms=1.0,
+    )
+    diagnostics.record_selection(
+        selected_exposure=torch.zeros((1, 12)),
+        entropy=torch.tensor([0.5]),
+        dynamic_eft_features=torch.tensor(
+            [[[0.0, -1.0], [0.2, 0.0], [9.0, 9.0]]]
+        ),
+        selected_worker_index=1,
+        worker_invalid_mask=torch.tensor([[False, False, True]]),
+    )
+
+    metrics = diagnostics.finalize(require_coverage=False)
+
+    assert metrics["RelativeEFT/LegalMean"] == pytest.approx(0.1)
+    assert metrics["RelativeEFT/LegalP50"] == pytest.approx(0.1)
+    assert metrics["RelativeEFT/LegalP90"] == pytest.approx(0.18)
+    assert metrics["RelativeEFT/LegalP99"] == pytest.approx(0.198)
+    assert metrics["RelativeEFT/LegalMax"] == pytest.approx(0.2)
+    assert metrics["ZScoreEFT/LegalMean"] == pytest.approx(-0.5)
+    assert metrics["ZScoreEFT/LegalP50"] == pytest.approx(-0.5)
+    assert metrics["ZScoreEFT/LegalP90"] == pytest.approx(-0.1)
+    assert metrics["ZScoreEFT/LegalP99"] == pytest.approx(-0.01)
+    assert metrics["ZScoreEFT/LegalMax"] == pytest.approx(0.0)
+
+
 def test_v2_gradient_diagnostics_separate_dynamic_eft_projection() -> None:
     from ppo_agent import PPOAgent
 

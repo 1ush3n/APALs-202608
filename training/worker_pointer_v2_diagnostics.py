@@ -27,6 +27,8 @@ class WorkerPointerV2Diagnostics:
     _legal_station_counts: list[torch.Tensor] = field(default_factory=list)
     _legal_worker_counts: list[torch.Tensor] = field(default_factory=list)
     _selected_eft_rank_percentiles: list[torch.Tensor] = field(default_factory=list)
+    _legal_relative_eft: list[torch.Tensor] = field(default_factory=list)
+    _legal_zscore_eft: list[torch.Tensor] = field(default_factory=list)
     _host_elapsed_ms: list[float] = field(default_factory=list)
 
     def reset(self) -> None:
@@ -45,6 +47,8 @@ class WorkerPointerV2Diagnostics:
         self._legal_station_counts.clear()
         self._legal_worker_counts.clear()
         self._selected_eft_rank_percentiles.clear()
+        self._legal_relative_eft.clear()
+        self._legal_zscore_eft.clear()
         self._host_elapsed_ms.clear()
 
     @property
@@ -66,6 +70,8 @@ class WorkerPointerV2Diagnostics:
         tensors.extend(self._legal_station_counts)
         tensors.extend(self._legal_worker_counts)
         tensors.extend(self._selected_eft_rank_percentiles)
+        tensors.extend(self._legal_relative_eft)
+        tensors.extend(self._legal_zscore_eft)
         return sum(tensor.numel() for tensor in tensors)
 
     def record_context(
@@ -123,6 +129,8 @@ class WorkerPointerV2Diagnostics:
         legal_count = legal.sum(dim=1).float()
         percentile = rank / (legal_count - 1.0).clamp_min(1.0)
         self._selected_eft_rank_percentiles.append(percentile.detach())
+        self._legal_relative_eft.append(relative_eft[legal].detach())
+        self._legal_zscore_eft.append(dynamic_eft_features[:, :, 1][legal].detach())
 
     def record_action_space(
         self,
@@ -169,6 +177,21 @@ class WorkerPointerV2Diagnostics:
                 }
             )
         return metrics
+
+    @staticmethod
+    def _scalar_quantile_summaries(prefix: str, values: torch.Tensor) -> dict[str, float]:
+        assert values.ndim == 1 and values.numel() > 0
+        q50, q90, q99 = torch.quantile(
+            values,
+            torch.tensor([0.5, 0.9, 0.99], dtype=torch.float32),
+        )
+        return {
+            f"{prefix}/LegalMean": float(values.mean()),
+            f"{prefix}/LegalP50": float(q50),
+            f"{prefix}/LegalP90": float(q90),
+            f"{prefix}/LegalP99": float(q99),
+            f"{prefix}/LegalMax": float(values.max()),
+        }
 
     def finalize(self, *, require_coverage: bool) -> dict[str, float]:
         if not self._pressure_all:
@@ -243,6 +266,18 @@ class WorkerPointerV2Diagnostics:
                 [value.reshape(-1, 1) for value in self._selected_eft_rank_percentiles]
             )
             metrics["PointerV2/EFT/SelectedRankPercentileMean"] = float(eft_rank.mean())
+        if self._legal_relative_eft:
+            metrics.update(
+                self._scalar_quantile_summaries(
+                    "RelativeEFT", self._cpu_cat(self._legal_relative_eft)
+                )
+            )
+        if self._legal_zscore_eft:
+            metrics.update(
+                self._scalar_quantile_summaries(
+                    "ZScoreEFT", self._cpu_cat(self._legal_zscore_eft)
+                )
+            )
         self.reset()
         return metrics
 
