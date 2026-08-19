@@ -86,6 +86,17 @@ def main(args: Any) -> dict[str, object]:
         configs.verbose_eval_progress = True
     checkpoint_path = resolve_path(args.model_path, PROJECT_ROOT)
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
+    # 关键：与训练中异步验证（async_eval_worker）保持一致——先恢复训练时的完整配置，
+    # 再应用 checkpoint model_spec 与 CLI 显式覆盖。否则评估会沿用 CLI 实验 YAML 的
+    # 默认值（如 lightning_precision=16-mixed、randomize_durations=true），与训练/异步
+    # 验证（bf16-mixed、false）不一致，导致相同权重在两条评估路径上排出不同排程。
+    saved_config = checkpoint.metadata.get("config")
+    if isinstance(saved_config, dict):
+        for key, value in saved_config.items():
+            if key in explicit_fields:
+                continue
+            if hasattr(configs, key):
+                setattr(configs, key, value)
     apply_checkpoint_model_spec(
         configs,
         checkpoint.model_spec,

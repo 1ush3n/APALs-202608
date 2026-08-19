@@ -189,6 +189,7 @@ def _launch_contract(
     checkpoint_format: str,
     model_spec: dict[str, Any],
     protocol: ValidationProtocol,
+    extra_eval_args: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return {
         "run_type": "initial_schedule_sixrun_protocol",
@@ -198,6 +199,7 @@ def _launch_contract(
         "checkpoint_sha256": checkpoint_sha256,
         "checkpoint_format": checkpoint_format,
         "model_spec": model_spec,
+        "extra_eval_args": list(extra_eval_args),
         "source_run_dir": str(source_run_dir),
         "source_resolved_config_sha256": sha256(source_config),
         "source_run_manifest_sha256": sha256(source_manifest),
@@ -223,8 +225,17 @@ def _same_launch_contract(existing: dict[str, Any], expected: dict[str, Any]) ->
         "datasets",
         "runs",
         "expected_run_count",
+        "extra_eval_args",
     )
     return all(existing.get(key) == expected.get(key) for key in keys)
+
+
+def _copy_file_atomic(source: Path, destination: Path) -> None:
+    """先写临时文件再原子替换，避免并行进程共享 output_root 时读到半截文件。"""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    shutil.copy2(source, temporary)
+    temporary.replace(destination)
 
 
 def _write_static_evidence(
@@ -233,8 +244,8 @@ def _write_static_evidence(
     source_manifest: Path,
     launch_contract: dict[str, Any],
 ) -> None:
-    shutil.copy2(source_config, output_root / "resolved_config.yaml")
-    shutil.copy2(source_manifest, output_root / "source_run_manifest.json")
+    _copy_file_atomic(source_config, output_root / "resolved_config.yaml")
+    _copy_file_atomic(source_manifest, output_root / "source_run_manifest.json")
     write_json(output_root / "launch_manifest.json", {**launch_contract, "started_at": utc_now()})
 
 
@@ -364,8 +375,33 @@ def main() -> int:
         action="store_true",
         help="只运行四实例 temperature=0、seed=42；用于 checkpoint 参数态迁移复验",
     )
+    parser.add_argument(
+        "--extra-eval-args",
+        nargs="*",
+        default=[],
+        help="追加到每次 evaluate_model.py 的额外 key=value（用于与 checkpoint 的 "
+        "model_spec 语义对齐，例如 team_selection_mode=autoregressive_pressure_v2）；"
+        "默认空，不影响既有模型的验证命令",
+    )
     parser.add_argument("--dry-run", action="store_true", help="仅校验输入与协议，不执行评估")
+    parser.add_argument(
+        "--datasets",
+        nargs="+",
+        choices=DATASETS,
+        default=None,
+        help="只验证指定的实例子集（如 --datasets 283 680）；缺省验证全部四个实例。"
+        "子集模式只执行评估、不写根级汇总文件，适合多终端并行；"
+        "全部实例完成后用不带 --datasets 的完整命令 --resume 一次性生成汇总。",
+    )
     args = parser.parse_args()
+
+    # 并行模式：允许 --datasets 选择实例子集；协议身份（launch_contract 的
+    # datasets/expected_run_count）始终为完整四实例，保证 --resume 汇总时契约一致。
+    selected_datasets = tuple(args.datasets) if args.datasets else DATASETS
+    if not selected_datasets:
+        raise ValueError("--datasets 不能为空")
+    partial_run = set(selected_datasets) != set(DATASETS)
+    partial_total = len(selected_datasets) * len(RUNS[:1] if args.deterministic_only else RUNS)
 
     protocol = validation_protocol(deterministic_only=bool(args.deterministic_only))
 
@@ -375,7 +411,7 @@ def main() -> int:
     if not checkpoint.is_file() or checkpoint.stat().st_size <= 0:
         raise FileNotFoundError(f"checkpoint 不存在或为空：{checkpoint}")
     source_config, source_manifest = _source_files(source_run_dir)
-    for dataset in DATASETS:
+    for dataset in selected_datasets:
         data_path = PROJECT_ROOT / "data" / f"{dataset}.csv"
         if not data_path.is_file() or data_path.stat().st_size <= 0:
             raise FileNotFoundError(f"缺少验证数据：{data_path}")
@@ -395,6 +431,7 @@ def main() -> int:
         checkpoint_format=loaded_checkpoint.format_name,
         model_spec=asdict(loaded_checkpoint.model_spec),
         protocol=protocol,
+        extra_eval_args=tuple(args.extra_eval_args),
     )
 
     if args.dry_run:
@@ -408,13 +445,16 @@ def main() -> int:
         return 0
 
     if output_root.exists():
-        if not args.resume:
+        # 并行子集模式下多个进程共享同一 output_root，允许直接续跑已存在目录；
+        # 完整模式仍要求 --resume，避免误覆盖已有验证结果。
+        if not args.resume and not partial_run:
             raise FileExistsError(f"输出目录已经存在；请使用 --resume：{output_root}")
         launch_path = output_root / "launch_manifest.json"
-        if not launch_path.is_file():
+        if launch_path.is_file():
+            if not _same_launch_contract(read_json(launch_path), launch_contract):
+                raise ValueError("续跑目录的 checkpoint、训练配置或四实例协议与本次不一致")
+        elif not args.resume and not partial_run:
             raise FileNotFoundError(f"不能续跑无 launch_manifest 的目录：{output_root}")
-        if not _same_launch_contract(read_json(launch_path), launch_contract):
-            raise ValueError("续跑目录的 checkpoint、训练配置或四实例协议与本次不一致")
     else:
         if args.resume:
             raise FileNotFoundError(f"--resume 指定的输出目录不存在：{output_root}")
@@ -426,7 +466,7 @@ def main() -> int:
     environment.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     progress_path = output_root / "progress.json"
     completed: list[dict[str, Any]] = []
-    for dataset in DATASETS:
+    for dataset in selected_datasets:
         for run_name, _temperature, _seed in protocol.runs:
             valid, _reason, payload = verify_completed_run(output_root / f"real_{dataset}" / run_name)
             if valid and payload is not None:
@@ -441,10 +481,12 @@ def main() -> int:
         "failed": None,
         "started_or_resumed_at": utc_now(),
     }
-    write_json(progress_path, progress)
+    if not partial_run:
+        write_json(progress_path, progress)
 
+    total_runs = partial_total if partial_run else protocol.expected_run_count
     try:
-        for dataset in DATASETS:
+        for dataset in selected_datasets:
             for run_name, temperature, seed in protocol.runs:
                 key = run_key(dataset, run_name)
                 run_dir = output_root / f"real_{dataset}" / run_name
@@ -462,29 +504,32 @@ def main() -> int:
                         "failed": None,
                     }
                 )
-                write_json(progress_path, progress)
+                if not partial_run:
+                    write_json(progress_path, progress)
                 ordinal = len(progress["completed"]) + 1
                 print(
-                    f"[开始 {ordinal}/{protocol.expected_run_count}] {key} "
+                    f"[开始 {ordinal}/{total_runs}] {key} "
                     f"temperature={temperature} seed={seed}",
                     flush=True,
                 )
+                command = [
+                    args.python_executable,
+                    "-u",
+                    "evaluate_model.py",
+                    "experiment=initial_main_real4_async_selection",
+                    f"model_path={checkpoint}",
+                    f"test_data=data/{dataset}.csv",
+                    "num_runs=1",
+                    f"temperature={temperature}",
+                    "scenario=standard",
+                    f"seed={seed}",
+                    "no_gantt=true",
+                    "verbose_eval_progress=true",
+                    f"output_dir={run_dir}",
+                ]
+                command.extend(args.extra_eval_args)
                 run_command(
-                    [
-                        args.python_executable,
-                        "-u",
-                        "evaluate_model.py",
-                        "experiment=initial_main_real4_async_selection",
-                        f"model_path={checkpoint}",
-                        f"test_data=data/{dataset}.csv",
-                        "num_runs=1",
-                        f"temperature={temperature}",
-                        "scenario=standard",
-                        f"seed={seed}",
-                        "no_gantt=true",
-                        "verbose_eval_progress=true",
-                        f"output_dir={run_dir}",
-                    ],
+                    command,
                     run_dir / "evaluation.log",
                     environment,
                 )
@@ -509,9 +554,10 @@ def main() -> int:
                 progress["completed"].append({"key": key, **payload, "completed_at": utc_now()})
                 progress["completed_run_count"] = len(progress["completed"])
                 progress["current"] = None
-                write_json(progress_path, progress)
+                if not partial_run:
+                    write_json(progress_path, progress)
                 print(
-                    f"[完成 {progress['completed_run_count']}/{protocol.expected_run_count}] {key} "
+                    f"[完成 {progress['completed_run_count']}/{total_runs}] {key} "
                     f"makespan={payload['makespan']:.6f} legal=yes hard=0",
                     flush=True,
                 )
@@ -525,6 +571,13 @@ def main() -> int:
         write_json(progress_path, progress)
         raise
 
+    if partial_run:
+        print(
+            f"[子集完成] {len(selected_datasets)} 个实例、{len(progress['completed'])} 次评估完成；"
+            "请在所有实例并行完成后运行完整命令 --resume 一次性生成汇总。",
+            flush=True,
+        )
+        return 0
     _write_final_outputs(output_root, launch_contract, progress, protocol=protocol)
     print(
         f"[全部完成] {protocol.expected_run_count}/{protocol.expected_run_count} 次评估与合法性审计完成",

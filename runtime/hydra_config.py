@@ -263,6 +263,7 @@ def apply_hydra_config(
     *,
     target: Config,
     config_paths: tuple[str, ...],
+    validate: bool = True,
 ) -> set[str]:
     resolved = OmegaConf.to_container(hydra_cfg, resolve=True)
     if not isinstance(resolved, Mapping):
@@ -274,7 +275,8 @@ def apply_hydra_config(
         raise KeyError(f"Hydra 配置包含未知字段: {unknown}")
     target.update_from_dict(flat)
     target.config_paths = config_paths
-    validate_runtime_config(target)
+    if validate:
+        validate_runtime_config(target)
     return set(flat)
 
 
@@ -332,8 +334,17 @@ def initialize_hydra_runtime(
         str((config_dir / "experiment" / f"{parsed.experiment}.yaml").resolve()),
         str((config_dir / "hardware" / f"{parsed.hardware}.yaml").resolve()),
     )
-    apply_hydra_config(hydra_cfg, target=target, config_paths=config_paths)
+    apply_hydra_config(
+        hydra_cfg,
+        target=target,
+        config_paths=config_paths,
+        validate=False,  # 统一校验延后到 CLI 覆盖应用之后
+    )
+    # 实验 YAML 内容会作为 experiment 组被 Hydra 包进根键（experiment.model.*），
+    # 展平时可能覆盖 CLI 对根 model.* 的覆盖。因此必须先应用 CLI 覆盖，再校验，
+    # 否则 team_selection_mode 等字段会停留在实验 YAML 的旧值上。
     _apply_cli_leaf_overrides(target, parsed.config_overrides)
+    validate_runtime_config(target)
     # Fast-Exact 平台默认：CLI 未显式 --num_envs 时按平台默认（Windows 4 / Linux 16）解析。
     if is_fast_exact_mode(target):
         resolved_num_envs = resolve_fast_exact_num_envs(
