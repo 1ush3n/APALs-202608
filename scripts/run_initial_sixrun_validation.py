@@ -135,6 +135,24 @@ def verify_completed_run(run_dir: Path) -> tuple[bool, str, dict[str, Any] | Non
         return False, "合法性审计未通过", None
     if max_hard_violation != 0:
         return False, f"存在硬约束违规：max_hard_violation={max_hard_violation}", None
+    # 一致性校验：summary 的 makespan 必须等于 schedule 的最大完工时刻，防止
+    # 根汇总与逐次产物不一致（2026-08-19 ent40 real_680 事故：per-run summary 被改写为
+    # 458.51 而 schedule.csv 仍为 525.51，两版结果混装且未被发现）。
+    try:
+        with schedule_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            ends = [
+                float(row["End"])
+                for row in csv.DictReader(handle)
+                if str(row.get("Team", "")).strip() != "[]"
+            ]
+        schedule_makespan = max(ends) if ends else float("nan")
+    except (OSError, KeyError, ValueError, TypeError) as exc:
+        return False, f"schedule.csv 解析失败：{type(exc).__name__}: {exc}", None
+    if not math.isclose(schedule_makespan, metrics["makespan"], rel_tol=1e-9, abs_tol=1e-3):
+        return False, (
+            f"summary makespan 与 schedule 最大完工时刻不一致："
+            f"summary={metrics['makespan']}, schedule_max_end={schedule_makespan}"
+        ), None
     return True, "ok", {
         **metrics,
         "complete": True,

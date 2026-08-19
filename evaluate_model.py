@@ -75,6 +75,23 @@ def _resolve_scenarios(args: Any) -> list[str] | tuple[str, ...]:
     raise ValueError(f"无法解析评估场景参数: {values!r}")
 
 
+def restore_checkpoint_saved_config(target: Any, checkpoint: Any, explicit_fields: set[str]) -> None:
+    """恢复 checkpoint 保存的训练配置（跳过 CLI 显式覆盖字段）。
+
+    正式评估必须与训练期异步验证（async_eval_worker）使用同一推理环境：先恢复训练时的
+    完整配置，再应用 checkpoint model_spec 与 CLI 显式覆盖。否则评估会沿用 CLI 实验
+    YAML 的默认值（如 lightning_precision=16-mixed、randomize_durations=true），与
+    训练/异步验证（bf16-mixed、false）不一致，导致相同权重在两条评估路径上排出不同排程。
+    """
+    saved_config = checkpoint.metadata.get("config")
+    if isinstance(saved_config, dict):
+        for key, value in saved_config.items():
+            if key in explicit_fields:
+                continue
+            if hasattr(target, key):
+                setattr(target, key, value)
+
+
 def main(args: Any) -> dict[str, object]:
     explicit_fields = set(getattr(args, "explicit_config_fields", set()))
     # 评估温度大于 0 时仍会进行动作采样；必须在加载模型和创建环境前锁定全局随机流。
@@ -86,17 +103,7 @@ def main(args: Any) -> dict[str, object]:
         configs.verbose_eval_progress = True
     checkpoint_path = resolve_path(args.model_path, PROJECT_ROOT)
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
-    # 关键：与训练中异步验证（async_eval_worker）保持一致——先恢复训练时的完整配置，
-    # 再应用 checkpoint model_spec 与 CLI 显式覆盖。否则评估会沿用 CLI 实验 YAML 的
-    # 默认值（如 lightning_precision=16-mixed、randomize_durations=true），与训练/异步
-    # 验证（bf16-mixed、false）不一致，导致相同权重在两条评估路径上排出不同排程。
-    saved_config = checkpoint.metadata.get("config")
-    if isinstance(saved_config, dict):
-        for key, value in saved_config.items():
-            if key in explicit_fields:
-                continue
-            if hasattr(configs, key):
-                setattr(configs, key, value)
+    restore_checkpoint_saved_config(configs, checkpoint, explicit_fields)
     apply_checkpoint_model_spec(
         configs,
         checkpoint.model_spec,
