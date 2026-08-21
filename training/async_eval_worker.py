@@ -155,6 +155,7 @@ def _write_summary_csv(paths: AsyncEvalPaths) -> None:
 
 def _write_schedule(path: Path, schedule: list[Any]) -> None:
     """保留旧单实例异步验证的历史 CSV 格式。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".csv.tmp")
     with temporary.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
