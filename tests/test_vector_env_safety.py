@@ -399,3 +399,41 @@ def test_vector_env_indexed_reset_step_and_switch() -> None:
         finally:
             if vec_env is not None:
                 vec_env.close()
+
+
+def test_snapshot_rebuild_loads_dataset_context_locally() -> None:
+    """重建图时不得通过 Pipe 接收包含 Tensor 的数据集上下文。"""
+    seed_everything(45)
+    overrides = {
+        "n_w": 40,
+        "n_m": 5,
+        "max_slots_per_station": 3,
+        "randomize_durations": False,
+        "enable_dynamic_events": False,
+        "enable_station_breakdown": False,
+        "enable_material_delay": False,
+    }
+
+    vec_env = None
+    with temporary_config(configs, overrides):
+        make_env = EnvCreator(str(PROJECT_ROOT / "data" / "283.csv"), seed_offset=425)
+        vec_env = VectorEnv(make_env, num_envs=1)
+        try:
+            _, snapshots = vec_env.reset_rollout_all(
+                randomize_duration=False, randomize_workers=False
+            )
+            proxy = vec_env.envs[0]
+
+            original_recv = proxy._recv
+
+            def reject_dataset_context_ipc(operation: str):
+                if operation == "initialize_dataset_context":
+                    raise AssertionError("数据集上下文不得通过 Pipe 返回 Tensor")
+                return original_recv(operation)
+
+            proxy._recv = reject_dataset_context_ipc
+            rebuilt = proxy.rebuild_state_from_snapshot(snapshots[0])
+            assert rebuilt["task"].x.shape[0] == proxy.num_tasks
+        finally:
+            if vec_env is not None:
+                vec_env.close()
