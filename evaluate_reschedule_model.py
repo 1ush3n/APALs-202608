@@ -100,6 +100,9 @@ def evaluate_saved_reschedule_model(
     if baseline_path is None or scenario_path is None:
         raise RuntimeError("重调度验证需要 enable_reschedule_mode=True，并且 baseline/固定场景必须可用。")
 
+    is_r5 = str(getattr(configs, "reschedule_async_protocol", "")).strip().lower() == "r5_task_delay_v1"
+    if is_r5 and not torch.cuda.is_available():
+        raise RuntimeError("r5 重调度验证必须使用 CUDA，当前环境没有可用 GPU")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     env = AirLineEnv_Graph(data_path_or_dir=str(resolve_workspace_path(configs.data_file_path)), seed=int(configs.seed))
     model = HBGATPN(configs).to(device)

@@ -80,6 +80,130 @@ def test_async_eval_config_accepts_initial_standard_and_rejects_unsupported_opti
         validate_runtime_config(config)
 
 
+def test_r5_reschedule_async_config_requires_cuda_and_allows_three_workers() -> None:
+    config = Config(async_eval_enabled=True)
+    config.enable_reschedule_mode = True
+    config.reschedule_async_protocol = "r5_task_delay_v1"
+    config.async_eval_device = "cuda"
+    config.async_eval_worker_count = 3
+    config.async_eval_queue_capacity = 3
+    config.async_eval_submit_every_episodes = 2
+    config.async_eval_allow_cpu_fallback = False
+    config.async_eval_instance_id = "validation_0001"
+    config.async_eval_scenario_ids = ["low_early", "medium_early", "high_early"]
+
+    validate_runtime_config(config)
+
+    config.async_eval_device = "cpu"
+    with pytest.raises(ValueError, match="CUDA"):
+        validate_runtime_config(config)
+    config.async_eval_device = "cuda"
+    config.async_eval_queue_capacity = 4
+    with pytest.raises(ValueError, match="队列容量必须为 3"):
+        validate_runtime_config(config)
+
+
+def test_r5_manager_submits_one_group_with_three_scenario_jobs(tmp_path: Path) -> None:
+    config = Config(async_eval_enabled=True)
+    config.enable_reschedule_mode = True
+    config.reschedule_async_protocol = "r5_task_delay_v1"
+    config.async_eval_device = "cuda"
+    config.async_eval_worker_count = 3
+    config.async_eval_queue_capacity = 3
+    config.async_eval_allow_cpu_fallback = False
+    config.async_eval_instance_id = "validation_0001"
+    config.async_eval_scenario_ids = ["low_early", "medium_early", "high_early"]
+    manager = AsyncEvaluationManager(
+        config=config,
+        latest_path=tmp_path / "checkpoints" / "last.ckpt",
+        best_path=tmp_path / "checkpoints" / "best.ckpt",
+        project_root=PROJECT_ROOT,
+    )
+    manager._wait_for_slot = lambda required_slots=1: None  # type: ignore[method-assign]
+    manager._check_health = lambda: None  # type: ignore[method-assign]
+    trainer = SimpleNamespace(save_checkpoint=lambda path: Path(path).write_bytes(b"checkpoint"))
+
+    manager.submit(trainer, episode=2)
+
+    pending = sorted(manager.paths.pending.glob("episode_000002_*.json"))
+    jobs = [json.loads(path.read_text(encoding="utf-8-sig")) for path in pending]
+    assert [job["scenario_id"] for job in jobs] == [
+        "high_early",
+        "low_early",
+        "medium_early",
+    ]
+    assert {job["group_id"] for job in jobs} == {"episode_000002"}
+    assert {tuple(job["group_scenario_ids"]) for job in jobs} == {
+        ("low_early", "medium_early", "high_early")
+    }
+    assert all(job["reschedule_async_protocol"] == "r5_task_delay_v1" for job in jobs)
+
+
+def test_r5_group_publishes_best_only_after_all_three_children_finish(tmp_path: Path) -> None:
+    paths = AsyncEvalPaths.create(tmp_path / "async_eval")
+    candidate = paths.candidates / "episode_000002.ckpt"
+    candidate.write_bytes(b"candidate")
+    writer = SimpleNamespace(add_scalar=lambda *args, **kwargs: None, flush=lambda: None)
+    scenario_ids = ("low_early", "medium_early", "high_early")
+
+    for index, scenario_id in enumerate(scenario_ids):
+        job = {
+            "episode": 2,
+            "job_id": f"episode_000002_{scenario_id}",
+            "group_id": "episode_000002",
+            "group_scenario_ids": list(scenario_ids),
+            "reschedule_async_protocol": "r5_task_delay_v1",
+            "candidate_path": str(candidate),
+            "candidate_sha256": sha256_file(candidate),
+            "best_path": str(tmp_path / "best.ckpt"),
+            "evaluation_kind": "reschedule",
+            "instance_id": "validation_0001",
+            "scenario_id": scenario_id,
+        }
+        result = {
+            "episode": 2,
+            "job_id": job["job_id"],
+            "group_id": job["group_id"],
+            "scenario_id": scenario_id,
+            "eligible": 1.0,
+            "selection_score": float(index + 1),
+            "composite_score": float(index + 1),
+            "makespan": float(100 + index),
+        }
+        _record_result(paths, job, result, [], writer)
+        if index < 2:
+            assert not Path(job["best_path"]).exists()
+
+    assert (tmp_path / "best.ckpt").read_bytes() == b"candidate"
+    aggregate = json.loads(
+        (paths.results / "episode_000002.json").read_text(encoding="utf-8-sig")
+    )
+    assert aggregate["scenario_count"] == 3
+    assert aggregate["eligible"] == 1.0
+    assert aggregate["selection_score"] == pytest.approx(2.0)
+
+
+def test_r5_cuda_oom_never_falls_back_to_cpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from training.async_eval_worker import _evaluate_job_with_cuda_oom_fallback
+
+    devices: list[str] = []
+
+    def _evaluate(job, project_root, *, device):
+        devices.append(device.type)
+        raise torch.cuda.OutOfMemoryError("CUDA out of memory")
+
+    monkeypatch.setattr("training.async_eval_worker._evaluate_job", _evaluate)
+
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        _evaluate_job_with_cuda_oom_fallback(
+            {"episode": 2, "reschedule_async_protocol": "r5_task_delay_v1"},
+            tmp_path,
+            device=torch.device("cuda"),
+        )
+
+    assert devices == ["cuda"]
+
+
 def test_async_manager_records_initial_evaluation_kind(tmp_path: Path) -> None:
     config = Config(async_eval_enabled=True)
     config.data_file_path = "data/283.csv"

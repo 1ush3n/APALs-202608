@@ -145,11 +145,14 @@ def ensure_reschedule_eval_scenarios_available(config_obj=configs) -> Path | Non
     """确保重调度验证使用固定场景文件，而不是每次临时随机生成。"""
     if not getattr(config_obj, "enable_reschedule_mode", False):
         return None
+    is_r5 = str(getattr(config_obj, "reschedule_async_protocol", "")).strip().lower() == "r5_task_delay_v1"
     manifest_entry = resolve_manifest_eval_entry(config_obj)
     if manifest_entry is not None and manifest_entry.scenario_path is not None:
         if not manifest_entry.scenario_path.exists():
             raise FileNotFoundError(f"manifest 指向的固定重调度场景不存在: {manifest_entry.scenario_path}")
         return manifest_entry.scenario_path
+    if is_r5:
+        raise FileNotFoundError("r5 重调度验证必须使用 manifest 中的固定场景，禁止生成临时随机场景")
     scenario_path = resolve_workspace_path(getattr(config_obj, "reschedule_eval_scenario_path", "results/reschedule_eval_scenarios.csv"))
     if scenario_path.exists():
         return scenario_path
@@ -510,6 +513,13 @@ def evaluate_reschedule_model(
 
             constraints = _compute_reschedule_constraint_metrics(env)
             constraints["scenario_id"] = scenario_id
+            scenario_parts = str(scenario_id).split("_", 1)
+            constraints["scenario_severity"] = scenario_parts[0] if scenario_parts[0] in {"low", "medium", "high"} else "custom"
+            constraints["scenario_stage"] = (
+                scenario_parts[1]
+                if len(scenario_parts) == 2 and scenario_parts[1] in {"early", "middle", "late"}
+                else "custom"
+            )
             constraints["scenario_index"] = float(source_idx)
             constraints["scenario_reset_seed"] = float(base_seed + source_idx)
             constraints["reschedule_start_time"] = float(scenario.start_time)
@@ -521,6 +531,7 @@ def evaluate_reschedule_model(
                 release_time_tolerance(configs)
             )
             constraints["complete"] = float(complete)
+            constraints["makespan_is_penalty"] = float(not complete)
             score_result = calculate_reschedule_composite_score(
                 makespan=final_makespan,
                 balance_std=balance,
@@ -529,6 +540,7 @@ def evaluate_reschedule_model(
                 ideal_station_load=float(getattr(env, "ideal_station_load", 1.0)),
             )
             constraints["eligible"] = float(score_result.eligible)
+            constraints["feasible_for_efficiency"] = float(score_result.eligible)
             constraints["composite_score"] = float(score_result.score)
             constraints["selection_score"] = float(score_result.selection_score)
             constraints.update(score_result.terms)
@@ -583,6 +595,8 @@ def evaluate_reschedule_model(
         "mask_mismatch_recovered",
         "release_time_tolerance_hours",
         "complete",
+        "makespan_is_penalty",
+        "feasible_for_efficiency",
         "scenario_reset_seed",
         "reschedule_start_time",
         "delayed_task_count",

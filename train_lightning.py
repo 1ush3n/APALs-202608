@@ -37,6 +37,8 @@ from runtime.reschedule_manifest import resolve_manifest_eval_entry
 from runtime.reschedule_manifest import (
     load_reschedule_manifest,
     resolve_explicit_five_skill_training_paths,
+    resolve_r5_training_paths,
+    validate_r5_manifest_assets,
 )
 from runtime.training_data_manifest import resolve_explicit_five_skill_initial_training_paths
 from utils.reschedule import load_reschedule_scenarios
@@ -270,10 +272,19 @@ def _apply_reschedule_eval_manifest_override() -> None:
 
     if not bool(getattr(configs, "enable_reschedule_mode", False)):
         return
-    entry = resolve_manifest_eval_entry(configs)
+    if str(getattr(configs, "reschedule_async_protocol", "")).strip().lower() == "r5_task_delay_v1":
+        manifest_path = str(getattr(configs, "reschedule_manifest_path", "") or "").strip()
+        if not manifest_path:
+            raise ValueError("r5 重调度训练必须配置 reschedule_manifest_path")
+        manifest = load_reschedule_manifest(manifest_path)
+        validate_r5_manifest_assets(manifest)
+        entry = manifest.get(str(getattr(configs, "async_eval_instance_id", "")))
+    else:
+        entry = resolve_manifest_eval_entry(configs)
     if entry is None:
         return
     configs.data_file_path = str(entry.data_path)
+    configs.reschedule_eval_instance_id = str(entry.instance_id)
     configs.reschedule_baseline_schedule_path = str(entry.baseline_schedule_path)
     if entry.scenario_path is not None:
         configs.reschedule_eval_scenario_path = str(entry.scenario_path)
@@ -426,6 +437,30 @@ def _validate_async_eval_target() -> None:
         raise ValueError("开启异步验证时必须配置 reschedule_manifest_path")
     manifest = load_reschedule_manifest(manifest_path)
     instance_id = str(configs.async_eval_instance_id)
+    if str(getattr(configs, "reschedule_async_protocol", "")).strip().lower() == "r5_task_delay_v1":
+        validate_r5_manifest_assets(manifest)
+        entry = manifest.get(instance_id)
+        if entry.split != "validation":
+            raise ValueError("r5 快速验证实例必须来自 validation split")
+        if entry.scenario_path is None or not entry.scenario_path.is_file():
+            raise FileNotFoundError(f"r5 异步验证实例缺少场景文件: {instance_id}")
+        expected_ids = tuple(
+            str(item) for item in getattr(configs, "async_eval_scenario_ids", [])
+        )
+        available_ids = tuple(
+            str(name) for name, _scenario in load_reschedule_scenarios(entry.scenario_path)
+        )
+        if any(scenario_id not in available_ids for scenario_id in expected_ids):
+            raise KeyError(
+                f"r5 异步验证场景不存在: {instance_id}; expected={expected_ids}; "
+                f"available={available_ids}"
+            )
+        print(
+            f"[AsyncEval] target=r5/{instance_id}/" f"{','.join(expected_ids)} "
+            f"protocol=r5_task_delay_v1",
+            flush=True,
+        )
+        return
     scenario_id = str(configs.async_eval_scenario_id)
     entry = manifest.get(instance_id)
     if entry.scenario_path is None or not entry.scenario_path.is_file():
@@ -700,7 +735,10 @@ def run(args, *, config_initialized: bool = False) -> None:
         if not manifest_path:
             raise ValueError("正式重调度训练必须配置 explicit_fiveskill_v1 manifest")
         training_manifest = load_reschedule_manifest(manifest_path)
-        train_paths = resolve_explicit_five_skill_training_paths(training_manifest, train_path)
+        if str(getattr(configs, "reschedule_async_protocol", "")).strip().lower() == "r5_task_delay_v1":
+            train_paths = resolve_r5_training_paths(training_manifest, train_path)
+        else:
+            train_paths = resolve_explicit_five_skill_training_paths(training_manifest, train_path)
         print(
             f"[Reschedule] 已通过五技能协议及训练文件精确绑定: {training_manifest.path}",
             flush=True,

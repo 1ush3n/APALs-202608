@@ -423,6 +423,11 @@ def validate_runtime_config(config: Config) -> None:
     if int(getattr(config, "eval_mask_mismatch_max_retries_per_time", 16)) < 1:
         raise ValueError("eval_mask_mismatch_max_retries_per_time 必须大于 0")
     if bool(getattr(config, "async_eval_enabled", False)):
+        is_r5_reschedule_async = (
+            bool(getattr(config, "enable_reschedule_mode", False))
+            and str(getattr(config, "reschedule_async_protocol", "")).strip().lower()
+            == "r5_task_delay_v1"
+        )
         selection_protocol = str(
             getattr(config, "checkpoint_selection_protocol", "single_standard")
         ).strip().lower()
@@ -439,8 +444,12 @@ def validate_runtime_config(config: Config) -> None:
             raise ValueError("async_eval_queue_capacity 必须大于 0")
         if int(getattr(config, "async_eval_worker_count", 1)) < 1:
             raise ValueError("async_eval_worker_count 必须大于 0")
-        if async_device.startswith("cuda") and int(getattr(config, "async_eval_worker_count", 1)) > 2:
-            raise ValueError("CUDA 异步验证的 async_eval_worker_count 最大为 2")
+        max_cuda_workers = 3 if is_r5_reschedule_async else 2
+        if async_device.startswith("cuda") and int(getattr(config, "async_eval_worker_count", 1)) > max_cuda_workers:
+            raise ValueError(
+                "CUDA 异步验证的 async_eval_worker_count 最大为 "
+                f"{max_cuda_workers}"
+            )
         if int(getattr(config, "async_eval_submit_every_episodes", 1)) < 1:
             raise ValueError("async_eval_submit_every_episodes 必须大于 0")
         if bool(getattr(config, "enable_reschedule_mode", False)):
@@ -448,7 +457,33 @@ def validate_runtime_config(config: Config) -> None:
                 raise ValueError("重调度异步验证不支持 multiscale_manifest checkpoint 选择")
             if not str(getattr(config, "async_eval_instance_id", "")).strip():
                 raise ValueError("重调度异步验证的 async_eval_instance_id 不能为空")
-            if not str(getattr(config, "async_eval_scenario_id", "")).strip():
+            if is_r5_reschedule_async:
+                if async_device != "cuda":
+                    raise ValueError("r5 重调度异步验证必须使用 CUDA，禁止 CPU 验证")
+                if int(getattr(config, "async_eval_worker_count", 1)) != 3:
+                    raise ValueError("r5 重调度异步验证必须配置 3 个 CUDA worker")
+                if int(getattr(config, "async_eval_queue_capacity", 0)) != 3:
+                    raise ValueError("r5 重调度异步验证的队列容量必须为 3")
+                if bool(getattr(config, "async_eval_allow_cpu_fallback", True)):
+                    raise ValueError("r5 重调度异步验证禁止 CUDA OOM 后回退 CPU")
+                scenario_ids = tuple(
+                    str(item).strip()
+                    for item in getattr(config, "async_eval_scenario_ids", [])
+                    if str(item).strip()
+                )
+                if len(scenario_ids) != 3 or len(set(scenario_ids)) != 3:
+                    raise ValueError(
+                        "r5 重调度异步验证必须提供 3 个不重复的场景 ID"
+                    )
+                if {item.split("_", 1)[0].lower() for item in scenario_ids} != {
+                    "low",
+                    "medium",
+                    "high",
+                }:
+                    raise ValueError(
+                        "r5 重调度异步验证场景必须分别包含 low、medium、high"
+                    )
+            elif not str(getattr(config, "async_eval_scenario_id", "")).strip():
                 raise ValueError("重调度异步验证的 async_eval_scenario_id 不能为空")
         else:
             scenarios = [str(item).lower() for item in getattr(config, "eval_scenarios", [])]

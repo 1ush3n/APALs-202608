@@ -195,7 +195,20 @@ class Config:
     reschedule_scenario_path: str = ""
     reschedule_eval_scenario_path: str = "results/reschedule_eval_scenarios.csv"
     reschedule_eval_scenario_seed: int = 42
+    reschedule_async_protocol: str = ""
     reschedule_train_scenario_mode: str = "config"
+    r5_early_start_ratio: float = 0.225
+    r5_middle_start_ratio: float = 0.400
+    r5_late_start_ratio: float = 0.575
+    r5_low_task_ratio: float = 0.05
+    r5_low_delay_min: float = 5.0
+    r5_low_delay_max: float = 15.0
+    r5_medium_task_ratio: float = 0.10
+    r5_medium_delay_min: float = 10.0
+    r5_medium_delay_max: float = 35.0
+    r5_high_task_ratio: float = 0.18
+    r5_high_delay_min: float = 20.0
+    r5_high_delay_max: float = 60.0
     reschedule_start_time_min_ratio: float = 0.15
     reschedule_start_time_max_ratio: float = 0.65
     reschedule_delay_task_prob: float = 0.08
@@ -228,6 +241,8 @@ class Config:
     checkpoint_selection_manifest_path: str = ""
     async_eval_instance_id: str = "real_680"
     async_eval_scenario_id: str = "medium_000"
+    async_eval_scenario_ids: list[str] = field(default_factory=list)
+    async_eval_allow_cpu_fallback: bool = True
     async_eval_wait_on_finish: bool = True
     async_eval_failure_policy: str = "fail"
     async_eval_max_retries: int = 1

@@ -23,6 +23,29 @@ class AsyncEvaluationError(RuntimeError):
     """异步验证进程、队列或最优模型发布进入不可恢复状态。"""
 
 
+R5_RESCHEDULE_ASYNC_PROTOCOL = "r5_task_delay_v1"
+
+
+def _ordered_r5_scenario_ids(config: Any) -> tuple[str, ...]:
+    """按 low/medium/high 返回 r5 快速验证的三个固定场景。"""
+    raw_ids = tuple(
+        str(item).strip()
+        for item in getattr(config, "async_eval_scenario_ids", [])
+        if str(item).strip()
+    )
+    by_severity = {
+        str(item).split("_", 1)[0].lower(): str(item)
+        for item in raw_ids
+        if "_" in str(item)
+    }
+    expected = ("low", "medium", "high")
+    if len(raw_ids) != 3 or set(by_severity) != set(expected):
+        raise AsyncEvaluationError(
+            "r5 重调度异步验证必须提供 low、medium、high 三个固定场景"
+        )
+    return tuple(by_severity[item] for item in expected)
+
+
 def _save_async_candidate_checkpoint(trainer: Any, path: Path) -> None:
     """以 ScheduleFree 评估参数态保存异步候选。"""
     module = getattr(trainer, "lightning_module", None)
@@ -180,7 +203,7 @@ def restore_interrupted_jobs(paths: AsyncEvalPaths) -> None:
 
 
 class AsyncEvaluationManager:
-    """管理可恢复、有界的异步验证队列。CUDA 模式限定单 worker。"""
+    """管理可恢复、有界的异步验证队列；r5 重调度组固定使用 3 个 CUDA worker。"""
 
     def __init__(
         self,
@@ -198,10 +221,28 @@ class AsyncEvaluationManager:
         self.capacity = int(config.async_eval_queue_capacity)
         self.worker_count = int(getattr(config, "async_eval_worker_count", 1))
         self.device = str(getattr(config, "async_eval_device", "cpu")).strip().lower()
+        self.is_r5_reschedule = bool(
+            getattr(config, "enable_reschedule_mode", False)
+        ) and str(getattr(config, "reschedule_async_protocol", "")).strip().lower() == R5_RESCHEDULE_ASYNC_PROTOCOL
+        self.r5_scenario_ids = (
+            _ordered_r5_scenario_ids(config) if self.is_r5_reschedule else ()
+        )
         if self.device not in {"cpu", "cuda", "cuda:0"}:
             raise AsyncEvaluationError(f"async_eval_device 仅允许 cpu、cuda 或 cuda:0，实际为 {self.device!r}")
-        if self.device.startswith("cuda") and self.worker_count > 2:
-            raise AsyncEvaluationError("CUDA 异步验证的 async_eval_worker_count 最大为 2")
+        max_cuda_workers = 3 if self.is_r5_reschedule else 2
+        if self.device.startswith("cuda") and self.worker_count > max_cuda_workers:
+            raise AsyncEvaluationError(
+                f"CUDA 异步验证的 async_eval_worker_count 最大为 {max_cuda_workers}"
+            )
+        if self.is_r5_reschedule:
+            if self.device != "cuda":
+                raise AsyncEvaluationError("r5 重调度异步验证必须使用 CUDA")
+            if self.worker_count != 3:
+                raise AsyncEvaluationError("r5 重调度异步验证必须使用 3 个 CUDA worker")
+            if self.capacity != len(self.r5_scenario_ids):
+                raise AsyncEvaluationError("r5 异步验证队列容量必须为 3")
+            if bool(getattr(config, "async_eval_allow_cpu_fallback", True)):
+                raise AsyncEvaluationError("r5 重调度异步验证禁止 CPU fallback")
         self.poll_interval = float(config.async_eval_poll_interval_sec)
         self.heartbeat_interval = float(config.async_eval_heartbeat_interval_sec)
         self.stale_timeout = float(config.async_eval_stale_timeout_sec)
@@ -339,9 +380,14 @@ class AsyncEvaluationManager:
                 f"异步验证 worker 心跳超时: age={age:.1f}s limit={self.stale_timeout:.1f}s"
             )
 
-    def _wait_for_slot(self) -> None:
+    def _wait_for_slot(self, required_slots: int = 1) -> None:
         self._start_workers()
-        while self._active_job_count() >= self.capacity:
+        required_slots = int(required_slots)
+        if required_slots < 1 or required_slots > self.capacity:
+            raise AsyncEvaluationError(
+                f"异步验证所需槽位非法: required={required_slots} capacity={self.capacity}"
+            )
+        while self._active_job_count() + required_slots > self.capacity:
             self._check_health()
             now = time.monotonic()
             if now - self._last_wait_log >= self.heartbeat_interval:
@@ -355,19 +401,35 @@ class AsyncEvaluationManager:
 
     def submit(self, trainer: Any, *, episode: int) -> Path:
         """保存完整候选 checkpoint，并在文件完整后原子发布队列任务。"""
-        self._wait_for_slot()
+        if self.is_r5_reschedule:
+            self._wait_for_slot(required_slots=len(self.r5_scenario_ids))
+        else:
+            self._wait_for_slot()
         self._check_health()
-        job_name = f"episode_{int(episode):06d}.json"
-        collisions = [
-            directory / job_name
-            for directory in (self.paths.pending, self.paths.running, self.paths.done, self.paths.failed)
-            if (directory / job_name).exists()
-        ]
-        if collisions:
-            raise AsyncEvaluationError(
-                f"episode={episode} 已存在异步验证记录，拒绝覆盖: {collisions[0]}"
-            )
         candidate = self.paths.candidates / f"episode_{int(episode):06d}.ckpt"
+        group_id = f"episode_{int(episode):06d}"
+        if candidate.exists():
+            raise AsyncEvaluationError(f"异步候选 checkpoint 已存在，拒绝覆盖: {candidate}")
+        preflight_job_names = (
+            [f"{group_id}_{scenario_id}.json" for scenario_id in self.r5_scenario_ids]
+            if self.is_r5_reschedule
+            else [f"{group_id}.json"]
+        )
+        for job_name in preflight_job_names:
+            collisions = [
+                directory / job_name
+                for directory in (
+                    self.paths.pending,
+                    self.paths.running,
+                    self.paths.done,
+                    self.paths.failed,
+                )
+                if (directory / job_name).exists()
+            ]
+            if collisions:
+                raise AsyncEvaluationError(
+                    f"异步验证任务已存在，拒绝覆盖: {collisions[0]}"
+                )
         temporary = candidate.with_name(f".{candidate.name}.{uuid.uuid4().hex}.tmp")
         try:
             _save_async_candidate_checkpoint(trainer, temporary)
@@ -388,6 +450,7 @@ class AsyncEvaluationManager:
         job: dict[str, Any] = {
             "format_version": 2,
             "episode": int(episode),
+            "job_id": group_id,
             "candidate_path": str(candidate.resolve()),
             "candidate_sha256": candidate_sha256,
             "best_path": str(self.best_path),
@@ -399,6 +462,56 @@ class AsyncEvaluationManager:
             "use_cached_observation": bool(self.config.async_eval_use_cached_observation),
             "submitted_at": time.time(),
         }
+        if self.is_r5_reschedule:
+            group_jobs: list[tuple[Path, dict[str, Any]]] = []
+            for scenario_id in self.r5_scenario_ids:
+                job_id = f"{group_id}_{scenario_id}"
+                child_job = {
+                    **job,
+                    "job_id": job_id,
+                    "group_id": group_id,
+                    "group_scenario_ids": list(self.r5_scenario_ids),
+                    "reschedule_async_protocol": R5_RESCHEDULE_ASYNC_PROTOCOL,
+                    "instance_id": str(self.config.async_eval_instance_id),
+                    "scenario_id": scenario_id,
+                }
+                job_path = self.paths.pending / f"{job_id}.json"
+                collisions = [
+                    directory / job_path.name
+                    for directory in (
+                        self.paths.pending,
+                        self.paths.running,
+                        self.paths.done,
+                        self.paths.failed,
+                    )
+                    if (directory / job_path.name).exists()
+                ]
+                if collisions:
+                    raise AsyncEvaluationError(
+                        f"异步验证任务已存在，拒绝覆盖: {collisions[0]}"
+                    )
+                group_jobs.append((job_path, child_job))
+            for job_path, child_job in group_jobs:
+                atomic_write_json(job_path, child_job)
+            print(
+                f"[AsyncEval] ep={episode} 已入队 r5 分组 kind=reschedule "
+                f"target={self.config.async_eval_instance_id}/"
+                f"{','.join(self.r5_scenario_ids)} "
+                f"group={group_id} active={self._active_job_count()}/{self.capacity}",
+                flush=True,
+            )
+            return candidate
+
+        job_name = f"{group_id}.json"
+        collisions = [
+            directory / job_name
+            for directory in (self.paths.pending, self.paths.running, self.paths.done, self.paths.failed)
+            if (directory / job_name).exists()
+        ]
+        if collisions:
+            raise AsyncEvaluationError(
+                f"episode={episode} 已存在异步验证记录，拒绝覆盖: {collisions[0]}"
+            )
         if evaluation_kind == "reschedule":
             job["instance_id"] = str(self.config.async_eval_instance_id)
             job["scenario_id"] = str(self.config.async_eval_scenario_id)

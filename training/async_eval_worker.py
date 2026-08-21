@@ -24,6 +24,9 @@ from training.async_evaluation import (
 from runtime.initial_checkpoint_selection import sha256_file
 
 
+R5_RESCHEDULE_ASYNC_PROTOCOL = "r5_task_delay_v1"
+
+
 class _Heartbeat:
     def __init__(self, path: Path, interval_sec: float) -> None:
         self.path = path
@@ -417,6 +420,12 @@ def _evaluate_job(job: dict[str, Any], project_root: Path, *, device: "torch.dev
         raise ValueError("异步重调度验证候选不是重调度模型")
     if evaluation_kind != "reschedule" and is_reschedule:
         raise ValueError(f"初始调度异步验证候选错误地启用了重调度模式: {evaluation_kind}")
+    if (
+        str(job.get("reschedule_async_protocol", "")).strip().lower()
+        == R5_RESCHEDULE_ASYNC_PROTOCOL
+        and device.type != "cuda"
+    ):
+        raise RuntimeError("r5 重调度异步验证必须使用 CUDA worker")
     set_seed(int(configs.reschedule_eval_scenario_seed) if evaluation_kind == "reschedule" else int(configs.seed))
 
     if evaluation_kind == "initial_multi_benchmark":
@@ -424,12 +433,16 @@ def _evaluate_job(job: dict[str, Any], project_root: Path, *, device: "torch.dev
 
     common = {
         "episode": int(job["episode"]),
+        "job_id": str(job.get("job_id", "")),
+        "group_id": str(job.get("group_id", "")),
         "evaluation_kind": evaluation_kind,
         "instance_id": str(job["instance_id"]),
         "scenario_id": str(job["scenario_id"]),
         "candidate_path": str(job["candidate_path"]),
         "candidate_sha256": str(job.get("candidate_sha256", "")),
     }
+    if job.get("reschedule_async_protocol"):
+        common["reschedule_async_protocol"] = str(job["reschedule_async_protocol"])
     if evaluation_kind == "reschedule":
         from runtime.reschedule_eval import evaluate_reschedule_model
         from runtime.reschedule_manifest import load_reschedule_manifest
@@ -503,23 +516,116 @@ def _is_better_candidate(score: float, episode: int, best_state: dict[str, Any])
     )
 
 
-def _record_result(paths: AsyncEvalPaths, job: dict[str, Any], result: dict[str, Any], schedule: list[Any], writer: Any) -> None:
+def _group_result_paths(paths: AsyncEvalPaths, job: dict[str, Any]) -> tuple[Path, ...]:
+    group_id = str(job.get("group_id", "")).strip()
+    scenario_ids = tuple(str(item) for item in job.get("group_scenario_ids", []))
+    if not group_id or not scenario_ids:
+        return ()
+    return tuple(paths.results / f"{group_id}_{scenario_id}.json" for scenario_id in scenario_ids)
+
+
+def _mean_result_field(rows: list[dict[str, Any]], key: str) -> float:
+    values = [float(row[key]) for row in rows if isinstance(row.get(key), (int, float))]
+    return float(np.mean(values)) if values else 0.0
+
+
+def _aggregate_group_results(
+    paths: AsyncEvalPaths,
+    job: dict[str, Any],
+) -> dict[str, Any] | None:
+    result_paths = _group_result_paths(paths, job)
+    if not result_paths or not all(path.is_file() for path in result_paths):
+        return None
+    rows = [json.loads(path.read_text(encoding="utf-8-sig")) for path in result_paths]
+    scenario_ids = tuple(str(item) for item in job["group_scenario_ids"])
+    if tuple(str(row.get("scenario_id", "")) for row in rows) != scenario_ids:
+        raise RuntimeError("r5 异步验证子任务结果与预期场景顺序不一致")
+    all_eligible = all(float(row.get("eligible", 0.0)) >= 1.0 - 1e-9 for row in rows)
+    selection_values = [float(row.get("selection_score", float("inf"))) for row in rows]
+    selection_score = (
+        float(np.mean(selection_values))
+        if all(math.isfinite(value) for value in selection_values)
+        else float("inf")
+    )
+    first = rows[0]
+    aggregate = {
+        "episode": int(job["episode"]),
+        "job_id": str(job.get("group_id", "")),
+        "group_id": str(job.get("group_id", "")),
+        "evaluation_kind": "reschedule",
+        "reschedule_async_protocol": R5_RESCHEDULE_ASYNC_PROTOCOL,
+        "instance_id": str(job["instance_id"]),
+        "scenario_id": "|".join(scenario_ids),
+        "scenario_ids": list(scenario_ids),
+        "scenario_count": len(rows),
+        "group_complete": 1.0,
+        "candidate_path": str(job["candidate_path"]),
+        "candidate_sha256": str(job.get("candidate_sha256", "")),
+        "temperature": float(job.get("temperature", 0.0)),
+        "eligible": float(all_eligible),
+        "eligible_rate": float(np.mean([float(row.get("eligible", 0.0)) for row in rows])),
+        "selection_score": selection_score,
+        "composite_score": _mean_result_field(rows, "composite_score"),
+        "makespan": _mean_result_field(rows, "makespan"),
+        "balance": _mean_result_field(rows, "balance"),
+        "reward": _mean_result_field(rows, "reward"),
+        "duration_sec": _mean_result_field(rows, "duration_sec"),
+        "worker_utilization": _mean_result_field(rows, "worker_utilization"),
+        "station_utilization": _mean_result_field(rows, "station_utilization"),
+        "scenario_results": rows,
+    }
+    if "best_path" in job:
+        aggregate["best_path"] = str(job["best_path"])
+    if "use_cached_observation" in first:
+        aggregate["use_cached_observation"] = bool(first["use_cached_observation"])
+    return aggregate
+
+
+def _record_result(
+    paths: AsyncEvalPaths,
+    job: dict[str, Any],
+    result: dict[str, Any],
+    schedule: list[Any],
+    writer: Any,
+) -> bool:
+    """写入结果；分组任务只有在全部子任务完成后才允许删除候选并选择 best。"""
     episode = int(job["episode"])
     candidate_path = _verified_candidate_path(job)
     expected_sha256 = str(job.get("candidate_sha256", "")).strip().lower()
-    # 两个 worker 可同时完成；结果 JSON 与汇总 CSV 必须作为一个串行发布区间。
+    job_id = str(job.get("job_id", f"episode_{episode:06d}"))
+    is_group = bool(job.get("group_id"))
+    child_result_path = paths.results / f"{job_id}.json"
+    aggregate_result: dict[str, Any] | None = None
+    if is_group and schedule:
+        _write_schedule(
+            paths.results / str(job["group_id"]) / f"{job['scenario_id']}_schedule.csv",
+            schedule,
+        )
+
+    # 多 worker 可同时完成；子结果和分组聚合必须作为一个串行发布区间。
     with _ExclusivePidLock(paths.result_lock):
-        atomic_write_json(paths.results / f"episode_{episode:06d}.json", result)
+        atomic_write_json(child_result_path, result)
+        if is_group:
+            aggregate_result = _aggregate_group_results(paths, job)
+            if aggregate_result is not None:
+                atomic_write_json(
+                    paths.results / f"{job['group_id']}.json",
+                    aggregate_result,
+                )
         _write_summary_csv(paths)
-    for key, value in result.items():
+    selected_result = aggregate_result if aggregate_result is not None else result
+    for key, value in selected_result.items():
         if isinstance(value, (int, float)) and math.isfinite(float(value)):
             writer.add_scalar(f"AsyncEval/{key}", float(value), episode)
     writer.flush()
 
-    eligible = float(result.get("eligible", 0.0)) >= 1.0 - 1e-9
-    score = float(result["selection_score"])
+    if is_group and aggregate_result is None:
+        return False
+
+    eligible = float(selected_result.get("eligible", 0.0)) >= 1.0 - 1e-9
+    score = float(selected_result["selection_score"])
     if not eligible or not math.isfinite(score):
-        return
+        return True
     with _ExclusivePidLock(paths.selection_lock):
         best_state_path = paths.state / "best.json"
         best_state = json.loads(best_state_path.read_text(encoding="utf-8-sig")) if best_state_path.exists() else {"selection_score": float("inf")}
@@ -530,7 +636,7 @@ def _record_result(paths: AsyncEvalPaths, job: dict[str, Any], result: dict[str,
             else score < float(best_state.get("selection_score", float("inf")))
         )
         if not is_better:
-            return
+            return True
         _atomic_copy_file(candidate_path, Path(job["best_path"]))
         best_sha256 = sha256_file(Path(job["best_path"]))
         if expected_sha256 and best_sha256 != expected_sha256:
@@ -539,7 +645,15 @@ def _record_result(paths: AsyncEvalPaths, job: dict[str, Any], result: dict[str,
                 f"expected={expected_sha256} actual={best_sha256}"
             )
         best_artifacts = paths.results / "best"
-        if is_multiscale:
+        if is_group:
+            for scenario_id in job["group_scenario_ids"]:
+                schedule_path = paths.results / str(job["group_id"]) / f"{scenario_id}_schedule.csv"
+                if schedule_path.exists():
+                    _atomic_copy_file(
+                        schedule_path,
+                        best_artifacts / f"{job['group_id']}_{scenario_id}_schedule.csv",
+                    )
+        elif is_multiscale:
             for row in result["instances"]:
                 instance_id = str(row["instance_id"])
                 _atomic_copy_file(Path(row["schedule_path"]), best_artifacts / f"{instance_id}_schedule.csv")
@@ -551,27 +665,35 @@ def _record_result(paths: AsyncEvalPaths, job: dict[str, Any], result: dict[str,
             "episode": episode,
             "evaluation_kind": str(job.get("evaluation_kind", "reschedule")),
             "selection_score": score,
-            "composite_score": float(result.get("composite_score", score)),
-            "makespan": float(result["makespan"]),
+            "composite_score": float(selected_result.get("composite_score", score)),
+            "makespan": float(selected_result["makespan"]),
             "instance_id": str(job["instance_id"]),
-            "scenario_id": str(job["scenario_id"]),
+            "scenario_id": str(selected_result.get("scenario_id", job.get("scenario_id", ""))),
             "best_path": str(job["best_path"]),
             "candidate_sha256": expected_sha256,
             "best_checkpoint_sha256": best_sha256,
-            "result_path": str(paths.results / f"episode_{episode:06d}.json"),
+            "result_path": str(
+                paths.results / f"{job['group_id'] if is_group else job_id}.json"
+            ),
             "updated_at": time.time(),
         }
-        if is_multiscale:
-            best_state["selection_manifest_sha256"] = str(result["selection_manifest_sha256"])
-            best_state["selection_protocol_id"] = str(result["selection_protocol_id"])
-            best_state["instances"] = result["instances"]
+        if is_group:
+            best_state["group_id"] = str(job["group_id"])
+            best_state["scenario_ids"] = list(job["group_scenario_ids"])
+            best_state["scenario_count"] = len(job["group_scenario_ids"])
+            best_state["reschedule_async_protocol"] = R5_RESCHEDULE_ASYNC_PROTOCOL
+        elif is_multiscale:
+            best_state["selection_manifest_sha256"] = str(selected_result["selection_manifest_sha256"])
+            best_state["selection_protocol_id"] = str(selected_result["selection_protocol_id"])
+            best_state["instances"] = selected_result["instances"]
         # best.json 是所有 checkpoint 与审计产物完成后的提交标记。
         atomic_write_json(best_state_path, best_state)
         print(
             f"[AsyncEval][Best] ep={episode} score={score:.6f} "
-            f"mk={float(result['makespan']):.2f} path={job['best_path']}",
+            f"mk={float(selected_result['makespan']):.2f} path={job['best_path']}",
             flush=True,
         )
+    return True
 
 
 def _evaluate_job_with_cuda_oom_fallback(
@@ -592,6 +714,8 @@ def _evaluate_job_with_cuda_oom_fallback(
         return result, schedule
     except torch.cuda.OutOfMemoryError:
         if device.type != "cuda":
+            raise
+        if str(job.get("reschedule_async_protocol", "")).strip().lower() == R5_RESCHEDULE_ASYNC_PROTOCOL:
             raise
         gc.collect()
         torch.cuda.empty_cache()
@@ -653,11 +777,12 @@ def run_worker(
                             project_root,
                             device=device,
                         )
-                        _record_result(paths, job, result, schedule, writer)
+                        candidate_can_delete = _record_result(paths, job, result, schedule, writer)
                         done_payload = {**job, "completed_at": time.time(), "worker_duration_sec": time.time() - start_time, "result": result}
                         atomic_write_json(paths.done / running_path.name, done_payload)
                         running_path.unlink(missing_ok=True)
-                        Path(job["candidate_path"]).unlink(missing_ok=True)
+                        if candidate_can_delete:
+                            Path(job["candidate_path"]).unlink(missing_ok=True)
                         print(
                             f"[AsyncEval][Done] ep={episode} score={float(result['selection_score']):.6f} "
                             f"elig={int(float(result.get('eligible', 0.0)) >= 1.0 - 1e-9)} "

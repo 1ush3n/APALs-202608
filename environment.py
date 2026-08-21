@@ -39,6 +39,7 @@ from utils.reschedule import (
     sample_task_delay_load_scenario,
     sample_task_delay_scenario,
 )
+from utils.reschedule_r5 import sample_r5_training_scenario
 from runtime.reschedule_manifest import resolve_manifest_entry_for_data
 
 Action = Tuple[int, int, List[int]]
@@ -386,6 +387,34 @@ class AirLineEnv_Graph(gym.Env):
         scenario_path = str(getattr(configs, "reschedule_scenario_path", "") or "").strip()
         if scenario_path:
             return load_reschedule_scenario(self._resolve_project_path(scenario_path))
+        if str(getattr(configs, "reschedule_train_scenario_mode", "config")) == "r5_task_delay_v1":
+            _scenario_id, scenario = sample_r5_training_scenario(
+                baseline,
+                rng=self.np_random,
+                stage_ratios={
+                    "early": float(getattr(configs, "r5_early_start_ratio", 0.225)),
+                    "middle": float(getattr(configs, "r5_middle_start_ratio", 0.400)),
+                    "late": float(getattr(configs, "r5_late_start_ratio", 0.575)),
+                },
+                severity_specs={
+                    "low": (
+                        float(getattr(configs, "r5_low_task_ratio", 0.05)),
+                        float(getattr(configs, "r5_low_delay_min", 5.0)),
+                        float(getattr(configs, "r5_low_delay_max", 15.0)),
+                    ),
+                    "medium": (
+                        float(getattr(configs, "r5_medium_task_ratio", 0.10)),
+                        float(getattr(configs, "r5_medium_delay_min", 10.0)),
+                        float(getattr(configs, "r5_medium_delay_max", 35.0)),
+                    ),
+                    "high": (
+                        float(getattr(configs, "r5_high_task_ratio", 0.18)),
+                        float(getattr(configs, "r5_high_delay_min", 20.0)),
+                        float(getattr(configs, "r5_high_delay_max", 60.0)),
+                    ),
+                },
+            )
+            return scenario
         if str(getattr(configs, "reschedule_train_scenario_mode", "config")) == "uniform_load":
             _level, scenario = sample_task_delay_load_scenario(
                 baseline,

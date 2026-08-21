@@ -37,7 +37,11 @@ from runtime.hydra_config import (
     should_show_help,
 )
 from runtime.paths import resolve_workspace_path
-from runtime.reschedule_manifest import load_reschedule_manifest
+from runtime.reschedule_manifest import (
+    REAL_INSTANCE_IDS,
+    load_reschedule_manifest,
+    validate_r5_manifest_assets,
+)
 from runtime.initial_worker_mapping import apply_initial_worker_mapping
 
 
@@ -97,6 +101,15 @@ def evaluate_manifest_instances(
     checkpoint = load_checkpoint(model_path)
     apply_checkpoint_model_spec(configs, checkpoint.model_spec, explicit_fields=explicit_fields)
     manifest = load_reschedule_manifest(manifest_path)
+    is_r5 = str(manifest.payload.get("reschedule_protocol", "")).strip() == "r5_task_delay_v1"
+    if is_r5:
+        validate_r5_manifest_assets(manifest)
+        if tuple(instance_ids) != REAL_INSTANCE_IDS:
+            raise ValueError(f"r5 正式测试必须精确使用四个真实实例: {REAL_INSTANCE_IDS}")
+        if num_runs is not None or scenario_ids is not None:
+            raise ValueError("r5 正式测试必须读取每个真实实例的全部 9 个固定场景")
+        if abs(float(temperature)) > 1e-12:
+            raise ValueError("r5 正式测试必须使用 temperature=0")
     output_dir.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
     summaries: dict[str, Any] = {}
@@ -135,6 +148,11 @@ def evaluate_manifest_instances(
                 "data_path": str(entry.data_path),
                 "baseline_schedule_path": str(entry.baseline_schedule_path),
                 "scenario_path": str(entry.scenario_path),
+                "data_sha256": entry.data_sha256,
+                "baseline_sha256": entry.baseline_sha256,
+                "scenario_sha256": entry.scenario_sha256,
+                "scenario_metadata_path": str(entry.scenario_metadata_path or ""),
+                "scenario_metadata_sha256": entry.scenario_metadata_sha256,
                 "num_tasks": entry.num_tasks,
                 "baseline_makespan": entry.baseline_makespan,
                 "scenario_count": summary.get("scenario_count", 0),
@@ -146,6 +164,11 @@ def evaluate_manifest_instances(
                 "worker_util": summary.get("worker_util", 0.0),
                 "station_util": summary.get("station_util", 0.0),
             }
+            if is_r5 and int(summary_row["scenario_count"]) != 9:
+                raise ValueError(
+                    f"r5 实例 {instance_id} 必须恰好评估 9 个场景，"
+                    f"实际为 {summary_row['scenario_count']}"
+                )
             rows.append(summary_row)
             summaries[instance_id] = summary
             print(
@@ -157,6 +180,9 @@ def evaluate_manifest_instances(
             )
     finally:
         _restore_config(backup)
+
+    if is_r5 and sum(int(row["scenario_count"]) for row in rows) != 36:
+        raise ValueError("r5 正式测试必须恰好包含 36 个场景")
 
     csv_path = output_dir / "reschedule_eval_by_instance.csv"
     json_path = output_dir / "reschedule_eval_summary.json"
