@@ -229,23 +229,6 @@ class AirLineEnv_Graph(gym.Env):
             "file_path": str(ctx["file_path"]),
             "num_tasks": None if "num_tasks" not in ctx else int(ctx["num_tasks"]),
         }
-
-    def export_dataset_context(self, idx: int) -> dict[str, Any]:
-        """按需导出主进程重建 observation 所需的静态上下文。"""
-        ctx = self._ensure_dataset_context(idx)
-        required = (
-            "file_path",
-            "num_tasks",
-            "base_data",
-            "base_task_x",
-            "base_station_x",
-            "task_skill_edge_index",
-            "full_can_do_edge_index",
-            "mean_task_time",
-            "ideal_station_load",
-        )
-        return {key: ctx[key] for key in required}
-
     def _skill_hub_topology(
         self,
         task_skill_edge_index: torch.Tensor,

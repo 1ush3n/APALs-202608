@@ -843,27 +843,22 @@ class GPUExactBatchBuilder:
                 )
 
     def _load_dataset_context(self, dataset_idx: int) -> dict:
-        """获取数据集上下文，兼容向量环境（EnvProxy 懒加载）与本地 env。
-
-        EnvProxy 的 dataset_pool 通过 IPC 懒加载（与 rebuild_state_from_snapshot
-        的防御机制一致）；本地 env 直接返回预加载上下文。
-        """
+        """获取数据集上下文；EnvProxy 在主进程按路径懒加载。"""
         pool = getattr(self.env, "dataset_pool", None)
         if isinstance(pool, list):
             while len(pool) <= dataset_idx:
                 pool.append(None)
             ctx = pool[dataset_idx]
             if ctx is None or "base_data" not in ctx:
-                conn = getattr(self.env, "_conn", None)
-                recv = getattr(self.env, "_recv", None)
-                if conn is None or recv is None:
+                load_locally = getattr(
+                    self.env, "_load_dataset_context_locally", None
+                )
+                if not callable(load_locally):
                     raise RuntimeError(
                         "无法初始化数据集上下文 "
-                        f"dataset_idx={dataset_idx}: env 无 IPC 初始化通道"
+                        f"dataset_idx={dataset_idx}: env 无本地加载通道"
                     )
-                conn.send(("initialize_dataset_context", dataset_idx))
-                ctx = recv("initialize_dataset_context")
-                pool[dataset_idx] = ctx
+                ctx = load_locally(dataset_idx)
             return ctx
         if isinstance(pool, dict):
             ctx = pool.get(dataset_idx)
