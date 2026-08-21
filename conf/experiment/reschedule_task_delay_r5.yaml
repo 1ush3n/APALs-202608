@@ -13,6 +13,11 @@ experiment:
   lr: 1.0e-4
   actor_lr_multiplier: 1.0
 
+model:
+  team_selection_mode: autoregressive_pressure_v2
+  worker_pointer_context_version: pressure_v2_normwork_headcount_physicalwait_v1
+  worker_pointer_v2_dynamic_eft_features: true
+
 reschedule_task_delay:
   enable_reschedule_mode: true
   reschedule_async_protocol: r5_task_delay_v1

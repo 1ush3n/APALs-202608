@@ -236,6 +236,9 @@ def test_r5_experiment_enables_only_reschedule_fast_async_validation() -> None:
     assert config.async_eval_worker_count == 3
     assert config.async_eval_submit_every_episodes == 2
     assert config.async_eval_scenario_ids == ["low_early", "medium_early", "high_early"]
+    assert config.team_selection_mode == "autoregressive_pressure_v2"
+    assert config.worker_pointer_context_version == "pressure_v2_normwork_headcount_physicalwait_v1"
+    assert config.worker_pointer_v2_dynamic_eft_features is True
 
 
 def test_r5_solver_seed_policy_expands_only_stochastic_methods() -> None:
