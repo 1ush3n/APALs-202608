@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from baselines.heuristic.reschedule_rules import DEFAULT_RULE_METHODS, rule_registry
 from configs import configs
 from runtime.artifacts import resolve_run_output_dir, write_run_context_files, write_run_manifest
+from runtime.initial_worker_mapping import apply_initial_worker_mapping
 from runtime.hydra_config import (
     ExtraArgument,
     HydraCliError,
@@ -331,8 +332,15 @@ def _format_progress_row(row: dict[str, Any], completed: int, total: int, *, ela
     )
 
 
-def _apply_rule_job_config(config_snapshot: dict[str, Any], *, baseline_path: str, scenario_path: str) -> None:
+def _apply_rule_job_config(
+    config_snapshot: dict[str, Any],
+    *,
+    data_path: str,
+    baseline_path: str,
+    scenario_path: str,
+) -> None:
     configs.update_from_dict(config_snapshot)
+    apply_initial_worker_mapping(configs, data_path, explicit_fields=set())
     configs.enable_dynamic_events = False
     configs.enable_station_breakdown = False
     configs.enable_material_delay = False
@@ -368,6 +376,7 @@ def _evaluate_rule_job(job: dict[str, Any]) -> dict[str, Any]:
     try:
         _apply_rule_job_config(
             dict(job["config_snapshot"]),
+            data_path=str(job["data_path"]),
             baseline_path=str(job["baseline_path"]),
             scenario_path=str(job["scenario_path"]),
         )
