@@ -27,8 +27,10 @@ from baselines.graph_baseline import GraphBaselineActorCritic
 from baselines.literature.common import (
     evaluate_graph_policy,
     export_best_schedule,
+    is_r5_learning_protocol,
     load_training_metrics,
     make_eval_env,
+    LiteratureCheckpointSaver,
     prepare_literature_output,
     save_literature_checkpoint,
     training_data_source,
@@ -38,6 +40,7 @@ from configs import configs
 from ppo_agent import PPOAgent
 from runtime.hydra_config import ExtraArgument, HydraCliError, hydra_help, initialize_hydra_runtime, should_show_help
 from runtime.seed import set_seed
+from training.async_evaluation import AsyncEvaluationManager
 from training.rollout_service import APALRolloutService
 from utils.device_utils import clear_torch_cache, get_available_device
 from utils.vector_env import EnvCreator, VectorEnv
@@ -171,6 +174,10 @@ def train(args: Any) -> None:
     start_time = time.time()
     device = get_available_device()
 
+    r5_protocol = is_r5_learning_protocol(configs)
+    if r5_protocol and device.type != "cuda":
+        raise RuntimeError("r5 literature PPO 训练期异步验证必须使用 CUDA")
+
     train_vector_env = _build_training_vector_env(args, seed=seed)
     eval_env = make_eval_env(args, seed=seed)
     model = SimpleHeteroGATPPO(configs).to(device)
@@ -201,6 +208,12 @@ def train(args: Any) -> None:
         eval_env=eval_env,
         config=configs,
         device=device,
+    )
+
+    async_manager = (
+        AsyncEvaluationManager(config=configs, latest_path=latest_path, best_path=best_path, project_root=PROJECT_ROOT)
+        if r5_protocol
+        else None
     )
 
     if bool(getattr(args, "resume", False)):
@@ -271,39 +284,49 @@ def train(args: Any) -> None:
         }
 
         if episode % int(getattr(configs, "eval_freq", 1)) == 0:
-            eval_metrics, eval_schedule, _eval_runs = evaluate_graph_policy(
-                agent.policy,
-                eval_env,
-                device,
-                seed=seed,
-                num_runs=1,
-                temperature=float(getattr(configs, "eval_temperature", 0.0)),
-            )
-            row.update(
-                {
-                    "eval_makespan": float(eval_metrics["makespan"]),
-                    "eval_valid": float(eval_metrics["valid"]),
-                    "eval_complete": float(eval_metrics["complete"]),
-                    "eval_inference_time": float(eval_metrics["inference_time"]),
-                }
-            )
-            if eval_metrics["valid"] >= 1.0 and float(eval_metrics["makespan"]) < best_makespan:
-                best_makespan = float(eval_metrics["makespan"])
-                best_eval_schedule = list(eval_schedule)
-                _save_checkpoint(
-                    best_path,
-                    agent,
-                    best_makespan,
-                    args,
-                    episode=episode,
-                    dataset_selector_state=_service_dataset_state(service),
+            if r5_protocol:
+                if episode % int(getattr(configs, "async_eval_submit_every_episodes", 2)) == 0:
+                    assert async_manager is not None
+                    async_manager.submit(
+                        LiteratureCheckpointSaver(
+                            lambda path: _save_checkpoint(path, agent, best_makespan, args, episode=episode, dataset_selector_state=_service_dataset_state(service))
+                        ),
+                        episode=episode,
+                    )
+            else:
+                eval_metrics, eval_schedule, _eval_runs = evaluate_graph_policy(
+                    agent.policy,
+                    eval_env,
+                    device,
+                    seed=seed,
+                    num_runs=1,
+                    temperature=float(getattr(configs, "eval_temperature", 0.0)),
                 )
-                export_best_schedule(output_dir, best_eval_schedule, title="simple_heterogat_ppo_best")
-                print(
-                    f"[{METHOD_NAME}][Checkpoint] ep={episode} 保存最优模型 "
-                    f"Mk={best_makespan:.2f} path={best_path}",
-                    flush=True,
+                row.update(
+                    {
+                        "eval_makespan": float(eval_metrics["makespan"]),
+                        "eval_valid": float(eval_metrics["valid"]),
+                        "eval_complete": float(eval_metrics["complete"]),
+                        "eval_inference_time": float(eval_metrics["inference_time"]),
+                    }
                 )
+                if eval_metrics["valid"] >= 1.0 and float(eval_metrics["makespan"]) < best_makespan:
+                    best_makespan = float(eval_metrics["makespan"])
+                    best_eval_schedule = list(eval_schedule)
+                    _save_checkpoint(
+                        best_path,
+                        agent,
+                        best_makespan,
+                        args,
+                        episode=episode,
+                        dataset_selector_state=_service_dataset_state(service),
+                    )
+                    export_best_schedule(output_dir, best_eval_schedule, title="simple_heterogat_ppo_best")
+                    print(
+                        f"[{METHOD_NAME}][Checkpoint] ep={episode} 保存最优模型 "
+                        f"Mk={best_makespan:.2f} path={best_path}",
+                        flush=True,
+                    )
 
         rows.append(row)
         print(
@@ -334,6 +357,8 @@ def train(args: Any) -> None:
         episode=max_episodes,
         dataset_selector_state=_service_dataset_state(service),
     )
+    if async_manager is not None:
+        async_manager.finalize(wait=True)
     write_training_metrics(output_dir, rows)
     print(f"[{METHOD_NAME}] done elapsed={time.time() - start_time:.1f}s best={best_makespan:.2f}", flush=True)
     clear_torch_cache()

@@ -214,6 +214,17 @@ def load_checkpoint_agent_for_evaluation(job: dict[str, Any], device: "torch.dev
     from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint, load_policy_weights
 
     candidate_path = _verified_candidate_path(job)
+    raw_checkpoint = torch.load(candidate_path, map_location="cpu", weights_only=False)
+    if isinstance(raw_checkpoint, dict) and raw_checkpoint.get("checkpoint_format") == "literature_baseline_v2":
+        saved_config = raw_checkpoint.get("config")
+        if not isinstance(saved_config, dict):
+            raise ValueError("literature 异步 checkpoint 缺少 config")
+        configs.update_from_dict(saved_config)
+        from baselines.literature.common import LiteraturePolicyAdapter
+        from baselines.literature.evaluate_literature_baseline import _build_model
+
+        model = _build_model(raw_checkpoint, device)
+        return raw_checkpoint, saved_config, LiteraturePolicyAdapter(model, device)
     checkpoint = load_checkpoint(candidate_path, map_location="cpu")
     saved_config = checkpoint.metadata.get("config")
     if not isinstance(saved_config, dict):

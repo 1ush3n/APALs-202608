@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,11 @@ from configs import configs
 from environment import AirLineEnv_Graph
 from env_wrapper import standardize_env_step
 from runtime.artifacts import resolve_run_output_dir, write_run_context_files, write_run_manifest
+from runtime.reschedule_manifest import (
+    R5_RESCHEDULE_PROTOCOL,
+    load_reschedule_manifest,
+    resolve_r5_training_paths,
+)
 from runtime.seed import set_seed
 from training.memory import Memory
 from training.observation import refresh_env_observation
@@ -32,6 +38,18 @@ def resolve_project_path(path_like: str | Path) -> Path:
 
 
 def training_data_source(args: Any) -> Path:
+    if is_r5_learning_protocol(configs):
+        configured = resolve_project_path(
+            getattr(args, "train_data_path_or_dir", None)
+            or getattr(configs, "train_data_path_or_dir", None)
+            or getattr(args, "data_path", None)
+            or getattr(configs, "data_file_path", Path("data") / "283.csv")
+        )
+        resolve_literature_training_paths(args, config=configs)
+        path = configured
+        if not path.exists():
+            raise FileNotFoundError(f"训练数据不存在: {path}")
+        return path
     raw = (
         getattr(args, "train_data_path_or_dir", None)
         or getattr(configs, "train_data_path_or_dir", None)
@@ -46,7 +64,12 @@ def training_data_source(args: Any) -> Path:
 
 
 def eval_data_source(args: Any) -> Path:
-    raw = getattr(args, "data_path", None) or getattr(configs, "data_file_path", None) or Path("data") / "283.csv"
+    if is_r5_learning_protocol(configs):
+        manifest = load_reschedule_manifest(resolve_project_path(getattr(configs, "reschedule_manifest_path")))
+        entry = next(item for item in manifest.entries if item.instance_id == "validation_0001")
+        raw = entry.data_path
+    else:
+        raw = getattr(args, "data_path", None) or getattr(configs, "data_file_path", None) or Path("data") / "283.csv"
     path = resolve_project_path(raw)
     if not path.exists():
         raise FileNotFoundError(f"验证数据不存在: {path}")
@@ -308,6 +331,8 @@ def save_literature_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
     worker_layout = resolve_worker_feature_layout(configs)
     payload = {
+        "checkpoint_format": "literature_baseline_v2",
+        "config": configs.to_flat_dict(),
         "algorithm": algorithm,
         "literature_family": literature_family,
         "feature_mode": LITERATURE_FEATURE_MODE,
@@ -362,3 +387,84 @@ def load_training_metrics(output_dir: Path, *, before_episode: int, filename: st
     if "episode" in frame.columns:
         frame = frame[frame["episode"].astype(int) < int(before_episode)]
     return frame.to_dict("records")
+
+
+R5_LEARNING_SCENARIO_LEVELS = ("low_early", "medium_early", "high_early")
+
+
+def is_r5_learning_protocol(config: Any) -> bool:
+    return str(getattr(config, "reschedule_async_protocol", "")) == R5_RESCHEDULE_PROTOCOL
+
+
+def validate_r5_learning_protocol(config: Any) -> None:
+    if not is_r5_learning_protocol(config):
+        return
+    if not bool(getattr(config, "async_eval_enabled", False)):
+        raise ValueError("r5 学习型 baseline 必须启用异步验证")
+    if str(getattr(config, "async_eval_device", "")).lower() != "cuda":
+        raise ValueError("r5 学习型 baseline 必须使用 CUDA")
+    if int(getattr(config, "async_eval_worker_count", 0)) != 3:
+        raise ValueError("r5 学习型 baseline 必须使用 3 个 CUDA worker")
+    if int(getattr(config, "async_eval_submit_every_episodes", 0)) != 2:
+        raise ValueError("r5 学习型 baseline 必须每 2 轮验证")
+    if bool(getattr(config, "async_eval_allow_cpu_fallback", True)):
+        raise ValueError("r5 学习型 baseline 禁止 CPU fallback")
+    if tuple(getattr(config, "async_eval_scenario_ids", ())) != R5_LEARNING_SCENARIO_LEVELS:
+        raise ValueError("r5 学习型 baseline 必须验证 low/medium/high 三个场景")
+
+
+def r5_group_selection_score(rows: list[dict[str, Any]]) -> float:
+    if len(rows) != len(R5_LEARNING_SCENARIO_LEVELS) or any(
+        not bool(float(row.get("eligible", 0.0))) for row in rows
+    ):
+        return float("inf")
+    return float(np.mean([float(row["selection_score"]) for row in rows]))
+
+
+def is_better_r5_group(score: float, episode: int, best: dict[str, Any] | None) -> bool:
+    if not math.isfinite(float(score)):
+        return False
+    if best is None:
+        return True
+    best_score = float(best.get("selection_score", float("inf")))
+    return float(score) < best_score or (
+        float(score) == best_score and int(episode) < int(best.get("episode", 10**18))
+    )
+
+
+def resolve_literature_training_paths(args: Any, *, config: Any = configs) -> tuple[Path, ...]:
+    configured = resolve_project_path(
+        getattr(args, "train_data_path_or_dir", None)
+        or getattr(config, "train_data_path_or_dir", None)
+        or getattr(args, "data_path", None)
+        or getattr(config, "data_file_path", Path("data") / "283.csv")
+    )
+    if is_r5_learning_protocol(config):
+        manifest_path = resolve_project_path(getattr(config, "reschedule_manifest_path"))
+        return tuple(resolve_r5_training_paths(load_reschedule_manifest(manifest_path), configured))
+    return (configured,)
+
+
+class LiteraturePolicyAdapter:
+    def __init__(self, model: torch.nn.Module, device: torch.device) -> None:
+        self.policy = model
+        self.device = device
+        self.use_schedule_free = False
+        self.optimizer = None
+
+    def select_action(self, state: Any, *, mask_task: Any, mask_station_matrix: Any, mask_worker: Any,
+                      deterministic: bool, temperature: float, is_eval: bool, **_: Any) -> tuple[Any, Any, Any, None, bool]:
+        del is_eval
+        result = select_graph_action(
+            self.policy, state, masks=(mask_task, mask_station_matrix, mask_worker),
+            device=self.device, deterministic=bool(deterministic), temperature=float(temperature), need_value=False,
+        )
+        return result.action, getattr(result, "logprob", None), getattr(result, "value", None), None, result.action is None
+
+
+class LiteratureCheckpointSaver:
+    def __init__(self, save_fn: Any) -> None:
+        self._save_fn = save_fn
+
+    def save_checkpoint(self, path: str) -> None:
+        self._save_fn(Path(path))

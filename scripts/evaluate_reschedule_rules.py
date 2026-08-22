@@ -71,6 +71,14 @@ RULE_EXTRA_ARGS = {
     "output_dir": ExtraArgument(default=None, help="输出目录；缺省写入本次 run 的 eval/reschedule_rules"),
 }
 
+RULE_EXTRA_ARGS.update(
+    beam_width=ExtraArgument(default=4, help=RULE_EXTRA_ARGS["beam_width"].help),
+    beam_branch_factor=ExtraArgument(default=4, help=RULE_EXTRA_ARGS["beam_branch_factor"].help),
+    beam_levels=ExtraArgument(default=4, help=RULE_EXTRA_ARGS["beam_levels"].help),
+    beam_patience=ExtraArgument(default=2, help=RULE_EXTRA_ARGS["beam_patience"].help),
+    ig_iterations=ExtraArgument(default=80, help=RULE_EXTRA_ARGS["ig_iterations"].help),
+    sa_iterations=ExtraArgument(default=120, help=RULE_EXTRA_ARGS["sa_iterations"].help),
+)
 PARTIAL_FILE_NAME = "reschedule_rule_eval_partial.csv"
 RESUME_STATE_FILE_NAME = "reschedule_rule_resume_state.json"
 R5_STOCHASTIC_METHODS = frozenset(

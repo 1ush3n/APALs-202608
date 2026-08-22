@@ -47,6 +47,8 @@ reschedule_task_delay:
   async_eval_wait_on_finish: true
   async_eval_failure_policy: fail
   async_eval_instance_id: validation_0001
+  ddqn_enable_vector_env: true
+  ddqn_num_envs: 4
   async_eval_scenario_ids:
     - low_early
     - medium_early
