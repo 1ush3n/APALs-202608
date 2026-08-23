@@ -696,17 +696,38 @@ class VectorEnv:
         except (TypeError, ValueError):
             return max(1, (os.cpu_count() or 1) // max(1, int(num_envs)))
 
+    def _send_worker(self, index: int, command: tuple[str, Any]) -> None:
+        if self.closed:
+            raise VectorEnvWorkerError(
+                "VectorEnv 已关闭或因 worker 失败而失效，不可复用"
+            )
+        try:
+            self.parent_conns[index].send(command)
+        except Exception as exc:
+            self.close()
+            raise VectorEnvWorkerError(
+                f"VectorEnv worker {index} 命令发送失败，环境已失效且不可复用"
+            ) from exc
+
     def _recv_worker(self, index: int, operation: str):
         conn = self.parent_conns[index]
         process = self.processes[index]
         if not conn.poll(self.command_timeout_sec):
             state = "alive" if process.is_alive() else f"exitcode={process.exitcode}"
+            self.close()
             raise TimeoutError(
                 f"VectorEnv worker {index} 执行 {operation} 超时 "
                 f"({self.command_timeout_sec:.1f}s, {state})"
             )
-        status, value = conn.recv()
+        try:
+            status, value = conn.recv()
+        except (EOFError, OSError) as exc:
+            self.close()
+            raise VectorEnvWorkerError(
+                f"VectorEnv worker {index} 执行 {operation} 时通信中断"
+            ) from exc
         if status != "OK":
+            self.close()
             raise VectorEnvWorkerError(
                 f"VectorEnv worker {index} 执行 {operation} 失败:\n{value}"
             )
@@ -727,6 +748,7 @@ class VectorEnv:
                     process = self.processes[index]
                     state = "alive" if process.is_alive() else f"exitcode={process.exitcode}"
                     details.append(f"{index}:{state}")
+                self.close()
                 raise TimeoutError(
                     f"VectorEnv workers 执行 {operation} 超时 "
                     f"({self.command_timeout_sec:.1f}s, pending={','.join(details)})"
@@ -738,9 +760,16 @@ class VectorEnv:
 
             for conn in ready:
                 index = conn_to_index[conn]
-                status, value = conn.recv()
+                try:
+                    status, value = conn.recv()
+                except (EOFError, OSError) as exc:
+                    self.close()
+                    raise VectorEnvWorkerError(
+                        f"VectorEnv worker {index} 执行 {operation} 时通信中断"
+                    ) from exc
                 pending.pop(index, None)
                 if status != "OK":
+                    self.close()
                     raise VectorEnvWorkerError(
                         f"VectorEnv worker {index} 执行 {operation} 失败:\n{value}"
                     )
@@ -751,7 +780,7 @@ class VectorEnv:
     def reset_all(self, randomize_duration: bool = False, randomize_workers: bool = False) -> List[Any]:
         """异步广播复位指令并同步收集子图状态"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('reset', {'randomize_duration': randomize_duration, 'randomize_workers': randomize_workers}))
+            self._send_worker(i, ('reset', {'randomize_duration': randomize_duration, 'randomize_workers': randomize_workers}))
         
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "reset")
         results = []
@@ -776,7 +805,7 @@ class VectorEnv:
             'randomize_workers': bool(randomize_workers),
         }
         for index in range(self.num_envs):
-            self.parent_conns[index].send(('reset_rollout', request))
+            self._send_worker(index, ('reset_rollout', request))
         worker_results = self._recv_workers_unordered(
             list(range(self.num_envs)),
             "reset_rollout",
@@ -800,7 +829,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(("reset", dict(requests[index])))
+            self._send_worker(index, ("reset", dict(requests[index])))
         worker_results = self._recv_workers_unordered(target_indices, "reset")
         results: dict[int, Any] = {}
         for index in target_indices:
@@ -813,7 +842,7 @@ class VectorEnv:
     def step_all(self, actions: List[Any]) -> Tuple[List[Any], List[float], List[bool], List[dict]]:
         """异步发送物理步进指令并收集步进后的全部观测及奖励数据"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('step', actions[i]))
+            self._send_worker(i, ('step', actions[i]))
                 
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "step")
         results = []
@@ -832,7 +861,7 @@ class VectorEnv:
     def step_snapshot_all(self, actions: List[Any]) -> Tuple[List[dict], List[float], List[bool], List[dict]]:
         """异步步进并返回轻量 snapshot，主进程本地 rebuild 以消除 HeteroData 跨进程序列化开销"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('step_snapshot', actions[i]))
+            self._send_worker(i, ('step_snapshot', actions[i]))
                 
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "step_snapshot")
         results = []
@@ -857,7 +886,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(("step_snapshot", actions[index]))
+            self._send_worker(index, ("step_snapshot", actions[index]))
         worker_results = self._recv_workers_unordered(target_indices, "step_snapshot")
         results: dict[int, tuple[dict, float, bool, dict]] = {}
         for index in target_indices:
@@ -885,7 +914,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(('step_rollout', actions[index]))
+            self._send_worker(index, ('step_rollout', actions[index]))
         worker_results = self._recv_workers_unordered(target_indices, "step_rollout")
         results = {}
         for index in target_indices:
@@ -904,7 +933,7 @@ class VectorEnv:
     def get_masks_all(self) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """异步收集各进程环境的动作空间掩码"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('get_masks', None))
+            self._send_worker(i, ('get_masks', None))
         
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "get_masks")
         results = []
@@ -916,7 +945,7 @@ class VectorEnv:
     def get_masks_and_snapshots_all(self):
         """合并 IPC：一次命令返回 masks + snapshot + dynamic_info，替代 get_masks_all() + 逐环境 get_state_snapshot()"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('get_rollout_state', None))
+            self._send_worker(i, ('get_rollout_state', None))
         
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "get_rollout_state")
         masks_list = []
@@ -934,7 +963,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(('get_rollout_state', None))
+            self._send_worker(index, ('get_rollout_state', None))
 
         worker_results = self._recv_workers_unordered(target_indices, "get_rollout_state")
         results = {}
@@ -955,7 +984,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(('try_wait_for_resources', None))
+            self._send_worker(index, ('try_wait_for_resources', None))
 
         worker_results = self._recv_workers_unordered(target_indices, "try_wait_for_resources")
         results = {}
@@ -981,7 +1010,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(('wait_rollout', None))
+            self._send_worker(index, ('wait_rollout', None))
         worker_results = self._recv_workers_unordered(target_indices, "wait_rollout")
         results = {}
         for index in target_indices:
@@ -1001,7 +1030,7 @@ class VectorEnv:
     def switch_dataset_all(self, idx: int):
         """同步广播命令给所有并行子进程切换相同的数据集"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('switch_dataset', idx))
+            self._send_worker(i, ('switch_dataset', idx))
             
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "switch_dataset")
         for i in range(self.num_envs):
@@ -1015,8 +1044,9 @@ class VectorEnv:
         if not target_indices:
             return
         for index in target_indices:
-            self.parent_conns[index].send(
-                ("switch_dataset", int(dataset_indices[index]))
+            self._send_worker(
+                index,
+                ("switch_dataset", int(dataset_indices[index])),
             )
         worker_results = self._recv_workers_unordered(
             target_indices,

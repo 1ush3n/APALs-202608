@@ -175,7 +175,7 @@ def run_heuristic_eval(env, rule, num_runs=1, seed=42):
     # EDD 也必须使用统一可行性解码器；直接逐步贪心会在技能工人
     # 暂时不可用时误报死锁。解码器会保留 EDD 的 ES 优先级，同时
     # 处理资源等待和硬约束。
-    safe_decoder_rules = {"SPT", "EDD", "CPM", "MSL"}
+    safe_decoder_rules = {"SPT", "LPT", "EDD", "CPM", "MSL"}
 
     for run in range(num_runs):
         run_seed = seed + run

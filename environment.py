@@ -696,10 +696,9 @@ class AirLineEnv_Graph(gym.Env):
         super().reset(seed=seed, options=options)
         # 新版 gymnasium 会将 np_random 覆盖为 np.random.Generator，
         # 但环境内部大量使用 RandomState API（如 .rand()），因此显式回退
+        # seed=None 时保留当前 RandomState，确保随机流连续推进。
         if seed is not None:
             self.np_random = np.random.RandomState(seed)
-        else:
-            self.np_random = np.random.RandomState()
              
         # ====================
         # [Domain Randomization] Worker Pool Sampling

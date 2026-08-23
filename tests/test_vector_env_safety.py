@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from configs import configs
 from tests.runtime_safety import seed_everything, temporary_config
-from utils.vector_env import EnvCreator, VectorEnv
+from utils.vector_env import EnvCreator, VectorEnv, VectorEnvWorkerError
 from worker_feature_layout import resolve_worker_feature_layout
 
 
@@ -32,6 +32,21 @@ pytestmark = pytest.mark.vector_safe
 class _FailingEnvCreator:
     def __call__(self, index: int):
         raise RuntimeError(f"worker-{index}-init-failure")
+
+
+class _ResetFailureEnvCreator:
+    def __call__(self, index: int) -> object:
+        env = EnvCreator(
+            str(PROJECT_ROOT / "data" / "283.csv"),
+            seed_offset=1000,
+        )(index)
+        if index == 0:
+            def fail_reset(**_kwargs: object) -> None:
+                raise RuntimeError("worker-0-reset-failure")
+
+            env.reset = fail_reset
+        return env
+
 
 
 def _pick_simple_actions(obs_list, masks_list):
@@ -127,6 +142,33 @@ def test_vector_env_initialization_failure_is_reported_without_hanging() -> None
     assert after_children <= before_children, (
         f"VectorEnv close 后仍有多余子进程: before={before_children}, after={after_children}"
     )
+
+
+def test_vector_env_worker_failure_closes_and_forbids_reuse() -> None:
+    vector_env = VectorEnv(
+        _ResetFailureEnvCreator(),
+        num_envs=2,
+        start_method="spawn",
+        worker_threads=1,
+        init_timeout_sec=30.0,
+        command_timeout_sec=30.0,
+    )
+    try:
+        with pytest.raises(
+            VectorEnvWorkerError,
+            match="worker-0-reset-failure",
+        ):
+            vector_env.reset_all()
+
+        assert vector_env.closed
+        assert all(not process.is_alive() for process in vector_env.processes)
+        with pytest.raises(
+            VectorEnvWorkerError,
+            match="不可复用",
+        ):
+            vector_env.reset_all()
+    finally:
+        vector_env.close()
 
 
 def _assert_masks_equal(left, right) -> None:

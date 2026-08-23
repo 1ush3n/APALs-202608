@@ -25,6 +25,7 @@ def test_manifest_evaluation_preserves_manifest_and_current_instance(monkeypatch
 
     manifest_path = tmp_path / "manifest.json"
     manifest = SimpleNamespace(
+        path=manifest_path,
         payload={"reschedule_protocol": "r5_task_delay_v1"},
         get=entries.__getitem__,
     )

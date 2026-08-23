@@ -11,22 +11,33 @@
   7. 课程学习：curriculum_episodes 强制关闭随机化
   8. 多次 reset 产生不同的随机化效果
 """
+from collections.abc import Iterator
 import sys
 import os
 import copy
 import numpy as np
 import torch
+import pytest
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT_DIR)
 
-import configs
-from configs import Config
+from configs import Config, configs
 from environment import AirLineEnv_Graph
 
 TOTAL_TESTS = 0
 PASSED_TESTS = 0
 FAILED_TESTS = []
+
+
+@pytest.fixture(autouse=True)
+def _restore_global_config_after_each_case() -> Iterator[None]:
+    original = configs.to_flat_dict()
+    try:
+        yield
+    finally:
+        configs.update_from_dict(original)
+
 
 
 def check(condition, name):
@@ -38,6 +49,7 @@ def check(condition, name):
     else:
         FAILED_TESTS.append(name)
         print(f"  [FAIL] {name}")
+        raise AssertionError(name)
 
 
 def test_worker_pool_random_sampling():
@@ -186,6 +198,7 @@ def test_multiple_resets_vary():
     print("\n--- test_multiple_resets_vary ---")
     DATA = os.path.join(ROOT_DIR, "data", "283.csv")
     configs.n_w = 40
+    configs.n_w_min = 40
     configs.n_m = 5
     configs.enable_dynamic_events = False
 

@@ -20,6 +20,7 @@ from runtime.modes import (
     is_worker_pointer_v2_mode,
 )
 from runtime.paths import PROJECT_ROOT
+from worker_feature_layout import LOCK_STATE_DIM
 
 
 EXPLICIT_OVERRIDES = {
@@ -250,6 +251,18 @@ def resolve_fast_exact_num_envs(
 
 
 def validate_runtime_config(config: Config) -> None:
+    if int(config.update_every_episodes) != 1:
+        raise ValueError("当前训练编排仅支持 update_every_episodes=1")
+    max_stations = LOCK_STATE_DIM - 1
+    if int(config.n_m) > max_stations:
+        raise ValueError(
+            f"工位锁特征仅能表示 0..{max_stations}，n_m 最大为 {max_stations}；"
+            f"收到 {int(config.n_m)}"
+        )
+    if float(config.sample_temperature) != 1.0:
+        raise ValueError(
+            "PPO 采样与重算分布一致性要求 sample_temperature=1.0"
+        )
     for field_name, choices in _VALID_EXPERIMENT_MODES.items():
         value = str(getattr(config, field_name)).lower()
         if value not in choices:

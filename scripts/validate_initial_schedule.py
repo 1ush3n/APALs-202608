@@ -113,7 +113,6 @@ def validate_schedule(
 
     env = AirLineEnv_Graph(data_path_or_dir=data_path, seed=int(getattr(configs, "seed", 42)))
     env.reset(randomize_duration=False, randomize_workers=False, seed=int(getattr(configs, "seed", 42)))
-    worker_skill_matrix = env.worker_skill_matrix.detach().cpu().numpy()
 
     required_columns = {"TaskID", "StationID", "Team", "Start", "End", "Duration"}
     violations: dict[str, int] = {
@@ -149,19 +148,8 @@ def validate_schedule(
     }
 
     operation_ids = set(int(value) for value in task_df["internal_id"].tolist())
-    valid_ids = [int(value) for value in mapped_ids.dropna().tolist()]
-    seen: set[int] = set()
-    duplicate_ids: set[int] = set()
-    for task_id in valid_ids:
-        if task_id in seen:
-            duplicate_ids.add(task_id)
-        seen.add(task_id)
-    violations["duplicate_task_count"] = len(duplicate_ids)
-    violations["missing_task_count"] = len(operation_ids - seen)
 
     rows: dict[int, dict[str, Any]] = {}
-    worker_intervals: dict[int, list[tuple[float, float, int]]] = {}
-    station_intervals: dict[int, list[tuple[float, float, int]]] = {}
     ratios: list[float] = []
     real_task_count = 0
     scheduled_real_task_count = 0
@@ -186,8 +174,6 @@ def validate_schedule(
             "end": end,
             "duration": actual_duration,
         }
-        if start < -tolerance or end < start - tolerance:
-            violations["negative_or_reversed_time_count"] += 1
         if abs(csv_duration - actual_duration) > tolerance:
             violations["csv_duration_mismatch_count"] += 1
 
@@ -199,24 +185,10 @@ def validate_schedule(
         if is_real and actual_duration > tolerance:
             scheduled_real_task_count += 1
 
-        fixed_station = task["fixed_station"]
-        if is_real and not pd.isna(fixed_station) and station_csv != int(fixed_station):
-            violations["fixed_station_violation_count"] += 1
-            if len(examples["fixed_station"]) < 10:
-                examples["fixed_station"].append(
-                    {
-                        "task_id": task_id,
-                        "expected_station": int(fixed_station),
-                        "schedule_station": station_csv,
-                    }
-                )
-        if is_real and not (1 <= station_csv <= int(env.num_stations)):
-            violations["station_range_violation_count"] += 1
 
         team = _parse_team(row["Team"])
         station_internal = station_csv - 1 if station_csv > 0 else -1
         assignments.append((task_id, station_internal, team, start, end))
-        demand = int(task["demand_workers"])
         if is_real:
             expected_env_duration = float(env.calculate_duration(task_id, team, start_time_est=start))
             ratios.append(actual_duration / expected_env_duration if expected_env_duration > 0 else 0.0)
@@ -231,96 +203,21 @@ def validate_schedule(
                             "schedule_duration": actual_duration,
                         }
                     )
-        if is_real and len(team) != demand:
-            violations["demand_violation_count"] += 1
-            if len(examples["demand"]) < 10:
-                examples["demand"].append(
-                    {"task_id": task_id, "expected_demand": demand, "team": team}
-                )
-
-        skill_id = int(task["skill_type"])
-        for worker_id in team:
-            if worker_id < 0 or worker_id >= int(env.num_workers):
-                violations["worker_range_violation_count"] += 1
-                continue
-            if not (0 <= skill_id < worker_skill_matrix.shape[1]) or worker_skill_matrix[worker_id, skill_id] < 0.5:
-                violations["skill_violation_count"] += 1
-                if len(examples["skill"]) < 10:
-                    worker_skills = [idx for idx, value in enumerate(worker_skill_matrix[worker_id].tolist()) if value > 0.5]
-                    examples["skill"].append(
-                        {
-                            "task_id": task_id,
-                            "worker_id": worker_id,
-                            "required_skill_column": skill_id,
-                            "worker_skill_columns": worker_skills,
-                        }
-                    )
-            worker_intervals.setdefault(worker_id, []).append((start, end, task_id))
-        if is_real:
-            station_intervals.setdefault(station_csv, []).append((start, end, task_id))
-
-    edge_tensor = raw["precedence_edges"]
-    edge_array = edge_tensor.detach().cpu().numpy() if hasattr(edge_tensor, "detach") else np.asarray(edge_tensor)
-    for src, dst in edge_array.T:
-        pred = rows.get(int(src))
-        succ = rows.get(int(dst))
-        if pred is not None and succ is not None and float(pred["end"]) > float(succ["start"]) + tolerance:
-            violations["precedence_violation_count"] += 1
-            if len(examples["precedence"]) < 10:
-                examples["precedence"].append(
-                    {
-                        "pred": int(src),
-                        "succ": int(dst),
-                        "pred_end": float(pred["end"]),
-                        "succ_start": float(succ["start"]),
-                    }
-                )
-
-    for worker_id, intervals in worker_intervals.items():
-        nonzero = sorted(item for item in intervals if item[1] - item[0] > tolerance)
-        for previous, current in zip(nonzero, nonzero[1:]):
-            if previous[1] > current[0] + tolerance:
-                violations["worker_overlap_violation_count"] += 1
-                if len(examples["worker_overlap"]) < 10:
-                    examples["worker_overlap"].append(
-                        {
-                            "worker_id": worker_id,
-                            "first_task": previous[2],
-                            "second_task": current[2],
-                            "first_end": previous[1],
-                            "second_start": current[0],
-                        }
-                    )
 
     max_slots = int(getattr(configs, "max_slots_per_station", 3))
-    for station_id, intervals in station_intervals.items():
-        events: list[tuple[float, int]] = []
-        for start, end, _task_id in intervals:
-            if end - start <= tolerance:
-                continue
-            events.append((start, 1))
-            events.append((end, -1))
-        events.sort(key=lambda item: (item[0], item[1]))
-        active = 0
-        for time_point, delta in events:
-            active += delta
-            if active > max_slots:
-                violations["station_slot_violation_count"] += 1
-                if len(examples["station_slot"]) < 10:
-                    examples["station_slot"].append(
-                        {
-                            "station_id": station_id,
-                            "time": time_point,
-                            "active": active,
-                            "max_slots": max_slots,
-                        }
-                    )
-                break
 
     central_report = env.validate_assignments(assignments)
     for key, value in central_report.violations.items():
         if key in violations:
             violations[key] = int(value)
+    for example_name in examples:
+        if example_name == "duration_mismatch":
+            continue
+        central_key = f"{example_name}_violation_count"
+        examples[example_name] = [
+            dict(example)
+            for example in central_report.examples.get(central_key, [])
+        ]
 
     hard_without_duration = {
         key: value for key, value in violations.items() if key != "task_duration_mismatch_count"

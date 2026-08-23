@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from baselines.heuristic import run_all_baselines as baseline_runner
 from baselines.heuristic.advanced_schedulers import (
     AdvancedSchedulerBase,
     IteratedGreedyScheduler,
@@ -53,6 +54,30 @@ def test_legacy_selector_emits_resource_free_action_for_virtual_node(
     assert not bool(real_env.constraint_engine.physical_mask[int(task_id)])
     assert station_id == -1
     assert team == []
+
+
+def test_lpt_evaluation_uses_common_feasibility_decoder(
+    real_env: AirLineEnv_Graph,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reject_legacy_selector(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("LPT 不得进入旧逐步贪心路径")
+
+    monkeypatch.setattr(
+        baseline_runner,
+        "select_heuristic_action",
+        reject_legacy_selector,
+    )
+    metrics, schedule = baseline_runner.run_heuristic_eval(
+        real_env,
+        "LPT",
+        num_runs=1,
+        seed=42,
+    )
+
+    assert metrics["valid"] == 1.0
+    assert schedule
+    assert real_env.validate_assignments(schedule).is_legal
 
 
 @pytest.mark.parametrize("rule", ["SPT", "CPM", "MSL"])
