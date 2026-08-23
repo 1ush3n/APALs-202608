@@ -31,6 +31,7 @@ build/
 # APCF generated counterfactual assets: retained locally/server-side, never versioned in Git.
 /data/.apcf_*/
 /data/initial_anchor_proposal_cf_v1/
+/downloads/
 wandb/
 *.pth
 *.ckpt

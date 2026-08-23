@@ -136,3 +136,63 @@ def test_resume_batch_audit_records_checkpoint_override() -> None:
 
 def test_legacy_resume_does_not_require_v2_training_spec() -> None:
     validate_checkpoint_training_spec(Config(), {})
+
+def _dynamic_eft_state() -> tuple[Config, dict]:
+    cfg = _v2_training_config()
+    cfg.worker_pointer_v2_dynamic_eft_features = True
+    return cfg, HBGATPN(cfg).state_dict()
+
+
+def test_infer_model_spec_detects_dynamic_eft_weight() -> None:
+    _cfg, state = _dynamic_eft_state()
+
+    assert infer_model_spec(state).worker_pointer_v2_dynamic_eft_features is True
+
+    state_without_eft = dict(state)
+    state_without_eft.pop("worker_head.v2_eft_proj.weight")
+    assert infer_model_spec(
+        state_without_eft
+    ).worker_pointer_v2_dynamic_eft_features is False
+
+
+def test_load_checkpoint_backfills_missing_dynamic_eft_flag(
+    tmp_path: Path,
+) -> None:
+    cfg, state = _dynamic_eft_state()
+    metadata = build_checkpoint_metadata(cfg)
+    metadata["model_spec"].pop("worker_pointer_v2_dynamic_eft_features")
+    checkpoint_path = tmp_path / "dynamic_eft.ckpt"
+    torch.save(
+        {
+            "state_dict": {f"policy.{key}": value for key, value in state.items()},
+            "apal_metadata": metadata,
+        },
+        checkpoint_path,
+    )
+
+    loaded = load_checkpoint(checkpoint_path)
+
+    assert loaded.model_spec.worker_pointer_v2_dynamic_eft_features is True
+    assert loaded.model_spec.worker_pointer_v2_dynamic_eft_feature_clip == (
+        cfg.worker_pointer_v2_dynamic_eft_feature_clip
+    )
+
+
+def test_load_checkpoint_rejects_unverifiable_dynamic_eft_clip(
+    tmp_path: Path,
+) -> None:
+    cfg, state = _dynamic_eft_state()
+    metadata = build_checkpoint_metadata(cfg)
+    metadata["model_spec"].pop("worker_pointer_v2_dynamic_eft_feature_clip")
+    metadata["config"].pop("worker_pointer_v2_dynamic_eft_feature_clip")
+    checkpoint_path = tmp_path / "dynamic_eft_without_clip.ckpt"
+    torch.save(
+        {
+            "state_dict": state,
+            "apal_metadata": metadata,
+        },
+        checkpoint_path,
+    )
+
+    with pytest.raises(ValueError, match="EFT.*clip"):
+        load_checkpoint(checkpoint_path)

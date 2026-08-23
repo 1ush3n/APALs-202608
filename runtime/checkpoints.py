@@ -339,6 +339,9 @@ def infer_model_spec(state_dict: Mapping[str, torch.Tensor]) -> ModelSpec:
         num_skill_types=5 if is_current_layout else None,
         worker_skill_feature_slots=5 if is_current_layout else None,
         worker_feature_layout_version=(WORKER_FEATURE_LAYOUT_VERSION if is_current_layout else None),
+        worker_pointer_v2_dynamic_eft_features=(
+            "worker_head.v2_eft_proj.weight" in state_dict
+        ),
     )
 
 
@@ -351,8 +354,50 @@ def load_checkpoint(path: str | Path, map_location: Any = "cpu") -> LoadedCheckp
             "checkpoint 格式不兼容：当前实验架构仅接受 format_version=2；"
             "旧模型必须按新的动作范围、编码器和池化配置重新训练。"
         )
+    eft_enabled = "worker_head.v2_eft_proj.weight" in state_dict
     saved_spec = metadata.get("model_spec")
-    spec = ModelSpec(**saved_spec) if isinstance(saved_spec, Mapping) else infer_model_spec(state_dict)
+    if isinstance(saved_spec, Mapping):
+        spec_values = dict(saved_spec)
+        spec_values.setdefault(
+            "worker_pointer_v2_dynamic_eft_features",
+            eft_enabled,
+        )
+        if "worker_pointer_v2_dynamic_eft_feature_clip" not in spec_values:
+            saved_config = metadata.get("config")
+            if isinstance(saved_config, Mapping):
+                clip = saved_config.get("worker_pointer_v2_dynamic_eft_feature_clip")
+                if clip is not None:
+                    spec_values["worker_pointer_v2_dynamic_eft_feature_clip"] = clip
+        if (
+            eft_enabled
+            and spec_values.get("worker_pointer_v2_dynamic_eft_features") is True
+            and "worker_pointer_v2_dynamic_eft_feature_clip" not in spec_values
+        ):
+            raise ValueError(
+                "checkpoint 启用了动态 EFT，但缺少可验证的 "
+                "worker_pointer_v2_dynamic_eft_feature_clip"
+            )
+        spec = ModelSpec(**spec_values)
+    else:
+        spec = infer_model_spec(state_dict)
+        if eft_enabled:
+            saved_config = metadata.get("config")
+            clip = (
+                saved_config.get("worker_pointer_v2_dynamic_eft_feature_clip")
+                if isinstance(saved_config, Mapping)
+                else None
+            )
+            if clip is None:
+                raise ValueError(
+                    "checkpoint 启用了动态 EFT，但缺少可验证的 "
+                    "worker_pointer_v2_dynamic_eft_feature_clip"
+                )
+            spec = ModelSpec(
+                **{
+                    **asdict(spec),
+                    "worker_pointer_v2_dynamic_eft_feature_clip": clip,
+                }
+            )
     return LoadedCheckpoint(payload, state_dict, spec, metadata, format_name)
 
 
