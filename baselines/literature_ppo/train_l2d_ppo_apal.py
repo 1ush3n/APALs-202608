@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import sys
@@ -23,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from baselines.graph_baseline import GraphBaselineActorCritic
+from baselines.graph_baseline import GraphBaselineActorCritic, SimpleWorkerHead
 from baselines.literature.common import (
     evaluate_graph_policy,
     export_best_schedule,
@@ -46,7 +47,7 @@ from utils.device_utils import clear_torch_cache, get_available_device
 from utils.vector_env import EnvCreator, VectorEnv
 
 
-METHOD_NAME = "Simple-HeteroGAT-PPO"
+METHOD_NAME = "L2D-PPO-APAL"
 ENTRYPOINT = "baselines/literature_ppo/train_l2d_ppo_apal.py"
 EXTRA_ARGS = {
     "output_dir": ExtraArgument(default=None, help="可选输出目录；缺省写入 runs artifacts"),
@@ -54,7 +55,42 @@ EXTRA_ARGS = {
 
 
 class SimpleHeteroGATPPO(GraphBaselineActorCritic):
-    """历史联合动作异构图 PPO；不再将其错误标记为 L2D。"""
+    """受 L2D 思想启发的 APAL 异构图联合动作 PPO。"""
+
+
+def preflight_l2d_ppo_r5_config(config: Any) -> bool:
+    """在创建环境前拒绝会触发 Worker Pointer v2 的 r5 配置。"""
+    if str(getattr(config, "reschedule_async_protocol", "")) != "r5_task_delay_v1":
+        raise ValueError("L2D-PPO-APAL r5 训练必须使用 reschedule_async_protocol=r5_task_delay_v1")
+    if str(getattr(config, "team_selection_mode", "")) != "autoregressive":
+        raise ValueError("L2D-PPO-APAL r5 必须使用 team_selection_mode=autoregressive")
+    if bool(getattr(config, "worker_pointer_v2_dynamic_eft_features", True)):
+        raise ValueError("L2D-PPO-APAL r5 必须关闭 worker_pointer_v2_dynamic_eft_features")
+    if hasattr(SimpleWorkerHead, "initialize_v2_state"):
+        raise RuntimeError("SimpleWorkerHead 不得提供 Worker Pointer v2 状态接口")
+    if int(getattr(config, "task_feat_dim", 0)) != 24:
+        raise ValueError("L2D-PPO-APAL r5 必须使用 task_feat_dim=24")
+    if int(getattr(config, "worker_feat_dim", 0)) != 17:
+        raise ValueError("L2D-PPO-APAL r5 必须使用 worker_feat_dim=17")
+    if int(getattr(config, "num_skill_types", 0)) != 5 or int(
+        getattr(config, "worker_skill_feature_slots", 0)
+    ) != 5:
+        raise ValueError("L2D-PPO-APAL r5 必须使用五技能 worker feature layout")
+    initialization = str(getattr(config, "initialization", "random"))
+    if initialization != "random":
+        raise ValueError("L2D-PPO-APAL r5 正式训练必须使用 initialization=random")
+    warm_start = str(getattr(config, "reschedule_baseline_model_path", "")).strip()
+    if warm_start:
+        raise ValueError("L2D-PPO-APAL r5 禁止从旧初始调度模型 warm start")
+    return True
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _save_checkpoint(
@@ -66,6 +102,16 @@ def _save_checkpoint(
     episode: int,
     dataset_selector_state: dict[str, Any] | None = None,
 ) -> None:
+    raw_manifest_path = str(getattr(configs, "reschedule_manifest_path", "")).strip()
+    manifest_path = Path(raw_manifest_path)
+    if raw_manifest_path and not manifest_path.is_absolute():
+        manifest_path = PROJECT_ROOT / manifest_path
+    manifest_path = manifest_path.resolve() if raw_manifest_path else manifest_path
+    formal_r5 = bool(
+        str(getattr(configs, "reschedule_async_protocol", "")) == "r5_task_delay_v1"
+        and manifest_path.is_file()
+    )
+
     save_literature_checkpoint(
         path,
         algorithm=METHOD_NAME,
@@ -76,6 +122,19 @@ def _save_checkpoint(
         extra={
             "optimizer": "PPO",
             "model_type": "SimpleHeteroGATPPO",
+            "implementation_variant": "apal_heterogat_joint_action_v1",
+            "training_protocol": str(getattr(configs, "reschedule_async_protocol", "")),
+            "initialization": "random",
+            "team_selection_mode": str(getattr(configs, "team_selection_mode", "")),
+            "worker_pointer_v2_dynamic_eft_features": bool(
+                getattr(configs, "worker_pointer_v2_dynamic_eft_features", False)
+            ),
+            "manifest_path": str(manifest_path) if raw_manifest_path else "",
+            "manifest_sha256": _sha256(manifest_path) if formal_r5 else "",
+            "formal_r5_checkpoint": formal_r5,
+            "comparison_role": (
+                "formal_r5_baseline" if formal_r5 else "auxiliary_initial_checkpoint"
+            ),
             "batch_size": int(agent.batch_size),
             "k_epochs": int(agent.k_epochs),
             "eps_clip": float(agent.eps_clip),
@@ -92,7 +151,7 @@ def _load_resume_checkpoint(
     agent: PPOAgent,
 ) -> tuple[int, float, dict[str, Any] | None]:
     checkpoint = torch.load(path, map_location=agent.device, weights_only=False)
-    if checkpoint.get("algorithm") != METHOD_NAME:
+    if checkpoint.get("algorithm") not in {METHOD_NAME, "Simple-HeteroGAT-PPO"}:
         raise ValueError(f"checkpoint algorithm={checkpoint.get('algorithm')!r}，不是 {METHOD_NAME}")
     agent.policy.load_state_dict(checkpoint["model_state_dict"])
     if "optimizer_state_dict" in checkpoint:
@@ -170,6 +229,7 @@ def _restore_service_dataset_state(
 def train(args: Any) -> None:
     seed = int(getattr(configs, "seed", 42))
     set_seed(seed)
+    preflight_l2d_ppo_r5_config(configs)
     output_dir = prepare_literature_output(args, method_name=METHOD_NAME, entrypoint=ENTRYPOINT)
     start_time = time.time()
     device = get_available_device()

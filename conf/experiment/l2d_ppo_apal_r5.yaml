@@ -1,0 +1,57 @@
+defaults:
+  - /model/hb_gat_pn@_global_
+  - /env/apal_default@_global_
+  - /env/reschedule_task_delay@_global_
+  - /reward/default@_global_
+  - /train/ppo_default@_global_
+  - /rollout/fastpath@_global_
+  - _self_
+
+experiment:
+  experiment_name: l2d_ppo_apal_r5
+  initialization: random
+  checkpoint_root: checkpoints
+  lr: 1.0e-4
+  actor_lr_multiplier: 1.0
+
+model:
+  team_selection_mode: autoregressive
+  worker_pointer_v2_dynamic_eft_features: false
+
+reschedule_task_delay:
+  enable_reschedule_mode: true
+  reschedule_async_protocol: r5_task_delay_v1
+  reschedule_train_scenario_mode: r5_task_delay_v1
+  reschedule_manifest_path: data/r5_task_delay_v1/manifest.json
+  train_data_path_or_dir: data/r5_task_delay_v1/instances/train
+  data_file_path: data/r5_task_delay_v1/instances/validation/validation_0001.csv
+  reschedule_eval_instance_id: validation_0001
+  r5_early_start_ratio: 0.225
+  r5_middle_start_ratio: 0.400
+  r5_late_start_ratio: 0.575
+  r5_low_task_ratio: 0.05
+  r5_low_delay_min: 5.0
+  r5_low_delay_max: 15.0
+  r5_medium_task_ratio: 0.10
+  r5_medium_delay_min: 10.0
+  r5_medium_delay_max: 35.0
+  r5_high_task_ratio: 0.18
+  r5_high_delay_min: 20.0
+  r5_high_delay_max: 60.0
+  async_eval_enabled: true
+  async_eval_device: cuda
+  async_eval_worker_count: 3
+  async_eval_queue_capacity: 3
+  async_eval_submit_every_episodes: 2
+  async_eval_allow_cpu_fallback: false
+  async_eval_wait_on_finish: true
+  async_eval_failure_policy: fail
+  async_eval_instance_id: validation_0001
+  ddqn_enable_vector_env: true
+  ddqn_num_envs: 4
+  async_eval_scenario_ids:
+    - low_early
+    - medium_early
+    - high_early
+  eval_temperature: 0.0
+  reschedule_baseline_model_path: ""

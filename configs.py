@@ -386,6 +386,7 @@ class Config:
     # ------------------
     log_dir: str = "/root/tf-logs"
     experiment_name: str = "default"
+    initialization: str = "random"
     checkpoint_root: str = "checkpoints"
     runs_root: str = "runs"
     run_id: str = ""
