@@ -336,6 +336,27 @@ def save_literature_checkpoint(
         "algorithm": algorithm,
         "literature_family": literature_family,
         "feature_mode": LITERATURE_FEATURE_MODE,
+        "task_feat_dim": int(getattr(configs, "task_feat_dim", 0)),
+        "station_feat_dim": int(getattr(configs, "station_feat_dim", 0)),
+        "skill_feat_dim": int(getattr(configs, "skill_feat_dim", 0)),
+        "experiment": str(getattr(configs, "experiment_name", "")),
+        "reschedule_async_protocol": str(
+            getattr(configs, "reschedule_async_protocol", "")
+        ),
+        "formal_r5_baseline": bool(is_r5_learning_protocol(configs)),
+        "selection_protocol": (
+            "r5_validation_only"
+            if is_r5_learning_protocol(configs)
+            else "initial_schedule"
+        ),
+        "selection_instance_ids": (
+            [str(getattr(configs, "async_eval_instance_id", ""))]
+            if is_r5_learning_protocol(configs)
+            else []
+        ),
+        "selection_scenario_ids": list(
+            getattr(configs, "async_eval_scenario_ids", ()) or ()
+        ),
         "model_state_dict": model.state_dict(),
         "seed": int(getattr(configs, "seed", 42)),
         "train_data_path_or_dir": str(training_data_source(args)),

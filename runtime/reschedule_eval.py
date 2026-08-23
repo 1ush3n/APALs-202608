@@ -359,6 +359,7 @@ def evaluate_reschedule_model(
     makespans, balances, rewards, durations = [], [], [], []
     worker_utils, station_utils = [], []
     schedules = []
+    scenario_schedules = []
     constraint_rows = []
     score_rows = []
     scenario_path = ensure_reschedule_eval_scenarios_available(configs)
@@ -500,11 +501,12 @@ def evaluate_reschedule_model(
 
             elapsed = time.time() - start_wall
             complete = len(env.assigned_tasks) == env.num_tasks
+            raw_schedule = list(env.assigned_tasks)
             if complete:
                 final_makespan = float(np.max(env.station_wall_clock))
                 balance = float(np.std(env.station_loads))
                 worker_util, station_util = _compute_assignment_utilization(env, final_makespan)
-                schedule = list(env.assigned_tasks)
+                schedule = raw_schedule
             else:
                 final_makespan = float(env.ideal_makespan * 3.0)
                 balance = float(env.ideal_station_load * 3.0)
@@ -531,6 +533,7 @@ def evaluate_reschedule_model(
                 release_time_tolerance(configs)
             )
             constraints["complete"] = float(complete)
+            constraints["makespan"] = float(final_makespan)
             constraints["makespan_is_penalty"] = float(not complete)
             score_result = calculate_reschedule_composite_score(
                 makespan=final_makespan,
@@ -553,6 +556,7 @@ def evaluate_reschedule_model(
             worker_utils.append(worker_util)
             station_utils.append(station_util)
             schedules.append(schedule)
+            scenario_schedules.append(raw_schedule)
             if verbose_progress:
                 print(
                     f"[RescheduleEval] {output_idx + 1}/{len(selected_scenarios)} {scenario_id} "
@@ -595,6 +599,7 @@ def evaluate_reschedule_model(
         "mask_mismatch_recovered",
         "release_time_tolerance_hours",
         "complete",
+        "makespan",
         "makespan_is_penalty",
         "feasible_for_efficiency",
         "scenario_reset_seed",
@@ -643,6 +648,7 @@ def evaluate_reschedule_model(
 
     evaluate_reschedule_model.last_metrics = avg_metrics
     evaluate_reschedule_model.last_scenario_metrics = constraint_rows
+    evaluate_reschedule_model.last_scenario_schedules = scenario_schedules
     return avg_makespan, avg_balance, avg_reward, best_sch, avg_duration, avg_w_util, avg_s_util
 
 
