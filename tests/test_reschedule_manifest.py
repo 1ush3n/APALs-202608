@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 
 from configs import Config, configs, load_config_files
 from environment import AirLineEnv_Graph
+import scripts.evaluate_reschedule_manifest as manifest_eval
 from runtime.reschedule_manifest import load_reschedule_manifest
 from runtime.initial_worker_mapping import apply_initial_worker_mapping
 from tests.runtime_safety import temporary_config
@@ -159,3 +161,65 @@ def test_fiveskill_r4_real_manifest_resets_with_dataset_worker_mapping() -> None
             assert int(configs.n_w) == expected_worker_count
             assert env.num_workers == expected_worker_count
             assert env.baseline_schedule is not None
+
+
+def test_manifest_evaluation_preserves_context_for_each_instance(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    entries = []
+    for instance_id in ("case_a", "case_b"):
+        data_path = tmp_path / f"{instance_id}.csv"
+        baseline_path = tmp_path / f"{instance_id}_baseline.csv"
+        scenario_path = tmp_path / f"{instance_id}_scenarios.csv"
+        for path in (data_path, baseline_path, scenario_path):
+            path.write_text("placeholder", encoding="utf-8")
+        entries.append(
+            {
+                "instance_id": instance_id,
+                "split": "eval",
+                "source": "generated",
+                "data_path": str(data_path),
+                "baseline_schedule_path": str(baseline_path),
+                "scenario_path": str(scenario_path),
+                "status": "ready",
+            }
+        )
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, entries)
+
+    observed_context = []
+    monkeypatch.setattr(
+        manifest_eval,
+        "load_checkpoint",
+        lambda _path: SimpleNamespace(model_spec=object(), format_name="test"),
+    )
+    monkeypatch.setattr(manifest_eval, "apply_checkpoint_model_spec", lambda *args, **kwargs: None)
+    monkeypatch.setattr(manifest_eval, "apply_initial_worker_mapping", lambda *args, **kwargs: None)
+
+    def fake_evaluate_saved_reschedule_model(**_kwargs):
+        observed_context.append(
+            (configs.reschedule_manifest_path, configs.reschedule_eval_instance_id)
+        )
+        return {"scenario_count": 1}
+
+    monkeypatch.setattr(
+        manifest_eval,
+        "evaluate_saved_reschedule_model",
+        fake_evaluate_saved_reschedule_model,
+    )
+
+    manifest_eval.evaluate_manifest_instances(
+        model_path=tmp_path / "model.ckpt",
+        manifest_path=manifest_path,
+        instance_ids=["case_a", "case_b"],
+        num_runs=None,
+        scenario_ids=None,
+        temperature=0.0,
+        output_dir=tmp_path / "output",
+    )
+
+    assert observed_context == [
+        (str(manifest_path.resolve()), "case_a"),
+        (str(manifest_path.resolve()), "case_b"),
+    ]

@@ -116,10 +116,10 @@ def evaluate_manifest_instances(
     backup = _backup_config()
     try:
         configs.enable_reschedule_mode = True
-        configs.reschedule_manifest_path = ""
-        configs.reschedule_eval_instance_id = ""
+        configs.reschedule_manifest_path = str(manifest.path)
         configs.verbose_reschedule_eval_progress = True
         for instance_id in instance_ids:
+            configs.reschedule_eval_instance_id = instance_id
             entry = manifest.get(instance_id)
             if entry.scenario_path is None:
                 raise ValueError(f"{instance_id} 没有固定重调度场景，不能用于 manifest 评估")
