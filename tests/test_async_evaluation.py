@@ -94,6 +94,13 @@ def test_r5_reschedule_async_config_requires_cuda_and_allows_three_workers() -> 
 
     validate_runtime_config(config)
 
+    config.eval_freq = 2
+    validate_runtime_config(config)
+
+    config.eval_freq = 3
+    with pytest.raises(ValueError, match="eval_freq 仅支持 1 或 2"):
+        validate_runtime_config(config)
+
     config.async_eval_device = "cpu"
     with pytest.raises(ValueError, match="CUDA"):
         validate_runtime_config(config)

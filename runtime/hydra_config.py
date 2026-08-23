@@ -87,6 +87,8 @@ def _parse_bool(raw: str) -> bool:
 
 
 def _parse_value(raw: str) -> Any:
+    if not raw.strip():
+        return ""
     cfg = OmegaConf.from_dotlist([f"value={raw}"])
     value = OmegaConf.to_container(cfg, resolve=True)["value"]
     return value

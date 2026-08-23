@@ -8,6 +8,7 @@ import torch
 
 from baselines.graph_baseline import SimpleWorkerHead
 from runtime.modes import is_worker_pointer_v2_mode
+from runtime.hydra_config import _parse_value
 
 import scripts.evaluate_l2d_ppo_r5_manifest as target
 from baselines.literature_ppo.train_l2d_ppo_apal import preflight_l2d_ppo_r5_config
@@ -80,6 +81,11 @@ def test_l2d_preflight_rejects_v2_and_accepts_legacy_r5() -> None:
     config.team_selection_mode = "autoregressive_pressure_v2"
     with pytest.raises(ValueError, match="team_selection_mode"):
         preflight_l2d_ppo_r5_config(config)
+
+
+def test_hydra_empty_path_override_remains_empty_string() -> None:
+    assert _parse_value("") == ""
+
 
 
 def test_l2d_checkpoint_is_strictly_formal_or_auxiliary() -> None:

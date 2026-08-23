@@ -502,7 +502,14 @@ def validate_runtime_config(config: Config) -> None:
                 raise ValueError("初始调度异步验证的 async_eval_initial_data_path 不能为空")
         if not math.isclose(float(getattr(config, "eval_temperature", 0.0)), 0.0, abs_tol=1e-12):
             raise ValueError("异步 best 选择要求 eval_temperature=0.0")
-        if int(getattr(config, "eval_freq", 1)) != 1:
+        eval_freq = int(getattr(config, "eval_freq", 1))
+        if is_r5_reschedule_async:
+            if eval_freq not in {1, 2}:
+                raise ValueError(
+                    "r5 重调度异步验证的 eval_freq 仅支持 1 或 2；"
+                    "使用 2 时必须由每 2 轮提交的完整 low/medium/high 组选择 best"
+                )
+        elif eval_freq != 1:
             raise ValueError("异步验证要求 eval_freq=1，确保每个成功 PPO episode 都参与 best 选择")
         if str(getattr(config, "async_eval_failure_policy", "fail")).lower() != "fail":
             raise ValueError("async_eval_failure_policy 当前仅支持 fail")
