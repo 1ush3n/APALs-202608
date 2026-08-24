@@ -251,6 +251,10 @@ def resolve_fast_exact_num_envs(
 
 
 def validate_runtime_config(config: Config) -> None:
+    if bool(getattr(config, "ablation_no_mask", False)):
+        raise ValueError(
+            "ablation_no_mask 已禁用：主 PPO 方法必须保留动作硬约束 mask"
+        )
     if int(config.update_every_episodes) != 1:
         raise ValueError("当前训练编排仅支持 update_every_episodes=1")
     max_stations = LOCK_STATE_DIM - 1

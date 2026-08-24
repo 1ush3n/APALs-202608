@@ -42,6 +42,48 @@ except ImportError:
     AdamWScheduleFree = None
 
 
+def _finalize_action_logits(
+    logits: torch.Tensor,
+    invalid_mask: torch.Tensor | None,
+    *,
+    decision: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """在构造动作分布前统一执行形状、数值和合法性检查。"""
+    logits_float = logits.float()
+    mask = (
+        torch.zeros_like(logits_float, dtype=torch.bool)
+        if invalid_mask is None
+        else invalid_mask
+    )
+    if mask.dtype != torch.bool:
+        raise ValueError(f"{decision} mask dtype 必须为 bool，收到 {mask.dtype}")
+    if mask.device != logits_float.device:
+        raise ValueError(
+            f"{decision} mask device 与 logits 不一致: "
+            f"{mask.device} != {logits_float.device}"
+        )
+    if mask.shape != logits_float.shape:
+        raise ValueError(
+            f"{decision} mask/logits shape 不一致: "
+            f"{tuple(mask.shape)} != {tuple(logits_float.shape)}"
+        )
+
+    legal = ~mask
+    bad_legal = legal & ~torch.isfinite(logits_float)
+    if bool(bad_legal.any()):
+        rows = torch.nonzero(
+            bad_legal.any(dim=-1), as_tuple=False
+        ).reshape(-1).tolist()
+        raise FloatingPointError(
+            f"{decision} 合法候选 logits 出现 NaN/Inf，rows={rows}"
+        )
+
+    usable = legal.any(dim=-1)
+    # [B, A] | [B, 1] -> [B, A]；-inf 在 AMP loss scaling 下会产生 NaN 梯度。
+    final_mask = mask | (~usable).unsqueeze(-1)
+    return logits_float.masked_fill(final_mask, -1.0e4), usable
+
+
 @dataclass(frozen=True)
 class FrozenGatedTeamTrace:
     """采样时冻结的 APAL 团队候选动作空间。
@@ -115,6 +157,10 @@ class PPOAgent:
         teacher_checkpoint_dir: Any | None = None,
     ):
         self.config = config if config is not None else configs
+        if bool(getattr(self.config, "ablation_no_mask", False)):
+            raise ValueError(
+                "ablation_no_mask 已禁用：主 PPO 方法必须在分布边界保留硬约束 mask"
+            )
         self.action_completer = EarliestFinishActionCompleter(self.config)
         self.policy = model.to(device)
         # 仅供 rollout_service 在同一次批量解码后立即写入 Memory；不参与 checkpoint。
@@ -600,8 +646,13 @@ class PPOAgent:
             worker_embs=worker_embs,
             candidates=candidates,
         )
-        if torch.isnan(logits).any():
-            logits = torch.nan_to_num(logits, nan=-1.0e4)
+        logits, usable = _finalize_action_logits(
+            logits,
+            None,
+            decision="gated_team",
+        )
+        if not bool(usable.item()):
+            return None
         if deterministic or temperature <= 0.0:
             selected_index = int(torch.argmax(logits, dim=1).item())
             team_logprob = torch.zeros((), device=logits.device)
@@ -797,12 +848,17 @@ class PPOAgent:
                 station_emb=station_emb,
                 anchor_emb=anchor_emb,
                 worker_embs=worker_embs3,
-                mask=step_illegal.reshape(1, -1),
+                mask=None,
                 current_team_emb=context,
             )
-            scores_float = scores.float()
-            if torch.isnan(scores_float).any():
-                scores_float = torch.nan_to_num(scores_float, nan=-1.0e4)
+            scores_float, score_usable = _finalize_action_logits(
+                scores,
+                step_illegal.reshape(1, -1),
+                decision=f"anchor_proposal.worker[step={step}]",
+            )
+            if not bool(score_usable.item()):
+                available = False
+                break
             if deterministic or temperature <= 0.0:
                 chosen = int(torch.argmax(scores_float, dim=1).item())
                 step_lp = scores.new_zeros(())
@@ -878,9 +934,13 @@ class PPOAgent:
             gate_features=gate_features,
             hamming=torch.tensor([[float(hamming)]], dtype=torch.float32, device=device),
         )
-        branch_logits = branch_logits.float()
-        if torch.isnan(branch_logits).any():
-            branch_logits = torch.nan_to_num(branch_logits, nan=-1.0e4)
+        branch_logits, branch_usable = _finalize_action_logits(
+            branch_logits,
+            None,
+            decision="anchor_proposal.branch",
+        )
+        if not bool(branch_usable.item()):
+            return None
         raw_argmax_branch = int(torch.argmax(branch_logits, dim=1).item())
         if deterministic or temperature <= 0.0:
             selected_branch = raw_argmax_branch
@@ -1175,10 +1235,17 @@ class PPOAgent:
             station_embeddings,
             candidate_team_emb,
             gate_features,
-            candidate_mask,
+            None,
             candidate_prior_costs,
         )
-        dist = Categorical(logits=logits.float())
+        logits, usable = _finalize_action_logits(
+            logits,
+            candidate_mask,
+            decision="ppo_replay.gated_team",
+        )
+        if not bool(usable.all()):
+            raise RuntimeError("gated-team replay 的团队动作空间全屏蔽")
+        dist = Categorical(logits=logits)
         selected_indices = torch.tensor(
             chosen_indices, dtype=torch.long, device=worker_embeddings.device
         )
@@ -1322,10 +1389,16 @@ class PPOAgent:
                     station_emb=station_emb,
                     anchor_emb=anchor_emb,
                     worker_embs=worker_embs,
-                    mask=step_mask,
+                    mask=None,
                     current_team_emb=context,
                 )
-                scores_float = scores.float()
+                scores_float, score_usable = _finalize_action_logits(
+                    scores,
+                    step_mask,
+                    decision=f"ppo_replay.anchor_proposal.worker[step={j}]",
+                )
+                if not bool(score_usable.item()):
+                    raise RuntimeError("APCF replay 的工人动作空间全屏蔽")
                 dist = Categorical(logits=scores_float)
                 chosen_t = torch.tensor(
                     [[chosen]], device=worker_embeddings.device
@@ -1349,7 +1422,13 @@ class PPOAgent:
                 gate_features=gate_features,
                 hamming=hamming,
             )
-            branch_logits = branch_logits.float()
+            branch_logits, branch_usable = _finalize_action_logits(
+                branch_logits,
+                None,
+                decision="ppo_replay.anchor_proposal.branch",
+            )
+            if not bool(branch_usable.item()):
+                raise RuntimeError("APCF replay 的分支动作空间全屏蔽")
             eps = max(float(trace.branch_floor), 0.0)
             soft = torch.softmax(branch_logits, dim=1)
             mixed = eps + (1.0 - 2.0 * eps) * soft
@@ -1758,7 +1837,6 @@ class PPOAgent:
         """
         self.last_gated_team_trace = None
         self.last_anchor_proposal_trace = None
-        no_mask = self.config.ablation_no_mask
         
         if self.use_schedule_free and manage_optimizer_mode:
             if is_eval:
@@ -1777,38 +1855,35 @@ class PPOAgent:
             with self.autocast_context():
                 x_dict, global_context = active_policy(obs)
                 
-                # 浣跨敤瀹夊叏鐨勫父閲?-1e4锛堥槻姝?FP16 涓?-1e9/finfo 鏋佸皬鍊煎湪 autocast 鏈熼棿婧㈠嚭锛?
-                mask_value = -1e4
-                
                 # ------------------
                 # 1. 閫夋嫨宸ュ簭 (Select Task)
                 # ------------------
-                task_logits = active_policy.task_head(x_dict['task'], global_context, mask=mask_task if not no_mask else None)
+                task_logits = active_policy.task_head(
+                    x_dict["task"], global_context, mask=None
+                )
             
-            # [Robustness] 妫€鏌ュ苟澶勭悊 NaN
-            if torch.isnan(task_logits).any():
-                task_logits = torch.nan_to_num(task_logits, nan=mask_value)
+            if not deterministic and temperature != 1.0:
+                task_logits = task_logits / max(float(temperature), 1.0e-5)
+            task_invalid = (
+                mask_task.to(device=task_logits.device).reshape(task_logits.shape)
+                if mask_task is not None
+                else None
+            )
+            task_logits, task_usable = _finalize_action_logits(
+                task_logits,
+                task_invalid,
+                decision="task",
+            )
+            if not bool(task_usable.item()):
+                return None, 0.0, 0.0, None, True
             
             if deterministic:
-                if mask_task is not None and not no_mask:
-                    task_logits = task_logits.masked_fill(mask_task, mask_value)
-                task_action = torch.argmax(task_logits)
-                task_logprob = torch.tensor(0.0).to(self.device)
+                task_action = torch.argmax(task_logits, dim=-1)
+                task_logprob = torch.zeros((), device=self.device)
             else:
-                if mask_task is not None and not no_mask:
-                     task_logits = task_logits.masked_fill(mask_task, mask_value)
-                
-                # Check for all -inf
-                if (task_logits <= mask_value * 0.99).all():
-                     print("WARNING: All Task Logits -inf in select_action. Force picking 0.")
-                     task_action = torch.tensor(0).to(self.device)
-                     task_logprob = torch.tensor(0.0).to(self.device)
-                else:
-                    if temperature != 1.0:
-                        task_logits = task_logits / max(temperature, 1e-5)
-                    task_dist = Categorical(logits=task_logits.float())
-                    task_action = task_dist.sample()
-                    task_logprob = task_dist.log_prob(task_action)
+                task_dist = Categorical(logits=task_logits)
+                task_action = task_dist.sample()
+                task_logprob = task_dist.log_prob(task_action)
             
             t_idx = task_action.item()
             selected_task_emb = x_dict['task'][t_idx].unsqueeze(0) # [1, H]
@@ -1874,30 +1949,33 @@ class PPOAgent:
             
             with self.autocast_context():
                 station_embs = x_dict['station'].unsqueeze(0)
-                station_logits = active_policy.station_head(selected_task_emb, station_embs, mask=specific_station_mask if not no_mask else None)
-            
-            if torch.isnan(station_logits).any():
-                station_logits = torch.nan_to_num(station_logits, nan=mask_value)
+                station_logits = active_policy.station_head(
+                    selected_task_emb, station_embs, mask=None
+                )
+            if not deterministic and temperature != 1.0:
+                station_logits = station_logits / max(float(temperature), 1.0e-5)
+            station_invalid = (
+                specific_station_mask.to(device=station_logits.device).reshape(
+                    station_logits.shape
+                )
+                if specific_station_mask is not None
+                else None
+            )
+            station_logits, station_usable = _finalize_action_logits(
+                station_logits,
+                station_invalid,
+                decision="station",
+            )
+            if not bool(station_usable.item()):
+                return None, 0.0, 0.0, specific_station_mask, True
             
             if deterministic:
-                if specific_station_mask is not None and not no_mask:
-                     station_logits = station_logits.masked_fill(specific_station_mask, mask_value)
-                station_action = torch.argmax(station_logits)
-                station_logprob = torch.tensor(0.0).to(self.device)
+                station_action = torch.argmax(station_logits, dim=-1)
+                station_logprob = torch.zeros((), device=self.device)
             else:
-                if specific_station_mask is not None and not no_mask:
-                     station_logits = station_logits.masked_fill(specific_station_mask, mask_value)
-                
-                if (station_logits <= mask_value * 0.99).all():
-                     print("WARNING: All Station Logits -inf. Force picking 0.")
-                     station_action = torch.tensor(0).to(self.device)
-                     station_logprob = torch.tensor(0.0).to(self.device)
-                else:
-                    if temperature != 1.0:
-                        station_logits = station_logits / max(temperature, 1e-5)
-                    station_dist = Categorical(logits=station_logits.float())
-                    station_action = station_dist.sample()
-                    station_logprob = station_dist.log_prob(station_action)
+                station_dist = Categorical(logits=station_logits)
+                station_action = station_dist.sample()
+                station_logprob = station_dist.log_prob(station_action)
 
             if action_scope in {
                 "operation_station",
@@ -2003,10 +2081,11 @@ class PPOAgent:
             worker_locks = torch.argmax(worker_feats[:, worker_layout.lock_slice], dim=1)
             lock_mask = (worker_locks != 0) & (worker_locks != s_act)
             
-            if no_mask:
-                current_worker_mask = skill_mask.to(self.device)
-            else:
-                current_worker_mask = current_worker_mask | skill_mask.to(self.device) | lock_mask.to(self.device)
+            current_worker_mask = (
+                current_worker_mask
+                | skill_mask.to(self.device)
+                | lock_mask.to(self.device)
+            )
 
             worker_embs = x_dict['worker'].unsqueeze(0)
             v2_mode = is_worker_pointer_v2_mode(self.config)
@@ -2062,7 +2141,7 @@ class PPOAgent:
                             pressure_context=v2_pressure,
                             team_state=v2_team_state,
                             demand=v2_demand,
-                            mask=current_worker_mask.unsqueeze(0),
+                            mask=None,
                             decode_cache=v2_decode_cache,
                             dynamic_eft_features=self._build_v2_dynamic_eft_features(
                                 team_state=v2_team_state,
@@ -2075,29 +2154,26 @@ class PPOAgent:
                             ),
                         )
                     else:
-                        worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs, mask=current_worker_mask, current_team_emb=current_team_emb)
+                        worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs, mask=None, current_team_emb=current_team_emb)
                 
-                if torch.isnan(worker_logits).any():
-                    worker_logits = torch.nan_to_num(worker_logits, nan=mask_value)
+                if not deterministic and temperature != 1.0:
+                    worker_logits = worker_logits / max(float(temperature), 1.0e-5)
+                worker_invalid = current_worker_mask.reshape(worker_logits.shape)
+                worker_logits, worker_usable = _finalize_action_logits(
+                    worker_logits,
+                    worker_invalid,
+                    decision=f"worker[step={iter_cnt}]",
+                )
+                if not bool(worker_usable.item()):
+                    break
                 
                 if deterministic:
-                     if not no_mask: worker_logits = worker_logits.masked_fill(current_worker_mask, mask_value)
-                     if (worker_logits <= mask_value * 0.99).all(): break
-                     
-                     w_action = torch.argmax(worker_logits)
-                     w_lp = torch.tensor(0.0).to(self.device)
+                    w_action = torch.argmax(worker_logits, dim=-1)
+                    w_lp = torch.zeros((), device=self.device)
                 else:
-                     if not no_mask: worker_logits = worker_logits.masked_fill(current_worker_mask, mask_value)
-                     
-                     if (worker_logits <= mask_value * 0.99).all():
-                         break # 鏃犳硶缁х画閫変汉
-                     
-                     if temperature != 1.0:
-                         worker_logits = worker_logits / max(temperature, 1e-5)
-                         
-                     w_dist = Categorical(logits=worker_logits.float() if v2_mode else worker_logits)
-                     w_action = w_dist.sample()
-                     w_lp = w_dist.log_prob(w_action)
+                    w_dist = Categorical(logits=worker_logits)
+                    w_action = w_dist.sample()
+                    w_lp = w_dist.log_prob(w_action)
                 
                 w_idx = w_action.item()
                 team_indices.append(w_idx)
@@ -2183,7 +2259,7 @@ class PPOAgent:
         profile_breakdown: bool = False,
         snapshots: Optional[List[dict]] = None,
         fast_exact_builder: Any = None,
-    ) -> List[Tuple[Tuple[int, int, List[int]], float, float, Optional[torch.Tensor], bool]]:
+    ) -> List[Tuple[Optional[Tuple[int, int, List[int]]], float, float, Optional[torch.Tensor], bool]]:
         """
         鎵归噺閫夋嫨鍔ㄤ綔 (Batch Select Action)銆?
         
@@ -2199,8 +2275,6 @@ class PPOAgent:
         Returns:
             results: List of Tuples containing (action_tuple, action_logprob, state_value, specific_station_mask, is_invalid_action)
         """
-        no_mask = self.config.ablation_no_mask
-        mask_value = -1e4
         
         if self.use_schedule_free:
             if is_eval:
@@ -2344,30 +2418,38 @@ class PPOAgent:
                 # ------------------
                 m_task = mask_task_list[i].to(self.device) if mask_task_list[i] is not None else None
                 with self.autocast_context():
-                    task_logits = active_policy.task_head(task_embs, global_context_i, mask=m_task if not no_mask else None)
-                
-                if torch.isnan(task_logits).any():
-                    task_logits = torch.nan_to_num(task_logits, nan=mask_value)
+                    task_logits = active_policy.task_head(
+                        task_embs, global_context_i, mask=None
+                    )
+                if not deterministic and temperature != 1.0:
+                    task_logits = task_logits / max(float(temperature), 1.0e-5)
+                task_invalid = (
+                    m_task.reshape(task_logits.shape)
+                    if m_task is not None
+                    else None
+                )
+                task_logits, task_usable = _finalize_action_logits(
+                    task_logits,
+                    task_invalid,
+                    decision=f"task[env={i}]",
+                )
+                if not bool(task_usable.item()):
+                    state_value_tensors.append(state_values_batch[i])
+                    decoded_actions.append(
+                        (0, 0, [], torch.tensor(0.0, device=self.device), None)
+                    )
+                    task_mask_refs.append(None)
+                    worker_mask_refs.append(None)
+                    eval_fail_flags.append(True)
+                    continue
                 
                 if deterministic:
-                    if m_task is not None and not no_mask:
-                        task_logits = task_logits.masked_fill(m_task, mask_value)
-                    task_action = torch.argmax(task_logits)
-                    task_logprob = torch.tensor(0.0).to(self.device)
+                    task_action = torch.argmax(task_logits, dim=-1)
+                    task_logprob = torch.zeros((), device=self.device)
                 else:
-                    if m_task is not None and not no_mask:
-                         task_logits = task_logits.masked_fill(m_task, mask_value)
-                    
-                    if (task_logits <= mask_value * 0.99).all():
-                         print(f"WARNING: All Task Logits -inf in select_actions_batch for env {i}. Force picking 0.")
-                         task_action = torch.tensor(0).to(self.device)
-                         task_logprob = torch.tensor(0.0).to(self.device)
-                    else:
-                        if temperature != 1.0:
-                            task_logits = task_logits / max(temperature, 1e-5)
-                        task_dist = Categorical(logits=task_logits.float())
-                        task_action = task_dist.sample()
-                        task_logprob = task_dist.log_prob(task_action)
+                    task_dist = Categorical(logits=task_logits)
+                    task_action = task_dist.sample()
+                    task_logprob = task_dist.log_prob(task_action)
                 
                 t_idx = task_action.item()
                 selected_task_emb = task_embs[t_idx].unsqueeze(0) # [1, H]
@@ -2465,30 +2547,38 @@ class PPOAgent:
                 
                 with self.autocast_context():
                     station_embs_i = station_embs.unsqueeze(0) # [1, S, H]
-                    station_logits = active_policy.station_head(selected_task_emb, station_embs_i, mask=specific_station_mask if not no_mask else None)
-                
-                if torch.isnan(station_logits).any():
-                    station_logits = torch.nan_to_num(station_logits, nan=mask_value)
+                    station_logits = active_policy.station_head(
+                        selected_task_emb, station_embs_i, mask=None
+                    )
+                if not deterministic and temperature != 1.0:
+                    station_logits = station_logits / max(float(temperature), 1.0e-5)
+                station_invalid = (
+                    specific_station_mask.reshape(station_logits.shape)
+                    if specific_station_mask is not None
+                    else None
+                )
+                station_logits, station_usable = _finalize_action_logits(
+                    station_logits,
+                    station_invalid,
+                    decision=f"station[env={i}]",
+                )
+                if not bool(station_usable.item()):
+                    state_value_tensors.append(state_values_batch[i])
+                    decoded_actions.append(
+                        (0, 0, [], torch.tensor(0.0, device=self.device), None)
+                    )
+                    task_mask_refs.append(None)
+                    worker_mask_refs.append(None)
+                    eval_fail_flags.append(True)
+                    continue
                 
                 if deterministic:
-                    if specific_station_mask is not None and not no_mask:
-                         station_logits = station_logits.masked_fill(specific_station_mask, mask_value)
-                    station_action = torch.argmax(station_logits)
-                    station_logprob = torch.tensor(0.0).to(self.device)
+                    station_action = torch.argmax(station_logits, dim=-1)
+                    station_logprob = torch.zeros((), device=self.device)
                 else:
-                    if specific_station_mask is not None and not no_mask:
-                         station_logits = station_logits.masked_fill(specific_station_mask, mask_value)
-                    
-                    if (station_logits <= mask_value * 0.99).all():
-                         print(f"WARNING: All Station Logits -inf in select_actions_batch for env {i}. Force picking 0.")
-                         station_action = torch.tensor(0).to(self.device)
-                         station_logprob = torch.tensor(0.0).to(self.device)
-                    else:
-                        if temperature != 1.0:
-                            station_logits = station_logits / max(temperature, 1e-5)
-                        station_dist = Categorical(logits=station_logits.float())
-                        station_action = station_dist.sample()
-                        station_logprob = station_dist.log_prob(station_action)
+                    station_dist = Categorical(logits=station_logits)
+                    station_action = station_dist.sample()
+                    station_logprob = station_dist.log_prob(station_action)
 
                 if action_scope in {
                     "operation_station",
@@ -2611,10 +2701,11 @@ class PPOAgent:
                 worker_locks = torch.argmax(worker_feats[:, worker_layout.lock_slice], dim=1)
                 lock_mask = (worker_locks != 0) & (worker_locks != s_act)
                 
-                if no_mask:
-                    current_worker_mask = skill_mask.to(self.device)
-                else:
-                    current_worker_mask = current_worker_mask | skill_mask.to(self.device) | lock_mask.to(self.device)
+                current_worker_mask = (
+                    current_worker_mask
+                    | skill_mask.to(self.device)
+                    | lock_mask.to(self.device)
+                )
     
                 worker_embs_i = worker_embs.unsqueeze(0) # [1, W, H]
                 v2_mode = is_worker_pointer_v2_mode(self.config)
@@ -2693,33 +2784,31 @@ class PPOAgent:
                                 pressure_context=v2_pressure,
                                 team_state=v2_team_state,
                                 demand=v2_demand,
-                                mask=current_worker_mask.unsqueeze(0),
+                                mask=None,
                                 decode_cache=v2_decode_cache,
                                 dynamic_eft_features=dynamic_eft_features,
                             )
                         else:
-                            worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs_i, mask=current_worker_mask, current_team_emb=current_team_emb)
+                            worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs_i, mask=None, current_team_emb=current_team_emb)
                     
-                    if torch.isnan(worker_logits).any():
-                        worker_logits = torch.nan_to_num(worker_logits, nan=mask_value)
+                    if not deterministic and temperature != 1.0:
+                        worker_logits = worker_logits / max(float(temperature), 1.0e-5)
+                    worker_invalid = current_worker_mask.reshape(worker_logits.shape)
+                    worker_logits, worker_usable = _finalize_action_logits(
+                        worker_logits,
+                        worker_invalid,
+                        decision=f"worker[env={i},step={iter_cnt}]",
+                    )
+                    if not bool(worker_usable.item()):
+                        break
                     
                     if deterministic:
-                         if not no_mask: worker_logits = worker_logits.masked_fill(current_worker_mask, mask_value)
-                         if (worker_logits <= mask_value * 0.99).all(): break
-                         
-                         w_action = torch.argmax(worker_logits)
-                         w_lp = torch.tensor(0.0).to(self.device)
+                        w_action = torch.argmax(worker_logits, dim=-1)
+                        w_lp = torch.zeros((), device=self.device)
                     else:
-                         if not no_mask: worker_logits = worker_logits.masked_fill(current_worker_mask, mask_value)
-                         if (worker_logits <= mask_value * 0.99).all():
-                             break
-                         
-                         if temperature != 1.0:
-                             worker_logits = worker_logits / max(temperature, 1e-5)
-                             
-                         w_dist = Categorical(logits=worker_logits.float() if v2_mode else worker_logits)
-                         w_action = w_dist.sample()
-                         w_lp = w_dist.log_prob(w_action)
+                        w_dist = Categorical(logits=worker_logits)
+                        w_action = w_dist.sample()
+                        w_lp = w_dist.log_prob(w_action)
                     
                     w_idx = w_action.item()
                     team_indices.append(w_idx)
@@ -2903,6 +2992,10 @@ class PPOAgent:
                 return metrics
             except RuntimeError as exc:
                 if not self._is_cuda_oom_error(exc):
+                    self._cleanup_failed_update()
+                    if transaction is not None:
+                        self._restore_update_transaction(transaction)
+                        self._cleanup_failed_update()
                     raise
 
                 failed_batch_size = int(self.batch_size)
@@ -2923,6 +3016,13 @@ class PPOAgent:
                     "PPO 更新发生 CUDA OOM，且无法安全回滚跳过。"
                     "请启用 oom_transactional_updates，或进一步降低 PPO batch_size。"
                 ) from exc
+
+            except Exception:
+                self._cleanup_failed_update()
+                if transaction is not None:
+                    self._restore_update_transaction(transaction)
+                    self._cleanup_failed_update()
+                raise
 
     def _update_once(self, memory: Any, env: Any = None, current_ep: int = 1) -> Dict[str, float]:
         """执行一次 PPO 更新，并返回 TensorBoard 指标。"""
@@ -3266,10 +3366,18 @@ class PPOAgent:
                     else:
                         combined_task_mask = ~p_mask
                         
-                    task_logits = self.policy.task_head(task_x, global_context, mask=combined_task_mask)
-                    if torch.isnan(task_logits).any(): task_logits = torch.nan_to_num(task_logits, nan=(torch.finfo(task_logits.dtype).min / 2.0))
+                    task_logits = self.policy.task_head(task_x, global_context, mask=None)
+                    # 非有限合法 logits 由统一分布入口拒绝。
                     
-                    task_dist = Categorical(logits=task_logits.float())
+                    task_logits, task_usable = _finalize_action_logits(
+                        task_logits,
+                        combined_task_mask,
+                        decision="ppo_replay.task",
+                    )
+                    if not bool(task_usable.all()):
+                        raise RuntimeError("PPO replay 的 task 动作空间全屏蔽")
+
+                    task_dist = Categorical(logits=task_logits)
                     task_lp = task_dist.log_prob(batch.y_task)
                     task_entropy = task_dist.entropy()
                     action_scope = str(
@@ -3311,10 +3419,18 @@ class PPOAgent:
                         assert station_x is not None, (
                             "operation_station 及完整动作必须编码 station 节点"
                         )
-                        station_logits = self.policy.station_head(sel_task_emb, station_x, mask=curr_s_mask)
-                        if torch.isnan(station_logits).any(): station_logits = torch.nan_to_num(station_logits, nan=(torch.finfo(station_logits.dtype).min / 2.0))
+                        station_logits = self.policy.station_head(sel_task_emb, station_x, mask=None)
+                        # 非有限合法 logits 由统一分布入口拒绝。
 
-                        station_dist = Categorical(logits=station_logits.float())
+                        station_logits, station_usable = _finalize_action_logits(
+                            station_logits,
+                            curr_s_mask,
+                            decision="ppo_replay.station",
+                        )
+                        if not bool(station_usable.all()):
+                            raise RuntimeError("PPO replay 的 station 动作空间全屏蔽")
+
+                        station_dist = Categorical(logits=station_logits)
                         physical_action = batch.y_station >= 0
                         station_lp = station_dist.log_prob(torch.clamp(batch.y_station, min=0))
                         station_entropy = station_dist.entropy()
@@ -3344,7 +3460,7 @@ class PPOAgent:
                     team_lp = torch.zeros_like(task_lp)
                     team_entropy = torch.zeros_like(task_entropy)
                     
-                    if hasattr(batch, 'y_worker_mask') and not getattr(self.config, 'ablation_no_mask', False):
+                    if hasattr(batch, 'y_worker_mask'):
                          d_w_mask, _ = to_dense_batch(batch.y_worker_mask.float(), batch['worker'].batch)
                          curr_mask = (d_w_mask > 0.5) | (~w_p_mask)
                     else:
@@ -3444,7 +3560,7 @@ class PPOAgent:
                                 pressure_context=v2_pressure,
                                 team_state=v2_team_state,
                                 demand=selected_demand_v2,
-                                mask=curr_mask,
+                                mask=None,
                                 decode_cache=v2_decode_cache,
                                 dynamic_eft_features=self._build_v2_dynamic_eft_features(
                                     team_state=v2_team_state,
@@ -3459,10 +3575,20 @@ class PPOAgent:
                                 ),
                             )
                         else:
-                            logits = self.policy.worker_head.forward_choice(sel_task_emb, worker_x, mask=curr_mask, current_team_emb=current_team_emb)
-                        if torch.isnan(logits).any(): logits = torch.nan_to_num(logits, nan=(torch.finfo(logits.dtype).min / 2.0))
+                            logits = self.policy.worker_head.forward_choice(sel_task_emb, worker_x, mask=None, current_team_emb=current_team_emb)
+                        # 非有限合法 logits 由统一分布入口拒绝。
                         
-                        dist = Categorical(logits=logits.float())
+                        logits, worker_usable = _finalize_action_logits(
+                            logits,
+                            curr_mask,
+                            decision=f"ppo_replay.worker[step={k}]",
+                        )
+                        if not bool(worker_usable[valid_step].all()):
+                            raise RuntimeError(
+                                f"PPO replay 的 worker 动作空间全屏蔽，step={k}"
+                            )
+
+                        dist = Categorical(logits=logits)
                         step_lp = dist.log_prob(torch.clamp(target, min=0)) 
                         team_lp[valid_step] += step_lp[valid_step]
                         team_entropy[valid_step] += dist.entropy()[valid_step]
@@ -4107,10 +4233,18 @@ class PPOAgent:
 
             with self.autocast_context():
                 task_logits = self.policy.task_head(
-                    task_embs, global_i, mask=task_mask
+                    task_embs, global_i, mask=None
                 )
-            task_logits = torch.nan_to_num(task_logits, nan=-1.0e4)
-            task_dist = Categorical(logits=task_logits.float())
+            # 非有限合法 logits 由统一分布入口拒绝。
+            task_logits, task_usable = _finalize_action_logits(
+                task_logits,
+                task_mask.unsqueeze(0),
+                decision=f"v2_behavior.task[sample={sample_index}]",
+            )
+            if not bool(task_usable.item()):
+                raise RuntimeError("v2 behavior replay 的 task 动作空间全屏蔽")
+
+            task_dist = Categorical(logits=task_logits)
             task_lp = task_dist.log_prob(task_target)
             task_entropy = task_dist.entropy()
             normalized_task_entropy = self._normalized_categorical_entropy(
@@ -4146,10 +4280,18 @@ class PPOAgent:
                 station_logits = self.policy.station_head(
                     selected_task_emb,
                     station_embs.unsqueeze(0),
-                    mask=station_mask,
+                    mask=None,
                 )
-            station_logits = torch.nan_to_num(station_logits, nan=-1.0e4)
-            station_dist = Categorical(logits=station_logits.float())
+            # 非有限合法 logits 由统一分布入口拒绝。
+            station_logits, station_usable = _finalize_action_logits(
+                station_logits,
+                station_mask,
+                decision=f"v2_behavior.station[sample={sample_index}]",
+            )
+            if not bool(station_usable.item()):
+                raise RuntimeError("v2 behavior replay 的 station 动作空间全屏蔽")
+
+            station_dist = Categorical(logits=station_logits)
             station_lp = station_dist.log_prob(station_target)
             station_entropy = station_dist.entropy()
             normalized_station_entropy = self._normalized_categorical_entropy(
@@ -4208,7 +4350,7 @@ class PPOAgent:
                         pressure_context=pressure,
                         team_state=team_state,
                         demand=demand,
-                        mask=current_mask.unsqueeze(0),
+                        mask=None,
                         decode_cache=decode_cache,
                         dynamic_eft_features=self._build_v2_dynamic_eft_features(
                             team_state=team_state,
@@ -4220,8 +4362,20 @@ class PPOAgent:
                             mask=current_mask.unsqueeze(0),
                         ),
                     )
-                worker_logits = torch.nan_to_num(worker_logits, nan=-1.0e4)
-                worker_dist = Categorical(logits=worker_logits.float())
+                # 非有限合法 logits 由统一分布入口拒绝。
+                worker_logits, worker_usable = _finalize_action_logits(
+                    worker_logits,
+                    current_mask.unsqueeze(0),
+                    decision=(
+                        f"v2_behavior.worker[sample={sample_index},worker={worker_id}]"
+                    ),
+                )
+                if not bool(worker_usable.item()):
+                    raise RuntimeError(
+                        "v2 behavior replay 的 worker 动作空间全屏蔽"
+                    )
+
+                worker_dist = Categorical(logits=worker_logits)
                 target = torch.tensor([worker_id], device=self.device)
                 team_lp = team_lp + worker_dist.log_prob(target)
                 step_entropy = worker_dist.entropy()
@@ -5224,10 +5378,18 @@ class PPOAgent:
             task_target = y_task[sample_index].reshape(1)
             with self.autocast_context():
                 task_logits = self.policy.task_head(
-                    task_embs, global_i, mask=task_mask
+                    task_embs, global_i, mask=None
                 )
-            task_logits = torch.nan_to_num(task_logits, nan=-1.0e4)
-            task_dist = Categorical(logits=task_logits.float())
+            # 非有限合法 logits 由统一分布入口拒绝。
+            task_logits, task_usable = _finalize_action_logits(
+                task_logits,
+                task_mask.unsqueeze(0),
+                decision=f"fast_exact.task[sample={sample_index}]",
+            )
+            if not bool(task_usable.item()):
+                raise RuntimeError("fast-exact replay 的 task 动作空间全屏蔽")
+
+            task_dist = Categorical(logits=task_logits)
             task_lp = task_dist.log_prob(task_target)
             task_entropy = (
                 task_dist.entropy() if not actor_only else torch.zeros_like(task_lp)
@@ -5268,10 +5430,18 @@ class PPOAgent:
                 station_logits = self.policy.station_head(
                     selected_task_emb,
                     station_embs.unsqueeze(0),
-                    mask=station_mask,
+                    mask=None,
                 )
-            station_logits = torch.nan_to_num(station_logits, nan=-1.0e4)
-            station_dist = Categorical(logits=station_logits.float())
+            # 非有限合法 logits 由统一分布入口拒绝。
+            station_logits, station_usable = _finalize_action_logits(
+                station_logits,
+                station_mask,
+                decision=f"fast_exact.station[sample={sample_index}]",
+            )
+            if not bool(station_usable.item()):
+                raise RuntimeError("fast-exact replay 的 station 动作空间全屏蔽")
+
+            station_dist = Categorical(logits=station_logits)
             station_lp = station_dist.log_prob(station_target)
             station_entropy = (
                 station_dist.entropy()
@@ -5335,7 +5505,7 @@ class PPOAgent:
                         pressure_context=pressure,
                         team_state=team_state,
                         demand=demand,
-                        mask=current_mask.unsqueeze(0),
+                        mask=None,
                         decode_cache=decode_cache,
                         dynamic_eft_features=self._build_v2_dynamic_eft_features(
                             team_state=team_state,
@@ -5349,8 +5519,20 @@ class PPOAgent:
                             mask=current_mask.unsqueeze(0),
                         ),
                     )
-                worker_logits = torch.nan_to_num(worker_logits, nan=-1.0e4)
-                worker_dist = Categorical(logits=worker_logits.float())
+                # 非有限合法 logits 由统一分布入口拒绝。
+                worker_logits, worker_usable = _finalize_action_logits(
+                    worker_logits,
+                    current_mask.unsqueeze(0),
+                    decision=(
+                        f"fast_exact.worker[sample={sample_index},step={step}]"
+                    ),
+                )
+                if not bool(worker_usable.item()):
+                    raise RuntimeError(
+                        "fast-exact replay 的 worker 动作空间全屏蔽"
+                    )
+
+                worker_dist = Categorical(logits=worker_logits)
                 team_lp = team_lp + worker_dist.log_prob(worker_id_t.reshape(1))
                 step_entropy = (
                     worker_dist.entropy()

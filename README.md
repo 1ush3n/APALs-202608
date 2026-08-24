@@ -183,7 +183,7 @@ python train.py --help
 | `resume` | 恢复训练 | `resume=true` | Lightning 读取当前 run 的最近断点 |
 | `ablation_no_gat` | `ablation_no_gat` | `ablation_no_gat=true` | GAT 消融实验 |
 | `ablation_no_pointer` | `ablation_no_pointer` | `ablation_no_pointer=true` | Pointer 消融实验 |
-| `ablation_no_mask` | `ablation_no_mask` | `ablation_no_mask=true` | 动作掩码消融实验 |
+| `ablation_no_mask` | `ablation_no_mask` | 已禁用 | 主 PPO 必须保留动作硬约束 mask |
 
 参数覆盖必须使用 `key=value`。例如 batch size 的推荐写法是：
 
@@ -997,12 +997,9 @@ python train.py \
   experiment_name=scale_400_800_no_pointer \
   enable_multi_benchmark_eval=false
 
-python train.py \
-  experiment=scale_400_800_schedule \
-  ablation_no_mask=true \
-  experiment_name=scale_400_800_no_mask \
-  enable_multi_benchmark_eval=false
 ```
+
+`ablation_no_mask=true` 在主 PPO 中会显式报错；合法性 mask 属于安全约束，不再作为消融变量。
 
 也可以通过 `key=value` 做其他结构或训练机制消融：
 

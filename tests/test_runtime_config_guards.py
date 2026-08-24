@@ -14,6 +14,7 @@ from runtime.configuration import validate_runtime_config
         ("update_every_episodes", 2, "update_every_episodes=1"),
         ("n_m", 8, "n_m.*最大为 7"),
         ("sample_temperature", 0.8, "sample_temperature=1"),
+        ("ablation_no_mask", True, "ablation_no_mask 已禁用"),
     ),
 )
 def test_runtime_config_rejects_unsupported_training_values(

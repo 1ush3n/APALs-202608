@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import MethodType, SimpleNamespace
 
+import pytest
 import torch
 
 from configs import configs
@@ -109,3 +110,45 @@ def test_oom_retry_exhaustion_safely_skips_update() -> None:
     assert agent.current_step == 0
     for name, value in agent.policy.state_dict().items():
         assert torch.equal(value, initial[name])
+
+
+def test_nonfinite_update_failure_rolls_back_and_reraises() -> None:
+    overrides = {
+        "use_schedule_free": False,
+        "use_ema": False,
+        "ppo_batch_size_cap": 0,
+        "oom_transactional_updates": True,
+    }
+    with temporary_config(configs, overrides):
+        agent = _make_tiny_agent(batch_size=2)
+        initial = {
+            name: value.detach().clone()
+            for name, value in agent.policy.state_dict().items()
+        }
+
+        def fail_with_nonfinite(self, memory, env=None, current_ep=1):
+            with torch.no_grad():
+                next(self.policy.parameters()).add_(10.0)
+            self.current_step = 11
+            raise FloatingPointError("task logits 非有限")
+
+        agent._update_once = MethodType(fail_with_nonfinite, agent)
+        with pytest.raises(FloatingPointError, match="非有限"):
+            agent.update(SimpleNamespace(), current_ep=6)
+
+    assert agent.current_step == 0
+    for name, value in agent.policy.state_dict().items():
+        assert torch.equal(value, initial[name])
+
+
+def test_agent_rejects_no_mask_ablation_even_without_runtime_preflight() -> None:
+    overrides = {
+        "ablation_no_mask": True,
+        "use_schedule_free": False,
+        "use_ema": False,
+        "ppo_batch_size_cap": 0,
+    }
+
+    with temporary_config(configs, overrides):
+        with pytest.raises(ValueError, match="ablation_no_mask 已禁用"):
+            _make_tiny_agent()
