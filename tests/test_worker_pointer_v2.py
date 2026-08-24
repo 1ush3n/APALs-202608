@@ -282,13 +282,18 @@ def test_runtime_validation_accepts_only_attention_worker_scope_for_v2() -> None
     with pytest.raises(ValueError, match="operation_station_worker"):
         validate_runtime_config(wrong_scope)
 
+    local_only = Config()
+    local_only.team_selection_mode = "autoregressive_pressure_v2"
+    local_only.policy_action_scope = "operation_station_worker"
+    local_only.actor_context_mode = "local_only"
+    validate_runtime_config(local_only)
+
     wrong_context = Config()
     wrong_context.team_selection_mode = "autoregressive_pressure_v2"
     wrong_context.policy_action_scope = "operation_station_worker"
     wrong_context.actor_context_mode = "mean_max"
-    with pytest.raises(ValueError, match="actor_context_mode=attention"):
+    with pytest.raises(ValueError, match="actor_context_mode"):
         validate_runtime_config(wrong_context)
-
 
 def _batched_v2_config() -> Config:
     cfg = Config()

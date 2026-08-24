@@ -280,9 +280,13 @@ def validate_runtime_config(config: Config) -> None:
                 f"{config.team_selection_mode} 仅允许 "
                 "policy_action_scope=operation_station_worker"
             )
-        if config.actor_context_mode != "attention":
+        if is_fast_exact_mode(config) and config.actor_context_mode != "attention":
             raise ValueError(
                 f"{config.team_selection_mode} 要求 actor_context_mode=attention"
+            )
+        if config.actor_context_mode not in {"attention", "local_only"}:
+            raise ValueError(
+                f"{config.team_selection_mode} 的 actor_context_mode 仅支持 attention 或 local_only"
             )
         temperature = float(config.worker_pointer_pressure_temperature)
         epsilon = float(config.worker_pointer_supply_epsilon)
