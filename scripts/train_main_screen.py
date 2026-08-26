@@ -46,6 +46,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _resolve_screen_model_class(screen_model: str) -> type[HBGATPN]:
+    normalized = str(screen_model).strip().lower()
+    if normalized == "full":
+        return HBGATPN
+    from experiments.main_screen.screen_models import (
+        DualAttentionContextHBGATPN,
+        ScaleGatedContextHBGATPN,
+    )
+
+    if normalized == "scg":
+        return ScaleGatedContextHBGATPN
+    if normalized == "dual_attention":
+        return DualAttentionContextHBGATPN
+    raise ValueError("screen_model 仅允许 full、scg 或 dual_attention")
+
+
 class ScreenLightningModule(APALLightningModule):
     """在候选模型启用时额外记录可解释的门控指标。"""
 
@@ -64,12 +80,39 @@ class ScreenLightningModule(APALLightningModule):
         return result
 
 
-def _load_initial_weights(model: torch.nn.Module, checkpoint_path: Path, *, strict: bool) -> dict[str, list[str]]:
+def _load_initial_weights(
+    model: torch.nn.Module,
+    checkpoint_path: Path,
+    *,
+    strict: bool,
+) -> dict[str, Any]:
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
-    incompatibility = model.load_state_dict(checkpoint.state_dict, strict=False)
+    state_dict = checkpoint.state_dict
+    warm_start_transformed = False
+    from experiments.main_screen.screen_models import (
+        DualAttentionContextHBGATPN,
+        expand_dual_attention_task_projection,
+    )
+
+    if isinstance(model, DualAttentionContextHBGATPN):
+        weight = state_dict.get("task_head.context_proj.weight")
+        hidden_dim = int(model.config.hidden_dim)
+        if weight is not None and weight.shape == (hidden_dim, 3 * hidden_dim):
+            state_dict = expand_dual_attention_task_projection(
+                state_dict,
+                hidden_dim=hidden_dim,
+            )
+            warm_start_transformed = True
+
+    incompatibility = model.load_state_dict(state_dict, strict=False)
     missing = list(incompatibility.missing_keys)
     unexpected = list(incompatibility.unexpected_keys)
-    allowed_missing = {key for key in missing if key.startswith("screen_")}
+    allowed_prefix = (
+        "dual_attention_"
+        if isinstance(model, DualAttentionContextHBGATPN)
+        else "screen_"
+    )
+    allowed_missing = {key for key in missing if key.startswith(allowed_prefix)}
     disallowed_missing = sorted(set(missing) - allowed_missing)
     if strict and (disallowed_missing or unexpected):
         raise RuntimeError(
@@ -80,6 +123,7 @@ def _load_initial_weights(model: torch.nn.Module, checkpoint_path: Path, *, stri
         "missing": missing,
         "unexpected": unexpected,
         "loaded_checkpoint_format": [checkpoint.format_name],
+        "warm_start_transformed": warm_start_transformed,
     }
 
 
@@ -95,8 +139,7 @@ def run_screen(args: Any) -> None:
         explicit_fields=getattr(args, "explicit_config_fields", set()),
     )
     screen_model = str(args.screen_model).strip().lower()
-    if screen_model not in {"full", "scg"}:
-        raise ValueError("screen_model 仅允许 full 或 scg")
+    model_class = _resolve_screen_model_class(screen_model)
     if int(configs.max_episodes) <= 0:
         raise ValueError("max_episodes 必须为正数")
     if bool(args.resume):
@@ -138,15 +181,12 @@ def run_screen(args: Any) -> None:
     )
     eval_env = AirLineEnv_Graph(eval_path, seed=int(configs.seed))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if screen_model == "full":
-        model_class = HBGATPN
-    else:
-        # SCG 仅属于临时筛查模块；M0 不依赖该文件，也不触及正式模型代码。
-        from experiments.main_screen.screen_models import ScaleGatedContextHBGATPN
-
-        model_class = ScaleGatedContextHBGATPN
     model = model_class(configs).to(device)
     load_report = _load_initial_weights(model, checkpoint_path, strict=bool(args.init_strict))
+    total_parameters = sum(parameter.numel() for parameter in model.parameters())
+    trainable_parameters = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
     (context.artifacts_dir / "screen_initialization.json").write_text(
         json.dumps(
             {
@@ -155,6 +195,9 @@ def run_screen(args: Any) -> None:
                 "init_checkpoint": str(checkpoint_path.resolve()),
                 "init_checkpoint_sha256": _sha256(checkpoint_path),
                 "optimizer_state_restored": False,
+                "initialization_model": model_class.__name__,
+                "total_parameters": total_parameters,
+                "trainable_parameters": trainable_parameters,
                 "load_report": load_report,
             },
             ensure_ascii=False,
@@ -213,7 +256,7 @@ def run_screen(args: Any) -> None:
 def main(argv: list[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if should_show_help(raw_args):
-        print("用法：python scripts/train_main_screen.py experiment=scale_400_800_schedule init_checkpoint=路径 screen_model=full|scg")
+        print("用法：python scripts/train_main_screen.py experiment=scale_400_800_schedule init_checkpoint=路径 screen_model=full|scg|dual_attention")
         return 0
     try:
         args = initialize_hydra_runtime(
@@ -223,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
             default_experiment="scale_400_800_schedule",
             extra_arguments={
                 "init_checkpoint": ExtraArgument(required=True, help="仅加载模型权重的初始 checkpoint"),
-                "screen_model": ExtraArgument(default="full", help="full 或 scg"),
+                "screen_model": ExtraArgument(default="full", help="full、scg 或 dual_attention"),
                 "init_strict": ExtraArgument(default=True, help="是否拒绝非筛查模块的权重不匹配"),
             },
             create_run_context=True,
