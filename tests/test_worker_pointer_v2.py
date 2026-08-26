@@ -399,6 +399,66 @@ def test_worker_pointer_v2_scores_enriched_context_and_preserves_mask() -> None:
     assert logits[0, 2].item() == pytest.approx(-1.0e4)
 
 
+def test_worker_pointer_v2_6h_context_uses_only_first_head() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    head = WorkerPointer(_pointer_config("autoregressive_pressure_v2"))
+    context = build_worker_pressure_context(
+        **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+    )
+    torch.manual_seed(1234)
+    kwargs = {
+        "task_emb": torch.randn(1, 8),
+        "station_emb": torch.randn(1, 8),
+        "worker_embs": torch.randn(1, 3, 8),
+        "pressure_context": context,
+        "team_state": head.initialize_v2_state(batch_size=1, device=torch.device("cpu")),
+        "demand": torch.tensor([2.0]),
+        "mask": torch.tensor([[False, False, True]]),
+    }
+    context_first = torch.randn(1, 24)
+    context_second = torch.randn(1, 24)
+    cache_kwargs = {
+        key: value
+        for key, value in kwargs.items()
+        if key not in {"team_state", "mask"}
+    }
+    cache_first = head.build_v2_decode_cache(
+        **cache_kwargs, global_context=context_first
+    )
+    cache_dual = head.build_v2_decode_cache(
+        **cache_kwargs, global_context=torch.cat([context_first, context_second], dim=-1)
+    )
+    torch.testing.assert_close(cache_dual.query_prefix, cache_first.query_prefix, atol=0.0, rtol=0.0)
+    logits_first = head.forward_choice_v2(
+        **kwargs, global_context=context_first, decode_cache=cache_first
+    )
+    logits_dual = head.forward_choice_v2(
+        **kwargs,
+        global_context=torch.cat([context_first, context_second], dim=-1),
+        decode_cache=cache_dual,
+    )
+    torch.testing.assert_close(logits_dual, logits_first, atol=0.0, rtol=0.0)
+
+
+def test_worker_pointer_v2_rejects_context_width_other_than_3h_or_6h() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    head = WorkerPointer(_pointer_config("autoregressive_pressure_v2"))
+    context = build_worker_pressure_context(
+        **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+    )
+    with pytest.raises(AssertionError, match="global_context"):
+        head.build_v2_decode_cache(
+            task_emb=torch.randn(1, 8),
+            station_emb=torch.randn(1, 8),
+            global_context=torch.randn(1, 32),
+            worker_embs=torch.randn(1, 3, 8),
+            pressure_context=context,
+            demand=torch.tensor([2.0]),
+        )
+
+
 def test_v2_dynamic_eft_features_rank_legal_workers_and_zero_masked() -> None:
     from models.worker_pointer_context import build_worker_eft_features
 
