@@ -541,6 +541,25 @@ class WorkerPointer(nn.Module):
             # input shape: [B,H] * 3 -> [B,3H] -> [B,H]
             return self.v2_team_proj(torch.cat([mapped_sum, mean, maximum], dim=-1))
 
+    @staticmethod
+    def _v2_worker_global_context(
+        global_context: torch.Tensor,
+        *,
+        batch_size: int,
+        hidden_dim: int,
+    ) -> torch.Tensor:
+        """规范化 Worker v2 的全局上下文，只保留双头上下文的首头。"""
+
+        assert global_context.ndim == 2
+        assert global_context.size(0) == batch_size
+        assert global_context.size(1) in (3 * hidden_dim, 6 * hidden_dim), (
+            "global_context 必须为 [B,3H] 或 [B,6H]"
+        )
+        if global_context.size(1) == 6 * hidden_dim:
+            # [B,6H] -> [B,3H]，Worker v2 只消费双头上下文的第一头。
+            return global_context[:, : 3 * hidden_dim]
+        return global_context
+
     def build_v2_decode_cache(
         self,
         *,
@@ -555,13 +574,17 @@ class WorkerPointer(nn.Module):
 
         batch_size, num_workers, hidden_dim = worker_embs.shape
         assert task_emb.shape == station_emb.shape == (batch_size, hidden_dim)
-        assert global_context.shape == (batch_size, hidden_dim * 3)
+        worker_context = self._v2_worker_global_context(
+            global_context,
+            batch_size=batch_size,
+            hidden_dim=hidden_dim,
+        )
         assert pressure_context.pressure_all.shape == (batch_size, 5)
         assert pressure_context.candidate_exposure.shape == (batch_size, num_workers, 10)
         assert demand.reshape(-1).shape == (batch_size,)
         with torch.autocast(device_type=task_emb.device.type, enabled=False):
             query_prefix = torch.cat(
-                [task_emb.float(), station_emb.float(), global_context.float()], dim=-1
+                [task_emb.float(), station_emb.float(), worker_context.float()], dim=-1
             )
             pressure_features = torch.cat(
                 [
@@ -619,14 +642,18 @@ class WorkerPointer(nn.Module):
 
         batch_size, num_workers, hidden_dim = worker_embs.shape
         assert task_emb.shape == station_emb.shape == (batch_size, hidden_dim)
-        assert global_context.shape == (batch_size, hidden_dim * 3)
+        worker_context = self._v2_worker_global_context(
+            global_context,
+            batch_size=batch_size,
+            hidden_dim=hidden_dim,
+        )
         assert pressure_context.pressure_all.shape == (batch_size, 5)
         assert pressure_context.candidate_exposure.shape == (batch_size, num_workers, 10)
         assert demand.reshape(-1).shape == (batch_size,)
         cache = decode_cache or self.build_v2_decode_cache(
             task_emb=task_emb,
             station_emb=station_emb,
-            global_context=global_context,
+            global_context=worker_context,
             worker_embs=worker_embs,
             pressure_context=pressure_context,
             demand=demand,
