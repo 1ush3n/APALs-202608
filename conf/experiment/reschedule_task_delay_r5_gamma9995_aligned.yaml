@@ -21,6 +21,9 @@ reschedule_task_delay:
   reschedule_objective_delta_multiplier: 100.0
   reschedule_objective_delta_clip: 50.0
   reschedule_warm_start: true
+  adaptive_ppo_batch_by_tasks: true
+  adaptive_ppo_batch_small: 64
+  adaptive_ppo_batch_large: 64
 
 train:
   gamma: 0.9995
