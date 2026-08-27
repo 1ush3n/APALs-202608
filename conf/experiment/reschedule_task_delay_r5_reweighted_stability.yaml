@@ -1,0 +1,17 @@
+defaults:
+  - /experiment/reschedule_task_delay_r5
+  - _self_
+
+experiment:
+  experiment_name: reschedule_task_delay_r5_reweighted_stability
+
+reward:
+  r_coef_makespan: 0.20
+  r_coef_std: 0.0
+
+reschedule_task_delay:
+  reschedule_takt_violation_weight: 3.0
+  reschedule_stability_start_weight: 4.0
+  reschedule_stability_station_weight: 4.0
+  reschedule_stability_team_weight: 0.3
+  reschedule_use_objective_delta_reward: true

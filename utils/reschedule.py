@@ -351,7 +351,11 @@ def calculate_reschedule_objective_terms(
         else max(0.0, float(takt_violation_h))
     )
     return {
-        "score_makespan": makespan_value / takt,
+        "score_makespan": (
+            float(getattr(config_obj, "r_coef_makespan", 1.0))
+            * makespan_value
+            / takt
+        ),
         "score_balance": (
             float(getattr(config_obj, "r_coef_std", 0.0))
             * float(balance_std)
