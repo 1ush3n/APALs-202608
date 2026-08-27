@@ -1,0 +1,30 @@
+defaults:
+  - /experiment/reschedule_task_delay_r5
+  - _self_
+
+experiment:
+  experiment_name: reschedule_task_delay_r5_gamma9995_aligned
+  lr: 5.0e-5
+  actor_lr_multiplier: 0.5
+
+reward:
+  r_coef_makespan: 0.20
+  r_coef_std: 0.0
+
+reschedule_task_delay:
+  reschedule_baseline_model_path: runs/reschedule_task_delay_r5/reschedule_task_delay_r5_260825-170249/checkpoints/best.ckpt
+  reschedule_takt_violation_weight: 3.0
+  reschedule_stability_start_weight: 4.0
+  reschedule_stability_station_weight: 4.0
+  reschedule_stability_team_weight: 0.3
+  reschedule_use_objective_delta_reward: true
+  reschedule_objective_delta_multiplier: 100.0
+  reschedule_objective_delta_clip: 50.0
+  reschedule_warm_start: true
+
+train:
+  gamma: 0.9995
+  max_episodes: 60
+  num_envs: 4
+  batch_size: 32
+  accumulation_steps: 16
