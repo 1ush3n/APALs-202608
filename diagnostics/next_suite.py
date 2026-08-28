@@ -44,7 +44,7 @@ def _v2_overrides() -> tuple[str, ...]:
         "model.policy_action_scope=operation_station_worker",
         "model.policy_observation_scope=full",
         "model.actor_context_mode=attention",
-        "model.worker_pointer_v2_dynamic_eft_features=false",
+        "model.worker_pointer_v2_dynamic_eft_features=true",
         "model.worker_pointer_v2_behavior_replay=true",
         "model.worker_pointer_v2_replay_mode=behavior_group_exact_v1",
         "model.worker_pointer_v2_logical_batch_cap=32",
@@ -113,11 +113,21 @@ def build_train_command(
     ]
 
 
-def jobs_for_suite(suite: str, seeds: Iterable[int]) -> tuple[DiagnosticJob, ...]:
+def jobs_for_suite(
+    suite: str,
+    seeds: Iterable[int],
+    variant: str | None = None,
+) -> tuple[DiagnosticJob, ...]:
     """按套件筛选任务；all 仅用于串行保守执行。"""
     if suite not in {"t5", "t6", "all"}:
         raise ValueError("suite 仅允许 t5、t6 或 all")
+    if variant is not None and variant not in {"legacy", "v2", "local_only"}:
+        raise ValueError("variant 仅允许 legacy、v2 或 local_only")
     jobs = build_jobs(seeds)
     if suite == "all":
-        return jobs
-    return tuple(job for job in jobs if job.suite == suite)
+        selected = jobs
+    else:
+        selected = tuple(job for job in jobs if job.suite == suite)
+    if variant is not None:
+        selected = tuple(job for job in selected if job.variant == variant)
+    return selected

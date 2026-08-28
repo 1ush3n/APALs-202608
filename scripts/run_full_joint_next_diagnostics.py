@@ -103,6 +103,11 @@ def _run_job(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="运行 Full Joint T5/T6 诊断任务")
     parser.add_argument("--suite", choices=("t5", "t6", "all"), required=True)
+    parser.add_argument(
+        "--variant",
+        choices=("legacy", "v2", "local_only"),
+        default=None,
+    )
     parser.add_argument("--seeds", nargs="+", type=int, default=[42, 43, 44])
     parser.add_argument("--max-episodes", type=int, default=20)
     parser.add_argument("--num-envs", type=int, default=4)
@@ -117,7 +122,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    jobs = jobs_for_suite(args.suite, args.seeds)
+    jobs = jobs_for_suite(args.suite, args.seeds, variant=args.variant)
     commands = [
         build_train_command(
             job,
@@ -132,6 +137,7 @@ def main() -> int:
             json.dumps(
                 {
                     "suite": args.suite,
+                    "variant": args.variant,
                     "jobs": [
                         {
                             "run_name": job.run_name,
@@ -151,6 +157,7 @@ def main() -> int:
     manifest_path = _launcher_root() / f"{args.suite}_manifest.json"
     manifest: dict[str, Any] = {
         "suite": args.suite,
+        "variant": args.variant,
         "created_at": datetime.now().astimezone().isoformat(),
         "project_root": str(PROJECT_ROOT.resolve()),
         "max_episodes": int(args.max_episodes),

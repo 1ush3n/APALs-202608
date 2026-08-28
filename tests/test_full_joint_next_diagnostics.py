@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from diagnostics.next_suite import build_jobs, build_train_command
+from diagnostics.next_suite import build_jobs, build_train_command, jobs_for_suite
 
 
 def test_next_diagnostic_suite_has_non_overlapping_t5_and_t6_jobs() -> None:
@@ -12,15 +12,22 @@ def test_next_diagnostic_suite_has_non_overlapping_t5_and_t6_jobs() -> None:
     assert sum(job.suite == "t6" for job in jobs) == 1
 
 
-def test_v2_job_keeps_full_action_scope_and_disables_dynamic_eft() -> None:
+def test_v2_job_keeps_full_action_scope_and_enables_dynamic_eft() -> None:
     jobs = build_jobs(seeds=(42,))
     v2 = next(job for job in jobs if job.variant == "v2")
 
     assert "model.team_selection_mode=autoregressive_pressure_v2" in v2.overrides
     assert "model.policy_action_scope=operation_station_worker" in v2.overrides
     assert "model.policy_observation_scope=full" in v2.overrides
-    assert "model.worker_pointer_v2_dynamic_eft_features=false" in v2.overrides
+    assert "model.worker_pointer_v2_dynamic_eft_features=true" in v2.overrides
     assert "model.worker_pointer_v2_replay_mode=behavior_group_exact_v1" in v2.overrides
+
+
+def test_t5_can_select_only_v2_jobs() -> None:
+    jobs = jobs_for_suite("t5", seeds=(42, 43, 44), variant="v2")
+
+    assert len(jobs) == 3
+    assert {job.variant for job in jobs} == {"v2"}
 
 
 def test_t6_job_only_removes_global_attention_context() -> None:
