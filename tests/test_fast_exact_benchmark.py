@@ -407,6 +407,7 @@ def test_fast_exact_benchmark_enables_behavior_group_replay_contract(
         "behavior_group_exact_gpu_template_v2"
     )
     assert captured["worker_pointer_v2_behavior_replay"] is True
+    assert captured["worker_pointer_v2_rollout_group_upper_bound"] == 2
 
 
 def test_fast_exact_benchmark_selects_logical_encoder_batching(

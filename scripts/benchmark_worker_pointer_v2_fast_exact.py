@@ -179,6 +179,9 @@ def _apply_mode_overrides(
             FAST_EXACT_REPLAY_MODE if mode == "v2_fast_exact" else "batched_vectorized_v2"
         ),
         "worker_pointer_v2_behavior_replay": mode == "v2_fast_exact",
+        "worker_pointer_v2_rollout_group_upper_bound": (
+            num_envs if mode == "v2_fast_exact" else 4
+        ),
         "worker_pointer_v2_fast_replay_batching": (
             str(fast_replay_batching)
             if mode == "v2_fast_exact"
