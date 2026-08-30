@@ -175,6 +175,7 @@ class PPOAgent:
         self.last_gated_team_traces: list[FrozenGatedTeamTrace | None] = []
         self.worker_pointer_v2_diagnostics = WorkerPointerV2Diagnostics(num_skills=5)
         self.worker_pointer_v2_coverage_checked = False
+        self._v2_fast_exact_profile: dict[str, float] | None = None
         self.last_anchor_proposal_traces: list[FrozenAnchorProposalTrace | None] = []
         self._apcf_update_count: int = 0
         
@@ -305,6 +306,23 @@ class PPOAgent:
                 dtype=self.amp_dtype,
             )
         return nullcontext()
+
+    def _v2_fast_exact_profile_sync(self) -> None:
+        """仅在显式 profiling 时同步 CUDA，避免普通训练增加同步成本。"""
+        if self._v2_fast_exact_profile is not None and self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def _v2_fast_exact_profile_add_time(
+        self,
+        key: str,
+        started: float,
+    ) -> None:
+        """累加 profile 阶段耗时，调用方负责在结束前同步 CUDA。"""
+        if self._v2_fast_exact_profile is not None:
+            self._v2_fast_exact_profile[key] = (
+                self._v2_fast_exact_profile.get(key, 0.0)
+                + (time.perf_counter() - started) * 1000.0
+            )
 
     def _build_v2_pressure_context(
         self,
@@ -4830,6 +4848,10 @@ class PPOAgent:
             station_id = int(station_targets_cpu[sample_index])
             assert 0 <= station_id < station_embs.shape[0]
             station_mask = station_mask_matrix[task_id].unsqueeze(0)
+            if self._v2_fast_exact_profile is not None:
+                self._v2_fast_exact_profile["ActionHeadCalls"] = (
+                    self._v2_fast_exact_profile.get("ActionHeadCalls", 0.0) + 1.0
+                )
             with self.autocast_context():
                 station_logits = self.policy.station_head(
                     selected_task_emb,
@@ -5031,8 +5053,13 @@ class PPOAgent:
             plan_behavior_groups,
             select_validation_groups,
         )
+        from training.fast_exact_benchmark import summarize_group_sizes
 
         started = time.perf_counter()
+        profile_enabled = bool(
+            getattr(self.config, "worker_pointer_v2_fast_exact_profile", False)
+        )
+        self._v2_fast_exact_profile = {} if profile_enabled else None
         traces = list(getattr(memory, "worker_pointer_v2_behavior_traces", []) or [])
         if len(traces) != len(memory.states):
             raise RuntimeError(
@@ -5114,9 +5141,22 @@ class PPOAgent:
                 self._v2_fast_exact_builder = cached
             fast_exact_builder = cached
 
+        profile_builder_calls_before = int(
+            getattr(fast_exact_builder, "build_calls", 0)
+        )
+        profile_template_hits_before = int(
+            getattr(fast_exact_builder, "template_hits", 0)
+        )
+        profile_template_misses_before = int(
+            getattr(fast_exact_builder, "template_misses", 0)
+        )
+
         def _build_group(group_index: int) -> Any:
             memory_indices = [item[0] for item in restored[group_index]]
-            return self._build_v2_fast_exact_group(
+            if self._v2_fast_exact_profile is not None:
+                self._v2_fast_exact_profile_sync()
+                build_started = time.perf_counter()
+            fast_batch = self._build_v2_fast_exact_group(
                 memory=memory,
                 memory_indices=memory_indices,
                 b_task=b_task,
@@ -5127,6 +5167,13 @@ class PPOAgent:
                 advantages=advantages,
                 fast_exact_builder=fast_exact_builder,
             )
+            if self._v2_fast_exact_profile is not None:
+                self._v2_fast_exact_profile_sync()
+                self._v2_fast_exact_profile_add_time("BuilderMs", build_started)
+                self._v2_fast_exact_profile["BuilderCalls"] = (
+                    self._v2_fast_exact_profile.get("BuilderCalls", 0.0) + 1.0
+                )
+            return fast_batch
 
         logical_batches_by_epoch = [
             plan_behavior_groups(
@@ -5155,9 +5202,17 @@ class PPOAgent:
         replayed_rows: list[tuple[float, float, float]] = []
         with torch.no_grad():
             for group_index in validation_groups:
+                if self._v2_fast_exact_profile is not None:
+                    self._v2_fast_exact_profile_sync()
+                    precheck_started = time.perf_counter()
                 outputs = self._replay_v2_fast_exact_group(
                     _build_group(group_index), actor_only=True
                 )
+                if self._v2_fast_exact_profile is not None:
+                    self._v2_fast_exact_profile_sync()
+                    self._v2_fast_exact_profile_add_time(
+                        "PrecheckMs", precheck_started
+                    )
                 precheck_cache[group_index] = outputs
                 assert len(outputs) == len(restored[group_index])
                 for output, (_memory_index, trace) in zip(
@@ -5276,7 +5331,27 @@ class PPOAgent:
                     for group_index in batch_groups:
                         physical_group_count += 1
                         group_batch = _build_group(group_index)
+                        if self._v2_fast_exact_profile is not None:
+                            self._v2_fast_exact_profile_sync()
+                            formal_started = time.perf_counter()
                         outputs = self._replay_v2_fast_exact_group(group_batch)
+                        if self._v2_fast_exact_profile is not None:
+                            self._v2_fast_exact_profile_sync()
+                            self._v2_fast_exact_profile_add_time(
+                                "FormalReplayMs", formal_started
+                            )
+                            self._v2_fast_exact_profile["FormalReplayCalls"] = (
+                                self._v2_fast_exact_profile.get(
+                                    "FormalReplayCalls", 0.0
+                                )
+                                + 1.0
+                            )
+                            self._v2_fast_exact_profile["ReplaySampleCount"] = (
+                                self._v2_fast_exact_profile.get(
+                                    "ReplaySampleCount", 0.0
+                                )
+                                + float(len(outputs))
+                            )
                         sample_losses: list[torch.Tensor] = []
                         for local_index, (output, (memory_index, _trace)) in enumerate(
                             zip(outputs, restored[group_index])
@@ -5396,7 +5471,15 @@ class PPOAgent:
                             group_loss_sum * float(loss_scale),
                             window_sample_count=window_sample_count,
                         )
+                        if self._v2_fast_exact_profile is not None:
+                            self._v2_fast_exact_profile_sync()
+                            backward_started = time.perf_counter()
                         self.scaler.scale(scaled_loss).backward()
+                        if self._v2_fast_exact_profile is not None:
+                            self._v2_fast_exact_profile_sync()
+                            self._v2_fast_exact_profile_add_time(
+                                "BackwardMs", backward_started
+                            )
 
                 self.scaler.unscale_(self.optimizer)
                 gradient_diagnostics = self._collect_gradient_diagnostics(
@@ -5412,9 +5495,17 @@ class PPOAgent:
                     self.critic_parameters,
                     max_norm=float(self.config.clip_v_grad_norm),
                 )
+                if self._v2_fast_exact_profile is not None:
+                    self._v2_fast_exact_profile_sync()
+                    optimizer_started = time.perf_counter()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.optimizer.zero_grad()
+                if self._v2_fast_exact_profile is not None:
+                    self._v2_fast_exact_profile_sync()
+                    self._v2_fast_exact_profile_add_time(
+                        "OptimizerMs", optimizer_started
+                    )
                 update_steps += 1
                 # actor-only 输出只对生成它们的策略参数版本有效。每次参数更新后
                 # 立即失效，防止后续累计窗口或 PPO epoch 使用旧策略计算 KL。
@@ -5520,6 +5611,82 @@ class PPOAgent:
                 "PointerV2/NonFiniteCount": 0.0,
             }
         )
+        if self._v2_fast_exact_profile is not None:
+            group_summary = summarize_group_sizes(group_sizes)
+            profile = self._v2_fast_exact_profile
+            metrics.update(
+                {
+                    "V2/FastExact/Profile/PhysicalGroupCount": float(
+                        physical_group_count
+                    ),
+                    "V2/FastExact/Profile/LogicalBatchCount": float(
+                        logical_batch_count
+                    ),
+                    "V2/FastExact/Profile/PhysicalGroupMeanSize": group_summary[
+                        "mean"
+                    ],
+                    "V2/FastExact/Profile/PhysicalGroupP50Size": group_summary[
+                        "p50"
+                    ],
+                    "V2/FastExact/Profile/PhysicalGroupP95Size": group_summary[
+                        "p95"
+                    ],
+                    "V2/FastExact/Profile/BuilderCalls": profile.get(
+                        "BuilderCalls",
+                        float(
+                            int(getattr(fast_exact_builder, "build_calls", 0))
+                            - profile_builder_calls_before
+                        ),
+                    ),
+                    "V2/FastExact/Profile/BuilderMs": profile.get("BuilderMs", 0.0),
+                    "V2/FastExact/Profile/TemplateHits": float(
+                        int(getattr(fast_exact_builder, "template_hits", 0))
+                        - profile_template_hits_before
+                    ),
+                    "V2/FastExact/Profile/TemplateMisses": float(
+                        int(getattr(fast_exact_builder, "template_misses", 0))
+                        - profile_template_misses_before
+                    ),
+                    "V2/FastExact/Profile/EncoderCalls": profile.get(
+                        "EncoderCalls", 0.0
+                    ),
+                    "V2/FastExact/Profile/EncoderMs": profile.get(
+                        "EncoderMs", 0.0
+                    ),
+                    "V2/FastExact/Profile/ActionHeadCalls": profile.get(
+                        "ActionHeadCalls", 0.0
+                    ),
+                    "V2/FastExact/Profile/ActionHeadMs": profile.get(
+                        "ActionHeadMs", 0.0
+                    ),
+                    "V2/FastExact/Profile/WorkerPointerCalls": profile.get(
+                        "WorkerPointerCalls", 0.0
+                    ),
+                    "V2/FastExact/Profile/WorkerPointerMs": profile.get(
+                        "WorkerPointerMs", 0.0
+                    ),
+                    "V2/FastExact/Profile/PrecheckMs": profile.get(
+                        "PrecheckMs", 0.0
+                    ),
+                    "V2/FastExact/Profile/FormalReplayCalls": profile.get(
+                        "FormalReplayCalls", 0.0
+                    ),
+                    "V2/FastExact/Profile/FormalReplayMs": profile.get(
+                        "FormalReplayMs", 0.0
+                    ),
+                    "V2/FastExact/Profile/BackwardMs": profile.get(
+                        "BackwardMs", 0.0
+                    ),
+                    "V2/FastExact/Profile/OptimizerMs": profile.get(
+                        "OptimizerMs", 0.0
+                    ),
+                    "V2/FastExact/Profile/ReplaySamplesPerSec": profile.get(
+                        "ReplaySampleCount", 0.0
+                    )
+                    / max(elapsed, 1.0e-9),
+                }
+            )
+            self._v2_fast_exact_profile = None
         return metrics
 
     def _run_v2_behavior_replay_update(
@@ -6095,6 +6262,9 @@ class PPOAgent:
         """
         batch = fast_batch.batch
         group_size = fast_batch.group_size
+        if self._v2_fast_exact_profile is not None:
+            self._v2_fast_exact_profile_sync()
+            encoder_started = time.perf_counter()
         with self.autocast_context():
             x_dict, global_context = self.policy(batch)
             state_values = None
@@ -6128,6 +6298,12 @@ class PPOAgent:
                     state_values = self.policy.get_value(
                         batch, actor_x_dict_encoded=x_dict
                     ).reshape(-1)
+        if self._v2_fast_exact_profile is not None:
+            self._v2_fast_exact_profile_sync()
+            self._v2_fast_exact_profile_add_time("EncoderMs", encoder_started)
+            self._v2_fast_exact_profile["EncoderCalls"] = (
+                self._v2_fast_exact_profile.get("EncoderCalls", 0.0) + 1.0
+            )
 
         outputs: list[dict[str, torch.Tensor]] = []
         worker_layout = resolve_worker_feature_layout(self.config)
@@ -6138,6 +6314,9 @@ class PPOAgent:
         y_task = batch.y_task
         y_station = batch.y_station
         y_team = batch.y_team
+        if self._v2_fast_exact_profile is not None:
+            self._v2_fast_exact_profile_sync()
+            action_head_started = time.perf_counter()
 
         for sample_index in range(group_size):
             task_start, task_end = task_ptr[sample_index], task_ptr[sample_index + 1]
@@ -6161,6 +6340,10 @@ class PPOAgent:
             global_i = global_context[sample_index].unsqueeze(0)
 
             task_target = y_task[sample_index].reshape(1)
+            if self._v2_fast_exact_profile is not None:
+                self._v2_fast_exact_profile["ActionHeadCalls"] = (
+                    self._v2_fast_exact_profile.get("ActionHeadCalls", 0.0) + 1.0
+                )
             with self.autocast_context():
                 task_logits = self.policy.task_head(
                     task_embs, global_i, mask=None
@@ -6298,6 +6481,9 @@ class PPOAgent:
             team_lp = torch.zeros_like(task_lp)
             team_entropy = torch.zeros_like(task_entropy)
             normalized_team_entropy = torch.zeros_like(normalized_task_entropy)
+            if self._v2_fast_exact_profile is not None:
+                self._v2_fast_exact_profile_sync()
+                worker_pointer_started = time.perf_counter()
             for step in range(int(valid_team.numel())):
                 worker_id_t = valid_team[step]
                 self.worker_pointer_v2_diagnostics.record_team_state(
@@ -6305,6 +6491,17 @@ class PPOAgent:
                     selected_capacity_sum=team_state.selected_capacity_sum,
                 )
                 with self.autocast_context():
+                    if self._v2_fast_exact_profile is not None:
+                        self._v2_fast_exact_profile["ActionHeadCalls"] = (
+                            self._v2_fast_exact_profile.get("ActionHeadCalls", 0.0)
+                            + 1.0
+                        )
+                        self._v2_fast_exact_profile["WorkerPointerCalls"] = (
+                            self._v2_fast_exact_profile.get(
+                                "WorkerPointerCalls", 0.0
+                            )
+                            + 1.0
+                        )
                     worker_logits = self.policy.worker_head.forward_choice_v2(
                         task_emb=selected_task_emb,
                         station_emb=station_emb_i,
@@ -6391,6 +6588,12 @@ class PPOAgent:
                 current_mask = current_mask.clone()
                 current_mask[worker_id_t] = True
 
+            if self._v2_fast_exact_profile is not None:
+                self._v2_fast_exact_profile_sync()
+                self._v2_fast_exact_profile_add_time(
+                    "WorkerPointerMs", worker_pointer_started
+                )
+
             normalized_entropy = (
                 normalized_task_entropy
                 + 1.5 * normalized_station_entropy
@@ -6424,4 +6627,9 @@ class PPOAgent:
                 }
             )
         assert len(outputs) == group_size
+        if self._v2_fast_exact_profile is not None:
+            self._v2_fast_exact_profile_sync()
+            self._v2_fast_exact_profile_add_time(
+                "ActionHeadMs", action_head_started
+            )
         return outputs

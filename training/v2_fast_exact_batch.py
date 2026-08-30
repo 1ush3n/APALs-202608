@@ -375,6 +375,7 @@ class GPUExactBatchBuilder:
         self._templates: "OrderedDict[tuple, Any]" = OrderedDict()
         # (dataset_idx, worker_topology_key) -> worker->skill 边
         self._worker_skill_topologies: dict = {}
+        self.build_calls = 0
         self.template_hits = 0
         self.template_misses = 0
 
@@ -884,6 +885,7 @@ class GPUExactBatchBuilder:
         *,
         group_id: object | None = None,
     ) -> V2FastExactBatch:
+        self.build_calls += 1
         dataset_idx = self._validate_snapshots(snapshots)
         group_size = len(snapshots)
         ctx = self._load_dataset_context(dataset_idx)
