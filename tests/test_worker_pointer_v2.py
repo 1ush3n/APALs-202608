@@ -124,6 +124,24 @@ def test_worker_pressure_context_near_demand_respects_action_mask_without_changi
     assert unmasked.demand_near[0, 1].item() == 0.0  # not-ready task remains excluded
 
 
+def test_normalized_entropy_uses_each_sample_legal_action_count() -> None:
+    from ppo_agent import PPOAgent
+
+    entropy = torch.log(torch.tensor([4.0, 3.0, 2.0, 1.0]))
+    invalid_mask = torch.tensor(
+        [
+            [False, False, False, False],
+            [False, False, False, True],
+            [False, False, True, True],
+            [False, True, True, True],
+        ]
+    )
+
+    normalized = PPOAgent._normalized_categorical_entropy(entropy, invalid_mask)
+
+    torch.testing.assert_close(normalized, torch.tensor([1.0, 1.0, 1.0, 0.0]))
+
+
 def test_v2_diagnostics_summarize_action_space_and_eft_rank() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
     from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
@@ -997,13 +1015,26 @@ def test_v2_dynamic_eft_features_are_forwarded_to_batched_replay(
     from training.memory import Memory
 
     forwarded: list[torch.Tensor | None] = []
+    normalization_masks: list[torch.Tensor] = []
     original = WorkerPointer.forward_choice_v2
+    original_normalized_entropy = PPOAgent._normalized_categorical_entropy
 
     def spy(self: WorkerPointer, **kwargs: object) -> torch.Tensor:
         forwarded.append(kwargs.get("dynamic_eft_features"))
         return original(self, **kwargs)
 
+    def normalization_spy(
+        entropy: torch.Tensor, invalid_mask: torch.Tensor
+    ) -> torch.Tensor:
+        normalization_masks.append(invalid_mask.detach().cpu())
+        return original_normalized_entropy(entropy, invalid_mask)
+
     monkeypatch.setattr(WorkerPointer, "forward_choice_v2", spy)
+    monkeypatch.setattr(
+        PPOAgent,
+        "_normalized_categorical_entropy",
+        staticmethod(normalization_spy),
+    )
     overrides = _small_overrides(
         team_selection_mode="autoregressive_pressure_v2",
         policy_action_scope="operation_station_worker",
@@ -1050,6 +1081,8 @@ def test_v2_dynamic_eft_features_are_forwarded_to_batched_replay(
     assert metrics["PPO/GradientsFinite"] == 1.0
     assert forwarded and all(features is not None for features in forwarded)
     assert all(features.shape[-1] == 2 and torch.isfinite(features).all() for features in forwarded)
+    assert len(normalization_masks) >= 3
+    assert any(mask.shape == (2, 80) for mask in normalization_masks)
 
 
 @pytest.mark.parametrize(

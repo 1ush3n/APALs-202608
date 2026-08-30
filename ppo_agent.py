@@ -16,7 +16,11 @@ from typing import Callable, Tuple, List, Dict, Optional, Any
 from torch_geometric.data import HeteroData
 from torch_geometric.utils import to_dense_batch
 from configs import configs
-from core.action_completion import EarliestFinishActionCompleter, TeamCandidates
+from core.action_completion import (
+    EarliestFinishActionCompleter,
+    TeamCandidates,
+    build_action_completer,
+)
 from models.worker_pointer_context import (
     WorkerPointerV2State,
     WorkerPressureContext,
@@ -161,7 +165,8 @@ class PPOAgent:
             raise ValueError(
                 "ablation_no_mask 已禁用：主 PPO 方法必须在分布边界保留硬约束 mask"
             )
-        self.action_completer = EarliestFinishActionCompleter(self.config)
+        self.action_completer = build_action_completer(self.config)
+        self.eft_action_completer = EarliestFinishActionCompleter(self.config)
         self.policy = model.to(device)
         # 仅供 rollout_service 在同一次批量解码后立即写入 Memory；不参与 checkpoint。
         self.last_gated_team_trace: FrozenGatedTeamTrace | None = None
@@ -631,7 +636,7 @@ class PPOAgent:
         temperature: float,
     ) -> tuple[list[int], torch.Tensor, FrozenGatedTeamTrace] | None:
         """从同一确定性候选生成器中采样团队，供单环境和批量路径共用。"""
-        candidates = self.action_completer.enumerate_team_candidates(
+        candidates = self.eft_action_completer.enumerate_team_candidates(
             obs,
             task_id=int(task_id),
             station_id=int(station_id),
@@ -779,7 +784,7 @@ class PPOAgent:
              评估按原始 logits 温度 0 确定性选择；
           4) 即使 z=0 执行锚点，提议的完整对数概率也计入 team_logprob。
         """
-        completer = self.action_completer
+        completer = self.eft_action_completer
         layout = resolve_worker_feature_layout(self.config)
         anchor = completer.complete(
             obs,
@@ -3380,6 +3385,9 @@ class PPOAgent:
                     task_dist = Categorical(logits=task_logits)
                     task_lp = task_dist.log_prob(batch.y_task)
                     task_entropy = task_dist.entropy()
+                    norm_task_entropy = self._normalized_categorical_entropy(
+                        task_entropy, combined_task_mask
+                    )
                     action_scope = str(
                         getattr(
                             self.config,
@@ -3415,6 +3423,7 @@ class PPOAgent:
                         station_logits = torch.zeros_like(curr_s_mask, dtype=task_logits.dtype)
                         station_lp = torch.zeros_like(task_lp)
                         station_entropy = torch.zeros_like(task_entropy)
+                        norm_station_entropy = torch.zeros_like(station_entropy)
                     else:
                         assert station_x is not None, (
                             "operation_station 及完整动作必须编码 station 节点"
@@ -3436,6 +3445,9 @@ class PPOAgent:
                         station_entropy = station_dist.entropy()
                         station_lp = station_lp * physical_action.to(station_lp.dtype)
                         station_entropy = station_entropy * physical_action.to(station_entropy.dtype)
+                        norm_station_entropy = self._normalized_categorical_entropy(
+                            station_entropy, curr_s_mask
+                        )
                     
                     # C. Worker Team LogProb
                     if "worker" in x_dict:
@@ -3459,6 +3471,7 @@ class PPOAgent:
                         )
                     team_lp = torch.zeros_like(task_lp)
                     team_entropy = torch.zeros_like(task_entropy)
+                    normalized_team_entropy = torch.zeros_like(team_entropy)
                     
                     if hasattr(batch, 'y_worker_mask'):
                          d_w_mask, _ = to_dense_batch(batch.y_worker_mask.float(), batch['worker'].batch)
@@ -3591,7 +3604,14 @@ class PPOAgent:
                         dist = Categorical(logits=logits)
                         step_lp = dist.log_prob(torch.clamp(target, min=0)) 
                         team_lp[valid_step] += step_lp[valid_step]
-                        team_entropy[valid_step] += dist.entropy()[valid_step]
+                        step_entropy = dist.entropy()
+                        team_entropy[valid_step] += step_entropy[valid_step]
+                        step_normalized_entropy = self._normalized_categorical_entropy(
+                            step_entropy, curr_mask
+                        )
+                        normalized_team_entropy[valid_step] += (
+                            step_normalized_entropy[valid_step]
+                        )
                         
                         # Update current_team_emb
                         valid_b_indices = torch.nonzero(valid_step).squeeze(-1)
@@ -3833,15 +3853,9 @@ class PPOAgent:
                     value_loss = c_val * value_loss_raw
                     
                     # 鍔ㄦ€佽幏鍙栧綋鍓?batch 涓悇鍐崇瓥鍒嗘敮鐨勬渶澶у姩浣滅淮搴︿互杩涜鐔靛綊涓€鍖?
-                    max_task_dim = float(task_logits.size(-1))
-                    max_station_dim = float(station_logits.size(-1))
-                    max_worker_dim = float(worker_x.size(1))
                     
                     # 瀵瑰悇鍒嗘敮鐨勭喌鍒嗗埆鍦ㄥ悇鑷渶澶у姩浣滅淮搴︿笅閲囩敤瀵规暟灏哄害杩涜 [0, 1] 褰掍竴鍖?
-                    norm_task_entropy = task_entropy / math.log(max(2.0, max_task_dim))
-                    norm_station_entropy = station_entropy / math.log(max(2.0, max_station_dim))
                     # 鍥㈤槦宸ヤ汉鐨勬渶澶х喌浠ラ€夋嫨 2 涓伐浜轰负鍩哄簳绠椾綔 2.0 鍊嶇殑鏈€澶у伐浜虹淮鏁板鏁?
-                    norm_team_entropy = team_entropy / (math.log(max(2.0, max_worker_dim)) * 2.0)
                     
                     # 璁剧珛鍒嗘敮瑙ｈ€︾郴鏁颁互鐙珛鎺у埗鍜屽钩琛″悇鍒嗘敮鎺㈢储鍔涘害
                     c_ent_task = 1.0
@@ -3851,7 +3865,7 @@ class PPOAgent:
                     avg_normalized_entropy = (
                         c_ent_task * norm_task_entropy.mean() +
                         c_ent_station * norm_station_entropy.mean() +
-                        c_ent_team * norm_team_entropy.mean()
+                        c_ent_team * normalized_team_entropy.mean()
                     )
                     entropy_loss = -c_ent * avg_normalized_entropy
 
