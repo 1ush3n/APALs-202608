@@ -357,3 +357,26 @@ def test_run_mode_exports_fast_exact_profile_metrics(
     assert row["num_envs"] == 2
     assert row["profile"]["EncoderCalls"] == 1.0
     assert row["profile"]["ReplaySamplesPerSec"] == 2.0
+
+
+def test_fast_exact_benchmark_enables_profile_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def capture_update(values: dict[str, object]) -> None:
+        captured.update(values)
+
+    monkeypatch.setattr(benchmark_script.configs, "update_from_dict", capture_update)
+
+    benchmark_script._apply_mode_overrides(
+        "v2_fast_exact",
+        num_envs_override=2,
+        batch_size=256,
+        max_steps=0,
+        seed=42,
+        data_path=tmp_path / "680.csv",
+    )
+
+    assert captured["worker_pointer_v2_fast_exact_profile"] is True

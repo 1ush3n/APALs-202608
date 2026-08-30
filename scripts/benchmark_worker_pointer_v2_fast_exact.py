@@ -170,6 +170,7 @@ def _apply_mode_overrides(
         "lightning_precision": "bf16-mixed",
         "batch_size": int(batch_size),
         "worker_pointer_v2_logical_batch_cap": int(batch_size),
+        "worker_pointer_v2_fast_exact_profile": mode == "v2_fast_exact",
         "data_file_path": str(data_path),
         "train_data_path_or_dir": str(data_path),
         "num_envs": num_envs,
