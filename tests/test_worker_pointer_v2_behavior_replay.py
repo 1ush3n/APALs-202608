@@ -140,6 +140,47 @@ def test_v2_behavior_replay_first_contract_passes_and_aggregation_runs() -> None
             assert torch.isfinite(torch.tensor(value)), f"非有限指标: {value}"
 
 
+def test_v2_behavior_snapshot_stores_component_logprobs_and_conditional_values() -> None:
+    overrides = _v2_overrides()
+    overrides["conditional_head_baseline_mode"] = "diagnostic"
+    with temporary_config(configs, overrides):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = PPOAgent(
+            HBGATPN(configs),
+            lr=1.0e-4,
+            gamma=0.99,
+            k_epochs=1,
+            eps_clip=0.2,
+            device=_DEVICE,
+            batch_size=4,
+            total_timesteps=1,
+            config=configs,
+        )
+        obs, (task_mask, station_mask, worker_mask) = _advance_to_ready_physical_task(env)
+        result = agent.select_actions_batch(
+            [obs],
+            [task_mask],
+            [station_mask],
+            [worker_mask],
+            deterministic=False,
+            temperature=1.0,
+            is_eval=False,
+        )
+
+        assert not result[0][-1]
+        component_logprobs = agent.last_v2_behavior_logprobs[0]
+        conditional_values = agent.last_v2_behavior_values[0]
+        assert component_logprobs is not None
+        assert conditional_values is not None
+        observed_logprob = result[0][1]
+        if isinstance(observed_logprob, (list, tuple)):
+            observed_logprob = observed_logprob[0]
+        assert sum(component_logprobs) == pytest.approx(
+            observed_logprob, abs=1.0e-6
+        )
+        assert all(torch.isfinite(torch.tensor(value)) for value in conditional_values)
+
+
 def test_v2_behavior_replay_fails_closed_on_contract_break() -> None:
     with temporary_config(configs, _v2_overrides()):
         env = AirLineEnv_Graph(DATA_PATH, seed=42)

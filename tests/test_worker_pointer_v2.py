@@ -836,6 +836,62 @@ def test_conditional_critic_diagnostic_heads_detach_shared_inputs() -> None:
     )
 
 
+def test_memory_has_component_behavior_fields_aligned_with_state_storage() -> None:
+    from training.memory import Memory
+
+    memory = Memory()
+
+    assert memory.old_task_logprob == []
+    assert memory.old_station_logprob == []
+    assert memory.old_team_logprob == []
+    assert memory.old_V_task == []
+    assert memory.old_V_station == []
+    assert memory.old_V_worker == []
+
+    memory.states.append({"step": 0})
+    memory.old_task_logprob.append(0.1)
+    memory.old_station_logprob.append(0.2)
+    memory.old_team_logprob.append(0.3)
+    memory.old_V_task.append(1.0)
+    memory.old_V_station.append(2.0)
+    memory.old_V_worker.append(3.0)
+    assert len(memory.old_task_logprob) == len(memory.states)
+    assert len(memory.old_V_worker) == len(memory.states)
+
+    memory.clear()
+    assert not memory.old_task_logprob
+    assert not memory.old_V_worker
+
+
+def test_rollout_memory_append_keeps_component_behavior_data_on_cpu() -> None:
+    from training.memory import Memory
+    from training.rollout_service import APALRolloutService
+
+    class StubRolloutService:
+        device = torch.device("cpu")
+
+    memory = Memory()
+    APALRolloutService._append_action(
+        StubRolloutService(),
+        memory,
+        state={"step": 0},
+        action=(1, 0, [2]),
+        logprob=-0.6,
+        value=0.4,
+        masks=(None, None, None),
+        component_behavior_logprobs=(0.1, 0.2, 0.3),
+        conditional_values=(1.0, 2.0, 3.0),
+    )
+
+    assert memory.old_task_logprob == [0.1]
+    assert memory.old_station_logprob == [0.2]
+    assert memory.old_team_logprob == [0.3]
+    assert memory.old_V_task == [1.0]
+    assert memory.old_V_station == [2.0]
+    assert memory.old_V_worker == [3.0]
+    assert all(isinstance(value, float) for value in memory.old_V_task)
+
+
 def test_worker_pointer_v2_a1_uses_log1p_partial_team_operational_state() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
 

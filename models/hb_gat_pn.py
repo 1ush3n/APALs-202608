@@ -1210,15 +1210,21 @@ class HBGATPN(nn.Module):
         assert self.critic_task_cond is not None
         assert self.critic_station_cond is not None
         assert self.critic_worker_cond is not None
-        task_value = self.critic_task_cond(critic_context)
-        station_input = torch.cat(
-            [critic_context, critic_task_emb], dim=-1
-        )  # [B,3H] + [B,H] -> [B,4H]
-        station_value = self.critic_station_cond(station_input)
-        worker_input = torch.cat(
-            [critic_context, critic_task_emb, critic_station_emb], dim=-1
-        )  # [B,3H] + [B,H] + [B,H] -> [B,5H]
-        worker_value = self.critic_worker_cond(worker_input)
+        with torch.amp.autocast(
+            device_type=critic_context.device.type, enabled=False
+        ):
+            critic_context = critic_context.float()
+            critic_task_emb = critic_task_emb.float()
+            critic_station_emb = critic_station_emb.float()
+            task_value = self.critic_task_cond(critic_context)
+            station_input = torch.cat(
+                [critic_context, critic_task_emb], dim=-1
+            )  # [B,3H] + [B,H] -> [B,4H]
+            station_value = self.critic_station_cond(station_input)
+            worker_input = torch.cat(
+                [critic_context, critic_task_emb, critic_station_emb], dim=-1
+            )  # [B,3H] + [B,H] + [B,H] -> [B,5H]
+            worker_value = self.critic_worker_cond(worker_input)
         values = {
             "task": task_value,
             "station": station_value,

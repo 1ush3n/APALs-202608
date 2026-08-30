@@ -2341,6 +2341,7 @@ class PPOAgent:
         anchor_proposal_traces: list[FrozenAnchorProposalTrace | None] = [None] * batch_size
         # WorkerPointer v2 行为三部分 log-prob（task/station/team），与 results 顺序对齐。
         self.last_v2_behavior_logprobs = [None] * batch_size
+        self.last_v2_behavior_values = [None] * batch_size
         v2_behavior_mode = (
             str(getattr(self.config, "policy_action_scope", "operation_station_worker"))
             == "operation_station_worker"
@@ -2413,7 +2414,27 @@ class PPOAgent:
 
                 if profile_breakdown:
                     stage_started = time.perf_counter()
-                state_values_batch = active_policy.get_value(batch_obs, actor_x_dict_encoded=x_dict_batch)
+                conditional_mode = str(
+                    getattr(active_policy, "conditional_head_baseline_mode", "off")
+                )
+                conditional_critic_active = (
+                    v2_behavior_mode and conditional_mode != "off"
+                )
+                critic_x_dict_batch = None
+                critic_context_batch = None
+                if conditional_critic_active:
+                    critic_x_dict_batch, critic_context_batch = (
+                        active_policy.get_critic_context(
+                            batch_obs,
+                            actor_x_dict_encoded=x_dict_batch,
+                        )
+                    )
+                    state_values_batch = active_policy.critic(critic_context_batch)
+                else:
+                    state_values_batch = active_policy.get_value(
+                        batch_obs,
+                        actor_x_dict_encoded=x_dict_batch,
+                    )
                 if profile_breakdown:
                     _profile_sync()
                     profile["critic_encoder_ms"] = (time.perf_counter() - stage_started) * 1000.0
@@ -2956,6 +2977,41 @@ class PPOAgent:
                 worker_mask_refs.append(m_worker)
                 eval_fail_flags.append(False)
 
+        if conditional_critic_active:
+            assert critic_x_dict_batch is not None and critic_context_batch is not None
+            for index, decoded in enumerate(decoded_actions):
+                if eval_fail_flags[index]:
+                    continue
+                task_index, station_index, _team_indices, _lp, _station_mask = decoded
+                task_global = task_ptr[index] + int(task_index)
+                task_emb = critic_x_dict_batch["task"][task_global].unsqueeze(0)
+                virtual_station = int(station_index) == 0
+                if virtual_station:
+                    station_emb = torch.zeros_like(task_emb)
+                else:
+                    station_global = station_ptr[index] + int(station_index) - 1
+                    station_emb = critic_x_dict_batch["station"][
+                        station_global
+                    ].unsqueeze(0)
+                conditional_values = active_policy.compute_conditional_values(
+                    critic_context=critic_context_batch[index].unsqueeze(0),
+                    critic_task_emb=task_emb,
+                    critic_station_emb=station_emb,
+                    virtual_station=torch.tensor(
+                        [virtual_station], device=self.device, dtype=torch.bool
+                    ),
+                    detach_inputs=True,
+                )
+                self.last_v2_behavior_values[index] = (
+                    float(conditional_values["task"].item()),
+                    0.0
+                    if virtual_station
+                    else float(conditional_values["station"].item()),
+                    0.0
+                    if virtual_station
+                    else float(conditional_values["worker"].item()),
+                )
+
         state_values = (
             torch.stack(state_value_tensors)
             .detach()
@@ -3180,6 +3236,21 @@ class PPOAgent:
             state.y_station = b_station[idx].unsqueeze(0)
             state.y_team = b_team[idx].unsqueeze(0)
             state.y_logprob = old_logprobs[idx].unsqueeze(0)
+            for field_name in (
+                "old_task_logprob",
+                "old_station_logprob",
+                "old_team_logprob",
+                "old_V_task",
+                "old_V_station",
+                "old_V_worker",
+            ):
+                values = getattr(memory, field_name, [])
+                value = values[idx] if idx < len(values) and values[idx] is not None else 0.0
+                setattr(
+                    state,
+                    f"y_{field_name}",
+                    torch.tensor([float(value)], dtype=torch.float32),
+                )
             state.y_memory_index = torch.tensor([idx], dtype=torch.long)
             state.y_reward = rewards[idx].unsqueeze(0)
             state.y_advantage = advantages[idx].unsqueeze(0)
@@ -3208,6 +3279,29 @@ class PPOAgent:
             batch.y_station = b_station[batch_indices].to(self.device)
             batch.y_team = b_team[batch_indices].to(self.device)
             batch.y_logprob = old_logprobs[batch_indices].to(self.device)
+            for field_name in (
+                "old_task_logprob",
+                "old_station_logprob",
+                "old_team_logprob",
+                "old_V_task",
+                "old_V_station",
+                "old_V_worker",
+            ):
+                values = getattr(memory, field_name, [])
+                setattr(
+                    batch,
+                    f"y_{field_name}",
+                    torch.tensor(
+                        [
+                            float(values[int(idx)])
+                            if int(idx) < len(values) and values[int(idx)] is not None
+                            else 0.0
+                            for idx in batch_indices
+                        ],
+                        dtype=torch.float32,
+                        device=self.device,
+                    ),
+                )
             batch.y_memory_index = torch.as_tensor(
                 batch_indices, dtype=torch.long, device=self.device
             )
@@ -4232,6 +4326,21 @@ class PPOAgent:
             state.y_station = b_station[index].reshape(1)
             state.y_team = b_team[index, :max_team].reshape(1, max_team)
             state.y_logprob = old_logprobs[index].reshape(1)
+            for field_name in (
+                "old_task_logprob",
+                "old_station_logprob",
+                "old_team_logprob",
+                "old_V_task",
+                "old_V_station",
+                "old_V_worker",
+            ):
+                values = getattr(memory, field_name, [])
+                value = values[index] if index < len(values) and values[index] is not None else 0.0
+                setattr(
+                    state,
+                    f"y_{field_name}",
+                    torch.tensor([float(value)], dtype=torch.float32),
+                )
             state.y_reward = rewards[index].reshape(1)
             state.y_advantage = advantages[index].reshape(1)
             state.y_memory_index = torch.tensor([index], dtype=torch.long)
@@ -5394,6 +5503,29 @@ class PPOAgent:
         batch.y_station = b_station.to(self.device)[indices_t]
         batch.y_team = b_team.to(self.device)[indices_t, :max_team]
         batch.y_logprob = old_logprobs.to(self.device)[indices_t]
+        for field_name in (
+            "old_task_logprob",
+            "old_station_logprob",
+            "old_team_logprob",
+            "old_V_task",
+            "old_V_station",
+            "old_V_worker",
+        ):
+            values = getattr(memory, field_name, [])
+            setattr(
+                batch,
+                f"y_{field_name}",
+                torch.tensor(
+                    [
+                        float(values[int(index)])
+                        if int(index) < len(values) and values[int(index)] is not None
+                        else 0.0
+                        for index in memory_indices
+                    ],
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
+            )
         batch.y_reward = rewards.to(self.device)[indices_t]
         batch.y_advantage = advantages.to(self.device)[indices_t]
         batch.y_memory_index = indices_t

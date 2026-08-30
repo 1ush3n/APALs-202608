@@ -135,6 +135,8 @@ class APALRolloutService:
         gated_team_trace: Any = None,
         anchor_proposal_trace: Any = None,
         worker_pointer_v2_behavior_trace: Any = None,
+        component_behavior_logprobs: tuple[float, float, float] | None = None,
+        conditional_values: tuple[float, float, float] | None = None,
     ) -> None:
         memory.states.append(state)
         memory.actions.append(action)
@@ -146,6 +148,24 @@ class APALRolloutService:
         memory.values.append(
             value if torch.is_tensor(value) else torch.tensor(value, device=self.device)
         )
+        if component_behavior_logprobs is None:
+            memory.old_task_logprob.append(None)
+            memory.old_station_logprob.append(None)
+            memory.old_team_logprob.append(None)
+        else:
+            task_lp, station_lp, team_lp = component_behavior_logprobs
+            memory.old_task_logprob.append(float(task_lp))
+            memory.old_station_logprob.append(float(station_lp))
+            memory.old_team_logprob.append(float(team_lp))
+        if conditional_values is None:
+            memory.old_V_task.append(None)
+            memory.old_V_station.append(None)
+            memory.old_V_worker.append(None)
+        else:
+            task_value, station_value, worker_value = conditional_values
+            memory.old_V_task.append(float(task_value))
+            memory.old_V_station.append(float(station_value))
+            memory.old_V_worker.append(float(worker_value))
         memory.masks.append(masks)
         memory.gated_team_traces.append(gated_team_trace)
         memory.anchor_proposal_traces.append(anchor_proposal_trace)
@@ -370,6 +390,10 @@ class APALRolloutService:
                         worker_pointer_v2_behavior_trace=behavior_trace_by_env.get(
                             env_idx
                         ),
+                        component_behavior_logprobs=self.agent.last_v2_behavior_logprobs[
+                            result_idx
+                        ],
+                        conditional_values=self.agent.last_v2_behavior_values[result_idx],
                     )
 
                 heartbeat.update(
@@ -520,6 +544,12 @@ class APALRolloutService:
             target.is_truncated.extend(source.is_truncated)
             target.masks.extend(source.masks)
             target.values.extend(source.values)
+            target.old_task_logprob.extend(source.old_task_logprob)
+            target.old_station_logprob.extend(source.old_station_logprob)
+            target.old_team_logprob.extend(source.old_team_logprob)
+            target.old_V_task.extend(source.old_V_task)
+            target.old_V_station.extend(source.old_V_station)
+            target.old_V_worker.extend(source.old_V_worker)
             target.gated_team_traces.extend(source.gated_team_traces)
             target.anchor_proposal_traces.extend(source.anchor_proposal_traces)
             target.worker_pointer_v2_behavior_traces.extend(
