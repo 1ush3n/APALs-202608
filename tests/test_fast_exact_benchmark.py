@@ -290,3 +290,70 @@ def test_run_mode_samples_rollout_and_update_during_execution(
     assert row["gpu_utilization"]["rollout"]["sample_count"] == 1
     assert row["gpu_utilization"]["update"]["sample_count"] == 1
     assert row["replay"]["effective_replay_samples"] == 4.0
+
+
+def test_run_mode_exports_fast_exact_profile_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Agent:
+        batch_size = 256
+        k_epochs = 1
+        accumulation_steps = 1
+
+        def update(self, memory, env, *, current_ep):
+            return {
+                "V2/FastExact/BehaviorReplaySamples": 2.0,
+                "V2/FastExact/PhysicalGroupCount": 1.0,
+                "V2/FirstContractTotalMaxAE": 0.0,
+                "V2/FirstContractTotalMAE": 0.0,
+                "V2/FastExact/Profile/EncoderCalls": 1.0,
+                "V2/FastExact/Profile/ReplaySamplesPerSec": 2.0,
+            }
+
+    class _Service:
+        device = benchmark_script.torch.device("cpu")
+        agent = _Agent()
+        _fast_exact_builder = None
+
+        def collect(self, update_index):
+            return SimpleNamespace(
+                memory=SimpleNamespace(states=[{}, {}]),
+                env=object(),
+                episode=update_index,
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(benchmark_script, "NvidiaSmiSampler", lambda: SimpleNamespace(
+        start=lambda: None,
+        stop=lambda: [],
+    ))
+    monkeypatch.setattr(
+        benchmark_script,
+        "_apply_mode_overrides",
+        lambda *args, **kwargs: 2,
+    )
+    monkeypatch.setattr(
+        benchmark_script,
+        "_build_service",
+        lambda *args, **kwargs: (_Service(), object()),
+    )
+    monkeypatch.setattr(benchmark_script.torch.cuda, "is_available", lambda: False)
+
+    row = benchmark_script.run_mode(
+        "v2_fast_exact",
+        num_envs_override=None,
+        batch_size=256,
+        max_steps=0,
+        rollout_episodes=0,
+        updates=1,
+        seed=42,
+        data_path=tmp_path / "data.csv",
+        warmup=False,
+    )
+
+    assert row["num_envs"] == 2
+    assert row["profile"]["EncoderCalls"] == 1.0
+    assert row["profile"]["ReplaySamplesPerSec"] == 2.0

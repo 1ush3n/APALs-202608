@@ -333,6 +333,12 @@ def run_mode(
         else:
             peak_allocated_mb = 0.0
 
+        profile = {
+            key.removeprefix("V2/FastExact/Profile/"): float(value)
+            for key, value in last_update_metrics.items()
+            if key.startswith("V2/FastExact/Profile/")
+        }
+
         row: dict = {
             "mode": mode,
             "num_envs": num_envs,
@@ -347,6 +353,7 @@ def run_mode(
                 "rollout": summarize_utilization(rollout_gpu_utilization),
                 "update": summarize_utilization(update_gpu_utilization),
             },
+            "profile": profile,
             "replay": performance,
             "rollout_template": _builder_stats(rollout_builder),
             "replay_template": _builder_stats(replay_builder),
