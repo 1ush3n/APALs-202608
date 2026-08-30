@@ -72,6 +72,7 @@ STRUCTURAL_FIELDS = {
 }
 
 _VALID_EXPERIMENT_MODES = {
+    "action_completion_mode": {"earliest_finish", "earliest_availability"},
     "policy_action_scope": {
         "operation", "operation_station", "operation_station_worker",
         "operation_station_gated_team", "operation_station_anchor_proposal_team",

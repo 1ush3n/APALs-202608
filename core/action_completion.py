@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 from torch_geometric.data import HeteroData
@@ -354,8 +355,133 @@ class EarliestFinishActionCompleter:
         )
 
 
+class EarliestAvailabilityActionCompleter(EarliestFinishActionCompleter):
+    """按资源最早可用时间确定性补全普通动作范围。"""
+
+    def _complete_for_station(
+        self,
+        *,
+        task_x: torch.Tensor,
+        worker_x: torch.Tensor,
+        station_x: torch.Tensor,
+        task_id: int,
+        station_id: int,
+        worker_mask: torch.Tensor | None,
+    ) -> CompletedResources | None:
+        requirements = self._extract_task_requirements(task_x, task_id)
+        if requirements is None:
+            return CompletedResources(station_id=-1, team=())
+        required_skill, demand, _ = requirements
+        worker_ids = self._legal_worker_ids(
+            worker_x,
+            required_skill=required_skill,
+            station_id=station_id,
+            worker_mask=worker_mask,
+        )
+        if len(worker_ids) < demand:
+            return None
+
+        worker_ids.sort(
+            key=lambda worker_id: (
+                float(worker_x[worker_id, self.worker_layout.wait_idx].item()),
+                -float(worker_x[worker_id, self.worker_layout.efficiency_idx].item()),
+                int(worker_id),
+            )
+        )
+        return CompletedResources(
+            station_id=int(station_id),
+            team=tuple(int(worker_id) for worker_id in worker_ids[:demand]),
+        )
+
+    def complete(
+        self,
+        obs: HeteroData,
+        *,
+        task_id: int,
+        station_mask: torch.Tensor | None,
+        worker_mask: torch.Tensor | None,
+        selected_station: int | None = None,
+    ) -> CompletedResources | None:
+        """按 Station/Worker 最早可用顺序返回唯一合法团队。"""
+        task_x = obs["task"].x
+        worker_x = obs["worker"].x
+        station_x = obs["station"].x
+        assert task_x.ndim == worker_x.ndim == station_x.ndim == 2
+        assert worker_x.size(1) == self.worker_layout.total_dim
+        assert station_x.size(1) > 4
+
+        requirements = self._extract_task_requirements(task_x, task_id)
+        if requirements is None:
+            return CompletedResources(station_id=-1, team=())
+
+        station_mask_flat = None
+        if station_mask is not None:
+            # input shape: [S] or [1, S] -> [S]
+            station_mask_flat = station_mask.to(
+                device=station_x.device, dtype=torch.bool
+            ).reshape(-1)
+            if station_mask_flat.numel() != station_x.size(0):
+                raise ValueError(
+                    "station_mask 形状必须能展平为 [站位数]，"
+                    f"收到 {tuple(station_mask.shape)}"
+                )
+
+        if selected_station is None:
+            valid = torch.ones(
+                station_x.size(0), dtype=torch.bool, device=station_x.device
+            )
+            if station_mask_flat is not None:
+                valid &= ~station_mask_flat
+            # input shape: [S] -> [K]，K 为未被 mask 的站位数
+            station_candidates = torch.nonzero(valid, as_tuple=True)[0].tolist()
+            station_candidates.sort(
+                key=lambda station_id: (
+                    float(station_x[int(station_id), 4].item()),
+                    int(station_id),
+                )
+            )
+        else:
+            station_candidates = [int(selected_station)]
+
+        for station_id in station_candidates:
+            if not 0 <= station_id < station_x.size(0):
+                raise ValueError(f"selected_station 超出范围: {station_id}")
+            if station_mask_flat is not None and bool(
+                station_mask_flat[station_id].item()
+            ):
+                continue
+            completed = self._complete_for_station(
+                task_x=task_x,
+                worker_x=worker_x,
+                station_x=station_x,
+                task_id=task_id,
+                station_id=station_id,
+                worker_mask=worker_mask,
+            )
+            if completed is not None:
+                return completed
+        return None
+
+
+def build_action_completer(
+    config: Any,
+) -> EarliestFinishActionCompleter | EarliestAvailabilityActionCompleter:
+    """按 completion mode 构造普通动作补全器。"""
+    mode = str(getattr(config, "action_completion_mode", "earliest_finish")).lower()
+    if mode == "earliest_finish":
+        return EarliestFinishActionCompleter(config)
+    if mode == "earliest_availability":
+        return EarliestAvailabilityActionCompleter(config)
+    raise ValueError(
+        "action_completion_mode 无效："
+        f"{mode!r}；允许值=['earliest_availability', 'earliest_finish']"
+    )
+
+
 __all__ = [
     "CompletedResources",
+    "EarliestAvailabilityActionCompleter",
     "EarliestFinishActionCompleter",
     "TeamCandidates",
+    "build_action_completer",
 ]

@@ -39,6 +39,7 @@ class Config:
     # 联合决策与消融实验语义（checkpoint 结构字段）
     # ------------------
     policy_action_scope: str = "operation_station_worker"
+    action_completion_mode: str = "earliest_finish"
     # 策略网络可见节点范围；full 保持历史主方法与旧 checkpoint 语义。
     policy_observation_scope: str = "full"
     # 策略网络可见节点范围；full 保持历史主方法与旧 checkpoint 语义。
