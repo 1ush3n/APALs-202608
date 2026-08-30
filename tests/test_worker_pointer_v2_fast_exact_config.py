@@ -176,6 +176,7 @@ def _compose_fast_exact_experiment(
         experiment="initial_worker_pointer_v2_fast_exact_exploratory",
         hardware=hardware,
         resume=False,
+        resume_checkpoint_path=None,
         config_overrides=(),
         final_overrides=final_overrides,
         explicit_fields=explicit,
