@@ -46,6 +46,12 @@ class ModelSpec:
     worker_pointer_wait_discount_mode: str | None = None
     worker_pointer_v2_dynamic_eft_features: bool = False
     worker_pointer_v2_dynamic_eft_feature_clip: float = 10.0
+    worker_pointer_v2_explicit_team_state: bool = False
+    worker_pointer_v2_marginal_scarcity: bool = False
+    worker_pointer_v2_marginal_scarcity_clip: float = 10.0
+    worker_pointer_v2_interaction_residual: bool = False
+    worker_pointer_v2_next_frontier_pressure: bool = False
+    conditional_head_baseline_mode: str = "off"
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
     hidden_dim: int | None = None
@@ -136,6 +142,21 @@ def build_model_spec(config: Config) -> ModelSpec:
             "worker_pointer_v2_dynamic_eft_feature_clip": float(
                 config.worker_pointer_v2_dynamic_eft_feature_clip
             ),
+            "worker_pointer_v2_explicit_team_state": bool(
+                config.worker_pointer_v2_explicit_team_state
+            ),
+            "worker_pointer_v2_marginal_scarcity": bool(
+                config.worker_pointer_v2_marginal_scarcity
+            ),
+            "worker_pointer_v2_marginal_scarcity_clip": float(
+                config.worker_pointer_v2_marginal_scarcity_clip
+            ),
+            "worker_pointer_v2_interaction_residual": bool(
+                config.worker_pointer_v2_interaction_residual
+            ),
+            "worker_pointer_v2_next_frontier_pressure": bool(
+                config.worker_pointer_v2_next_frontier_pressure
+            ),
         }
     return ModelSpec(
         resource_graph_mode=mode,
@@ -150,6 +171,9 @@ def build_model_spec(config: Config) -> ModelSpec:
         workforce_binding_mode=str(config.workforce_binding_mode),
         workforce_preallocation_ratio=float(config.workforce_preallocation_ratio),
         team_selection_mode=str(config.team_selection_mode),
+        conditional_head_baseline_mode=str(
+            getattr(config, "conditional_head_baseline_mode", "off")
+        ),
         graph_encoder_mode=str(config.graph_encoder_mode),
         actor_context_mode=str(config.actor_context_mode),
         hidden_dim=int(config.hidden_dim),
@@ -198,6 +222,7 @@ def build_checkpoint_metadata(config: Config, **extra: Any) -> dict[str, Any]:
             "worker_pointer_v2_per_sample_heads": True,
             "num_envs": int(config.num_envs),
             "accumulation_steps": int(config.accumulation_steps),
+            "conditional_head_value_coef": float(config.conditional_head_value_coef),
         }
     metadata.update(extra)
     return metadata
@@ -208,6 +233,32 @@ def validate_checkpoint_training_spec(
     metadata: Mapping[str, Any],
 ) -> None:
     """在恢复训练状态前校验 WorkerPointer v2 的数值重放语义。"""
+    current_completion_mode = str(
+        getattr(config, "action_completion_mode", "earliest_finish")
+    ).lower()
+    saved_config = metadata.get("config")
+    saved_completion_mode = (
+        str(saved_config.get("action_completion_mode", "earliest_finish")).lower()
+        if isinstance(saved_config, Mapping)
+        else "earliest_finish"
+    )
+    valid_completion_modes = {"earliest_finish", "earliest_availability"}
+    if saved_completion_mode not in valid_completion_modes:
+        raise ValueError(
+            "checkpoint 的 action_completion_mode 无效："
+            f"{saved_completion_mode!r}"
+        )
+    if current_completion_mode != saved_completion_mode:
+        raise ValueError(
+            "action_completion_mode 与 checkpoint 不兼容："
+            f"config={current_completion_mode!r}, checkpoint={saved_completion_mode!r}"
+        )
+    if bool(metadata.get("conditional_head_metadata_missing", False)):
+        raise ValueError(
+            "checkpoint 包含 conditional value head，但缺少 "
+            "conditional_head_baseline_mode；禁止用于 training resume，"
+            "请显式指定模式后仅用于 evaluation"
+        )
     if not is_worker_pointer_v2_mode(config):
         return
     saved = metadata.get("training_spec")
@@ -225,6 +276,7 @@ def validate_checkpoint_training_spec(
         ),
         "worker_pointer_v2_per_sample_heads": True,
         "accumulation_steps": int(config.accumulation_steps),
+        "conditional_head_value_coef": float(config.conditional_head_value_coef),
     }
     if is_fast_exact_mode(config):
         # Fast-Exact 的 bf16 同形合同依赖 logical batch 与原始行为组形状；
@@ -291,6 +343,42 @@ def extract_state_dict(payload: Any) -> tuple[dict[str, torch.Tensor], str]:
     return state, "raw_state_dict"
 
 
+def _infer_worker_pointer_v2_architecture(
+    state_dict: Mapping[str, torch.Tensor],
+) -> dict[str, bool]:
+    task = state_dict.get("embedder.task_emb.0.weight")
+    query = state_dict.get("worker_head.v2_query_proj.weight")
+    hidden_dim = int(task.shape[0]) if task is not None and task.ndim == 2 else None
+    query_input_width = (
+        int(query.shape[1]) if query is not None and query.ndim == 2 else None
+    )
+    return {
+        "worker_pointer_v2_explicit_team_state": bool(
+            hidden_dim is not None
+            and query_input_width == hidden_dim * 6 + 19
+        ),
+        "worker_pointer_v2_marginal_scarcity": any(
+            key.startswith("worker_head.v2_marginal_proj.")
+            for key in state_dict
+        ),
+        "worker_pointer_v2_interaction_residual": any(
+            key.startswith("worker_head.v2_interaction_mlp.")
+            for key in state_dict
+        ),
+        "worker_pointer_v2_next_frontier_pressure": any(
+            key.startswith("worker_head.v2_next_frontier_query_proj.")
+            for key in state_dict
+        ),
+    }
+
+
+def _has_conditional_value_head(state_dict: Mapping[str, torch.Tensor]) -> bool:
+    return any(
+        key.startswith(("critic_station_cond.", "critic_worker_cond."))
+        for key in state_dict
+    )
+
+
 def infer_model_spec(state_dict: Mapping[str, torch.Tensor]) -> ModelSpec:
     keys = tuple(state_dict)
     inferred_action_scope = (
@@ -328,6 +416,7 @@ def infer_model_spec(state_dict: Mapping[str, torch.Tensor]) -> ModelSpec:
     }
     worker_feat_dim = int(worker.shape[1]) if worker is not None else None
     is_current_layout = worker_feat_dim == 17
+    v2_architecture = _infer_worker_pointer_v2_architecture(state_dict)
     return ModelSpec(
         resource_graph_mode=mode,
         policy_action_scope=inferred_action_scope,
@@ -342,6 +431,7 @@ def infer_model_spec(state_dict: Mapping[str, torch.Tensor]) -> ModelSpec:
         worker_pointer_v2_dynamic_eft_features=(
             "worker_head.v2_eft_proj.weight" in state_dict
         ),
+        **v2_architecture,
     )
 
 
@@ -355,13 +445,19 @@ def load_checkpoint(path: str | Path, map_location: Any = "cpu") -> LoadedCheckp
             "旧模型必须按新的动作范围、编码器和池化配置重新训练。"
         )
     eft_enabled = "worker_head.v2_eft_proj.weight" in state_dict
+    inferred_architecture = _infer_worker_pointer_v2_architecture(state_dict)
+    conditional_head_present = _has_conditional_value_head(state_dict)
     saved_spec = metadata.get("model_spec")
     if isinstance(saved_spec, Mapping):
         spec_values = dict(saved_spec)
+        for key, value in inferred_architecture.items():
+            spec_values.setdefault(key, value)
         spec_values.setdefault(
             "worker_pointer_v2_dynamic_eft_features",
             eft_enabled,
         )
+        if conditional_head_present and "conditional_head_baseline_mode" not in spec_values:
+            metadata["conditional_head_metadata_missing"] = True
         if "worker_pointer_v2_dynamic_eft_feature_clip" not in spec_values:
             saved_config = metadata.get("config")
             if isinstance(saved_config, Mapping):
@@ -380,6 +476,8 @@ def load_checkpoint(path: str | Path, map_location: Any = "cpu") -> LoadedCheckp
         spec = ModelSpec(**spec_values)
     else:
         spec = infer_model_spec(state_dict)
+        if conditional_head_present:
+            metadata["conditional_head_metadata_missing"] = True
         if eft_enabled:
             saved_config = metadata.get("config")
             clip = (
@@ -422,7 +520,19 @@ def apply_checkpoint_model_spec(
             "worker_pointer_wait_discount_mode",
             "worker_pointer_v2_dynamic_eft_features",
             "worker_pointer_v2_dynamic_eft_feature_clip",
+            "worker_pointer_v2_explicit_team_state",
+            "worker_pointer_v2_marginal_scarcity",
+            "worker_pointer_v2_marginal_scarcity_clip",
+            "worker_pointer_v2_interaction_residual",
+            "worker_pointer_v2_next_frontier_pressure",
         )
+        explicit = explicit_fields or set()
+        if not (
+            str(spec.conditional_head_baseline_mode) == "off"
+            and str(getattr(config, "conditional_head_baseline_mode", "off")) != "off"
+            and "conditional_head_baseline_mode" in explicit
+        ):
+            semantic_fields += ("conditional_head_baseline_mode",)
         conflicts = {
             key: (getattr(config, key), getattr(spec, key))
             for key in semantic_fields
@@ -482,6 +592,13 @@ def apply_checkpoint_model_spec(
         "graph_encoder_mode": spec.graph_encoder_mode,
         "actor_context_mode": spec.actor_context_mode,
     }
+    explicit_conditional_mode = (
+        "conditional_head_baseline_mode" in (explicit_fields or set())
+        and str(getattr(config, "conditional_head_baseline_mode", "off")) != "off"
+        and str(spec.conditional_head_baseline_mode) == "off"
+    )
+    if not explicit_conditional_mode:
+        inferred["conditional_head_baseline_mode"] = spec.conditional_head_baseline_mode
     for key in (
         "worker_pointer_context_version",
         "worker_pointer_pressure_temperature",
@@ -489,6 +606,11 @@ def apply_checkpoint_model_spec(
         "worker_pointer_wait_discount_mode",
         "worker_pointer_v2_dynamic_eft_features",
         "worker_pointer_v2_dynamic_eft_feature_clip",
+        "worker_pointer_v2_explicit_team_state",
+        "worker_pointer_v2_marginal_scarcity",
+        "worker_pointer_v2_marginal_scarcity_clip",
+        "worker_pointer_v2_interaction_residual",
+        "worker_pointer_v2_next_frontier_pressure",
     ):
         value = getattr(spec, key)
         if value is not None:

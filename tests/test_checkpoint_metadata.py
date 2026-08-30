@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from runtime.checkpoints import (
     apply_checkpoint_model_spec,
     build_checkpoint_metadata,
     build_resume_batch_audit,
+    build_model_spec,
     infer_model_spec,
     load_checkpoint,
     validate_checkpoint_training_spec,
@@ -58,6 +60,36 @@ def test_loads_lightning_and_legacy_checkpoint_formats(tmp_path: Path) -> None:
     assert load_checkpoint(legacy_path).format_name == "legacy_full"
 
 
+def test_old_model_spec_missing_worker_pointer_v2_fields_uses_off_defaults(
+    tmp_path: Path,
+) -> None:
+    cfg, state = _state_for(use_skill_hub=False, bidirectional=False)
+    metadata = build_checkpoint_metadata(cfg)
+    for key in (
+        "worker_pointer_v2_explicit_team_state",
+        "worker_pointer_v2_marginal_scarcity",
+        "worker_pointer_v2_marginal_scarcity_clip",
+        "worker_pointer_v2_interaction_residual",
+        "worker_pointer_v2_next_frontier_pressure",
+        "conditional_head_baseline_mode",
+    ):
+        metadata["model_spec"].pop(key, None)
+    checkpoint_path = tmp_path / "old_model_spec.ckpt"
+    torch.save(
+        {"state_dict": state, "apal_metadata": metadata},
+        checkpoint_path,
+    )
+
+    loaded = load_checkpoint(checkpoint_path)
+
+    assert loaded.model_spec.worker_pointer_v2_explicit_team_state is False
+    assert loaded.model_spec.worker_pointer_v2_marginal_scarcity is False
+    assert loaded.model_spec.worker_pointer_v2_marginal_scarcity_clip == 10.0
+    assert loaded.model_spec.worker_pointer_v2_interaction_residual is False
+    assert loaded.model_spec.worker_pointer_v2_next_frontier_pressure is False
+    assert loaded.model_spec.conditional_head_baseline_mode == "off"
+
+
 def test_explicit_structural_conflict_is_rejected() -> None:
     cfg = Config()
     cfg.use_skill_hub = True
@@ -85,6 +117,20 @@ def _v2_training_config() -> Config:
     return cfg
 
 
+def test_worker_pointer_v2_architecture_metadata_defaults_are_off() -> None:
+    cfg = _v2_training_config()
+    spec = build_model_spec(cfg)
+
+    assert cfg.worker_pointer_v2_explicit_team_state is False
+    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_marginal_scarcity_clip == 10.0
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "off"
+    assert spec.worker_pointer_v2_explicit_team_state is False
+    assert spec.conditional_head_baseline_mode == "off"
+
+
 def test_v2_checkpoint_records_group_replay_training_semantics() -> None:
     cfg = _v2_training_config()
     metadata = build_checkpoint_metadata(cfg)
@@ -96,7 +142,42 @@ def test_v2_checkpoint_records_group_replay_training_semantics() -> None:
         "worker_pointer_v2_per_sample_heads": True,
         "num_envs": int(cfg.num_envs),
         "accumulation_steps": 16,
+        "conditional_head_value_coef": 1.0,
     }
+
+
+def test_infer_model_spec_detects_worker_pointer_v2_architecture_weights() -> None:
+    _cfg, state = _dynamic_eft_state()
+    hidden_dim = int(state["embedder.task_emb.0.weight"].shape[0])
+    state = dict(state)
+    state["worker_head.v2_query_proj.weight"] = torch.empty(
+        hidden_dim,
+        hidden_dim * 6 + 19,
+    )
+    state["worker_head.v2_marginal_proj.weight"] = torch.empty(hidden_dim, hidden_dim)
+    state["worker_head.v2_interaction_mlp.0.weight"] = torch.empty(hidden_dim, hidden_dim)
+    state["worker_head.v2_next_frontier_query_proj.weight"] = torch.empty(
+        hidden_dim,
+        hidden_dim,
+    )
+
+    spec = infer_model_spec(state)
+
+    assert spec.worker_pointer_v2_explicit_team_state is True
+    assert spec.worker_pointer_v2_marginal_scarcity is True
+    assert spec.worker_pointer_v2_interaction_residual is True
+    assert spec.worker_pointer_v2_next_frontier_pressure is True
+
+
+def test_v2_checkpoint_architecture_mismatch_is_rejected_before_loading() -> None:
+    cfg = _v2_training_config()
+    checkpoint_spec = replace(
+        build_model_spec(cfg),
+        worker_pointer_v2_explicit_team_state=True,
+    )
+
+    with pytest.raises(ValueError, match="WorkerPointer v2 checkpoint 语义不兼容"):
+        apply_checkpoint_model_spec(cfg, checkpoint_spec)
 
 
 def test_v2_resume_rejects_missing_or_conflicting_training_spec() -> None:

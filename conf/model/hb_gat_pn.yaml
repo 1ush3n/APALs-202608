@@ -26,8 +26,14 @@ model:
   conditional_team_scoring_mode: fixed_prior_v1
   conditional_team_prior_margin: 4.0
   conditional_team_prior_weight: 1.0
+  conditional_head_baseline_mode: "off"
   workforce_binding_mode: endogenous
   workforce_preallocation_ratio: 1.0
   team_selection_mode: autoregressive
+  worker_pointer_v2_explicit_team_state: false
+  worker_pointer_v2_marginal_scarcity: false
+  worker_pointer_v2_marginal_scarcity_clip: 10.0
+  worker_pointer_v2_interaction_residual: false
+  worker_pointer_v2_next_frontier_pressure: false
   graph_encoder_mode: hetero_gat
   actor_context_mode: attention

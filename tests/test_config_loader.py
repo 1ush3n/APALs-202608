@@ -253,6 +253,12 @@ def test_batched_v2_exploratory_config_resolves_without_async_gpu_evaluation() -
     assert cfg.batch_size == 16
     assert cfg.accumulation_steps == 16
     assert cfg.worker_pointer_v2_dynamic_eft_features is False
+    assert cfg.worker_pointer_v2_explicit_team_state is False
+    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "off"
+    assert cfg.conditional_head_value_coef == 1.0
 
 
 def test_batched_v2_dynamic_eft_feature_can_be_enabled_from_hydra_cli() -> None:

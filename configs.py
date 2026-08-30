@@ -49,6 +49,7 @@ class Config:
     conditional_team_scoring_mode: str = "fixed_prior_v1"
     conditional_team_prior_margin: float = 4.0
     conditional_team_prior_weight: float = 1.0
+    conditional_head_baseline_mode: str = "off"
     # 锚点条件式完整团队提议 + 反事实门控（APCF）：仅服务 operation_station_anchor_proposal_team。
     anchor_proposal_mode: str = "full_team_v1"
     anchor_proposal_prior_margin: float = 4.0
@@ -91,6 +92,11 @@ class Config:
     worker_pointer_v2_init_seed_offset: int = 1009
     worker_pointer_v2_dynamic_eft_features: bool = False
     worker_pointer_v2_dynamic_eft_feature_clip: float = 10.0
+    worker_pointer_v2_explicit_team_state: bool = False
+    worker_pointer_v2_marginal_scarcity: bool = False
+    worker_pointer_v2_marginal_scarcity_clip: float = 10.0
+    worker_pointer_v2_interaction_residual: bool = False
+    worker_pointer_v2_next_frontier_pressure: bool = False
     # WorkerPointer v2 默认批量向量化重放；exact 模式仅供诊断与对照实验。
     worker_pointer_v2_behavior_replay: bool = False
     worker_pointer_v2_logical_batch_cap: int = 64
@@ -298,6 +304,7 @@ class Config:
     
     c_policy: float = 1.0                  # Policy Loss 权重
     c_value: float = 0.5                   # Critic 价值损失权重
+    conditional_head_value_coef: float = 1.0  # 条件 value head 损失权重
     
     r_coef_makespan: float = 1.0           # 宏观目标：Makespan 下班时间推移惩罚
     deadlock_penalty_multiplier: float = 1.5 # 死锁惩罚项 (相对于理想总完工时间的倍数)

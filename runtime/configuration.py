@@ -56,6 +56,12 @@ STRUCTURAL_FIELDS = {
     "worker_pointer_context_version", "worker_pointer_pressure_temperature",
     "worker_pointer_supply_epsilon", "worker_pointer_wait_discount_mode",
     "worker_pointer_v2_init_seed_offset",
+    "worker_pointer_v2_explicit_team_state",
+    "worker_pointer_v2_marginal_scarcity",
+    "worker_pointer_v2_marginal_scarcity_clip",
+    "worker_pointer_v2_interaction_residual",
+    "worker_pointer_v2_next_frontier_pressure",
+    "conditional_head_baseline_mode",
     "graph_encoder_mode", "actor_context_mode",
     "anchor_proposal_mode", "anchor_proposal_prior_margin",
     "anchor_proposal_gate_bias",
@@ -81,6 +87,7 @@ _VALID_EXPERIMENT_MODES = {
     "conditional_team_scoring_mode": {
         "fixed_prior_v1", "relative_heuristic_prior_v1",
     },
+    "conditional_head_baseline_mode": {"off", "diagnostic", "factorized"},
 }
 
 
@@ -274,6 +281,41 @@ def validate_runtime_config(config: Config) -> None:
                 f"{field_name} 无效: {value!r}；允许值={sorted(choices)}"
             )
         setattr(config, field_name, value)
+    if (
+        config.action_completion_mode == "earliest_availability"
+        and config.policy_action_scope not in {"operation", "operation_station"}
+    ):
+        raise ValueError(
+            "action_completion_mode=earliest_availability 仅允许用于 "
+            "policy_action_scope=operation 或 operation_station"
+        )
+    marginal_clip = float(config.worker_pointer_v2_marginal_scarcity_clip)
+    if not math.isfinite(marginal_clip) or marginal_clip <= 0.0:
+        raise ValueError(
+            "worker_pointer_v2_marginal_scarcity_clip 必须是大于 0 的有限数"
+        )
+    conditional_value_coef = float(config.conditional_head_value_coef)
+    if not math.isfinite(conditional_value_coef) or conditional_value_coef <= 0.0:
+        raise ValueError(
+            "conditional_head_value_coef 必须是大于 0 的有限数"
+        )
+    conditional_mode = str(config.conditional_head_baseline_mode)
+    if conditional_mode in {"diagnostic", "factorized"}:
+        if config.team_selection_mode != "autoregressive_pressure_v2":
+            raise ValueError(
+                "conditional_head_baseline_mode=diagnostic/factorized 要求 "
+                "team_selection_mode=autoregressive_pressure_v2"
+            )
+        if config.policy_action_scope != "operation_station_worker":
+            raise ValueError(
+                "conditional_head_baseline_mode=diagnostic/factorized 要求 "
+                "policy_action_scope=operation_station_worker"
+            )
+        if bool(config.use_shared_trunk):
+            raise ValueError(
+                "conditional_head_baseline_mode=diagnostic/factorized 不支持 "
+                "use_shared_trunk=true"
+            )
     if is_worker_pointer_v2_mode(config):
         if str(getattr(config, "policy_observation_scope", "full")) != "full":
             raise ValueError(

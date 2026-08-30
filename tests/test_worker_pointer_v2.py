@@ -347,6 +347,47 @@ def test_runtime_validation_rejects_group_exact_without_behavior_trace() -> None
         validate_runtime_config(cfg)
 
 
+def test_runtime_validation_scopes_conditional_head_baseline_modes() -> None:
+    from runtime.configuration import validate_runtime_config
+
+    valid = _batched_v2_config()
+    valid.conditional_head_baseline_mode = "diagnostic"
+    validate_runtime_config(valid)
+
+    wrong_team_mode = Config()
+    wrong_team_mode.conditional_head_baseline_mode = "factorized"
+    with pytest.raises(ValueError, match="autoregressive_pressure_v2"):
+        validate_runtime_config(wrong_team_mode)
+
+    shared_trunk = _batched_v2_config()
+    shared_trunk.conditional_head_baseline_mode = "factorized"
+    shared_trunk.use_shared_trunk = True
+    with pytest.raises(ValueError, match="use_shared_trunk"):
+        validate_runtime_config(shared_trunk)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("conditional_head_baseline_mode", "unsupported", "conditional_head_baseline_mode"),
+        ("worker_pointer_v2_marginal_scarcity_clip", float("inf"), "marginal_scarcity_clip"),
+        ("conditional_head_value_coef", 0.0, "conditional_head_value_coef"),
+    ],
+)
+def test_runtime_validation_rejects_invalid_worker_pointer_v2_architecture_config(
+    field_name: str,
+    value: object,
+    message: str,
+) -> None:
+    from runtime.configuration import validate_runtime_config
+
+    cfg = _batched_v2_config()
+    setattr(cfg, field_name, value)
+
+    with pytest.raises(ValueError, match=message):
+        validate_runtime_config(cfg)
+
+
 def test_legacy_mode_never_uses_v2_behavior_group_exact_replay() -> None:
     from runtime.modes import uses_behavior_group_exact_replay
 
