@@ -407,3 +407,28 @@ def test_fast_exact_benchmark_enables_behavior_group_replay_contract(
         "behavior_group_exact_gpu_template_v2"
     )
     assert captured["worker_pointer_v2_behavior_replay"] is True
+
+
+def test_fast_exact_benchmark_selects_logical_encoder_batching(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        benchmark_script.configs,
+        "update_from_dict",
+        lambda values: captured.update(values),
+    )
+
+    benchmark_script._apply_mode_overrides(
+        "v2_fast_exact",
+        num_envs_override=2,
+        batch_size=256,
+        max_steps=0,
+        seed=42,
+        data_path=tmp_path / "680.csv",
+        fast_replay_batching="logical_batch_v1",
+    )
+
+    assert captured["worker_pointer_v2_fast_replay_batching"] == "logical_batch_v1"

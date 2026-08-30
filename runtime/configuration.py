@@ -89,6 +89,9 @@ _VALID_EXPERIMENT_MODES = {
         "fixed_prior_v1", "relative_heuristic_prior_v1",
     },
     "conditional_head_baseline_mode": {"off", "diagnostic", "factorized"},
+    "worker_pointer_v2_fast_replay_batching": {
+        "physical_group", "logical_batch_v1",
+    },
 }
 
 
@@ -353,6 +356,13 @@ def validate_runtime_config(config: Config) -> None:
                 "worker_pointer_v2_dynamic_eft_feature_clip 必须是大于 0 的有限数"
             )
         if is_fast_exact_mode(config):
+            if str(config.worker_pointer_v2_fast_replay_batching) not in {
+                "physical_group", "logical_batch_v1",
+            }:
+                raise ValueError(
+                    "worker_pointer_v2_fast_replay_batching 仅支持 "
+                    "physical_group 或 logical_batch_v1"
+                )
             if (
                 str(config.worker_pointer_v2_replay_mode)
                 != FAST_EXACT_REPLAY_MODE
@@ -371,6 +381,10 @@ def validate_runtime_config(config: Config) -> None:
                     "worker_pointer_v2_rollout_group_upper_bound 最大为 16，"
                     f"收到 {int(config.worker_pointer_v2_rollout_group_upper_bound)}"
                 )
+        elif str(config.worker_pointer_v2_fast_replay_batching) != "physical_group":
+            raise ValueError(
+                "logical_batch_v1 仅支持 autoregressive_pressure_v2_fast_exact"
+            )
         else:
             replay_mode = str(config.worker_pointer_v2_replay_mode)
             if replay_mode == BATCHED_V2_REPLAY_MODE:
@@ -392,6 +406,10 @@ def validate_runtime_config(config: Config) -> None:
                 )
         if int(config.worker_pointer_v2_logical_batch_cap) < 1:
             raise ValueError("worker_pointer_v2_logical_batch_cap 必须大于 0")
+        if int(config.worker_pointer_v2_fast_replay_encoder_batch_cap) < 1:
+            raise ValueError(
+                "worker_pointer_v2_fast_replay_encoder_batch_cap 必须大于 0"
+            )
         if int(config.worker_pointer_v2_rollout_group_upper_bound) < 1:
             raise ValueError(
                 "worker_pointer_v2_rollout_group_upper_bound 必须大于 0"

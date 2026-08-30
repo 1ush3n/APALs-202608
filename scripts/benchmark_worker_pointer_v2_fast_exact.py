@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--fast-replay-batching",
+        choices=("physical_group", "logical_batch_v1"),
+        default="physical_group",
+        help="Fast-Exact encoder batching 结构模式",
+    )
+    parser.add_argument(
         "--result-json",
         type=Path,
         default=None,
@@ -155,6 +161,7 @@ def _apply_mode_overrides(
     max_steps: int,
     seed: int,
     data_path: Path,
+    fast_replay_batching: str = "physical_group",
 ) -> int:
     if mode == "v2_fast_exact":
         team_mode = "autoregressive_pressure_v2_fast_exact"
@@ -172,6 +179,11 @@ def _apply_mode_overrides(
             FAST_EXACT_REPLAY_MODE if mode == "v2_fast_exact" else "batched_vectorized_v2"
         ),
         "worker_pointer_v2_behavior_replay": mode == "v2_fast_exact",
+        "worker_pointer_v2_fast_replay_batching": (
+            str(fast_replay_batching)
+            if mode == "v2_fast_exact"
+            else "physical_group"
+        ),
         "lightning_precision": "bf16-mixed",
         "batch_size": int(batch_size),
         "worker_pointer_v2_logical_batch_cap": int(batch_size),
@@ -242,6 +254,7 @@ def run_mode(
     seed: int,
     data_path: Path,
     warmup: bool,
+    fast_replay_batching: str = "physical_group",
 ) -> dict:
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -253,6 +266,7 @@ def run_mode(
         max_steps=max_steps,
         seed=seed,
         data_path=data_path,
+        fast_replay_batching=fast_replay_batching,
     )
     service, vector_env = _build_service(num_envs, data_path, seed)
     device = service.device
@@ -403,6 +417,8 @@ def run_modes_in_subprocesses(
             "--seed",
             str(int(args.seed)),
             "--warmup" if bool(args.warmup) else "--no-warmup",
+            "--fast-replay-batching",
+            str(getattr(args, "fast_replay_batching", "physical_group")),
         ]
         if args.num_envs is not None:
             command.extend(["--num-envs", str(int(args.num_envs))])
@@ -449,6 +465,7 @@ def main() -> int:
             seed=args.seed,
             data_path=data_path,
             warmup=args.warmup,
+            fast_replay_batching=args.fast_replay_batching,
         )
         row["worker_pid"] = int(os.getpid())
         _write_result_atomic(args.result_json.resolve(), row)

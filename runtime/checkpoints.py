@@ -46,6 +46,7 @@ class ModelSpec:
     worker_pointer_wait_discount_mode: str | None = None
     worker_pointer_v2_dynamic_eft_features: bool = False
     worker_pointer_v2_dynamic_eft_feature_clip: float = 10.0
+    worker_pointer_v2_fast_replay_batching: str = "physical_group"
     worker_pointer_v2_explicit_team_state: bool = False
     worker_pointer_v2_marginal_scarcity: bool = False
     worker_pointer_v2_marginal_scarcity_clip: float = 10.0
@@ -142,6 +143,9 @@ def build_model_spec(config: Config) -> ModelSpec:
             "worker_pointer_v2_dynamic_eft_feature_clip": float(
                 config.worker_pointer_v2_dynamic_eft_feature_clip
             ),
+            "worker_pointer_v2_fast_replay_batching": str(
+                getattr(config, "worker_pointer_v2_fast_replay_batching", "physical_group")
+            ),
             "worker_pointer_v2_explicit_team_state": bool(
                 config.worker_pointer_v2_explicit_team_state
             ),
@@ -213,6 +217,9 @@ def build_checkpoint_metadata(config: Config, **extra: Any) -> dict[str, Any]:
             "worker_pointer_v2_replay_mode": str(
                 config.worker_pointer_v2_replay_mode
             ),
+            "worker_pointer_v2_fast_replay_batching": str(
+                getattr(config, "worker_pointer_v2_fast_replay_batching", "physical_group")
+            ),
             "worker_pointer_v2_logical_batch_cap": int(
                 config.batch_size
             ),
@@ -220,6 +227,9 @@ def build_checkpoint_metadata(config: Config, **extra: Any) -> dict[str, Any]:
                 config.worker_pointer_v2_rollout_group_upper_bound
             ),
             "worker_pointer_v2_per_sample_heads": True,
+            "worker_pointer_v2_fast_replay_encoder_batch_cap": int(
+                getattr(config, "worker_pointer_v2_fast_replay_encoder_batch_cap", 16)
+            ),
             "num_envs": int(config.num_envs),
             "accumulation_steps": int(config.accumulation_steps),
             "conditional_head_value_coef": float(config.conditional_head_value_coef),
@@ -271,10 +281,16 @@ def validate_checkpoint_training_spec(
         "worker_pointer_v2_replay_mode": str(
             config.worker_pointer_v2_replay_mode
         ),
+        "worker_pointer_v2_fast_replay_batching": str(
+            getattr(config, "worker_pointer_v2_fast_replay_batching", "physical_group")
+        ),
         "worker_pointer_v2_rollout_group_upper_bound": int(
             config.worker_pointer_v2_rollout_group_upper_bound
         ),
         "worker_pointer_v2_per_sample_heads": True,
+        "worker_pointer_v2_fast_replay_encoder_batch_cap": int(
+            getattr(config, "worker_pointer_v2_fast_replay_encoder_batch_cap", 16)
+        ),
         "accumulation_steps": int(config.accumulation_steps),
         "conditional_head_value_coef": float(config.conditional_head_value_coef),
     }
@@ -287,10 +303,14 @@ def validate_checkpoint_training_spec(
                 "num_envs": int(config.num_envs),
             }
         )
+    training_defaults = {
+        "worker_pointer_v2_fast_replay_batching": "physical_group",
+        "worker_pointer_v2_fast_replay_encoder_batch_cap": 16,
+    }
     conflicts = {
         key: (saved.get(key), expected_value)
         for key, expected_value in expected.items()
-        if saved.get(key) != expected_value
+        if saved.get(key, training_defaults.get(key)) != expected_value
     }
     if conflicts:
         raise ValueError(

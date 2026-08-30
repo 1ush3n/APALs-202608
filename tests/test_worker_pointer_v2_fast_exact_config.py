@@ -98,6 +98,26 @@ def test_model_spec_records_fast_exact_mode_and_pressure_semantics() -> None:
     assert spec.worker_pointer_wait_discount_mode == "physical_wait_exponential_v1"
 
 
+def test_fast_exact_encoder_batching_mode_is_structural() -> None:
+    cfg = _fast_exact_config(worker_pointer_v2_fast_replay_batching="logical_batch_v1")
+
+    spec = build_model_spec(cfg)
+    metadata = build_checkpoint_metadata(cfg)
+
+    assert spec.worker_pointer_v2_fast_replay_batching == "logical_batch_v1"
+    assert (
+        metadata["training_spec"]["worker_pointer_v2_fast_replay_batching"]
+        == "logical_batch_v1"
+    )
+
+
+def test_fast_exact_encoder_batching_mode_rejects_unknown_value() -> None:
+    cfg = _fast_exact_config(worker_pointer_v2_fast_replay_batching="unknown")
+
+    with pytest.raises(ValueError, match="worker_pointer_v2_fast_replay_batching"):
+        validate_runtime_config(cfg)
+
+
 def test_checkpoint_metadata_training_spec_records_fast_exact_semantics() -> None:
     cfg = _fast_exact_config()
     metadata = build_checkpoint_metadata(cfg)

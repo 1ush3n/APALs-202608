@@ -140,6 +140,8 @@ def test_v2_checkpoint_records_group_replay_training_semantics() -> None:
         "worker_pointer_v2_logical_batch_cap": 64,
         "worker_pointer_v2_rollout_group_upper_bound": 4,
         "worker_pointer_v2_per_sample_heads": True,
+        "worker_pointer_v2_fast_replay_batching": "physical_group",
+        "worker_pointer_v2_fast_replay_encoder_batch_cap": 16,
         "num_envs": int(cfg.num_envs),
         "accumulation_steps": 16,
         "conditional_head_value_coef": 1.0,

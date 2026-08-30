@@ -5172,8 +5172,28 @@ class PPOAgent:
             getattr(fast_exact_builder, "template_misses", 0)
         )
 
-        def _build_group(group_index: int) -> Any:
-            memory_indices = [item[0] for item in restored[group_index]]
+        batching_mode = str(
+            getattr(self.config, "worker_pointer_v2_fast_replay_batching", "physical_group")
+        )
+        encoder_batch_cap = max(
+            1,
+            int(
+                getattr(
+                    self.config,
+                    "worker_pointer_v2_fast_replay_encoder_batch_cap",
+                    16,
+                )
+            ),
+        )
+        if batching_mode not in {"physical_group", "logical_batch_v1"}:
+            raise RuntimeError(
+                "worker_pointer_v2_fast_replay_batching 配置无效: "
+                f"{batching_mode!r}"
+            )
+
+        def _build_memory_group(memory_indices: list[int]) -> Any:
+            if not memory_indices:
+                raise ValueError("v2 fast-exact replay batch 不能为空")
             if self._v2_fast_exact_profile is not None:
                 self._v2_fast_exact_profile_sync()
                 build_started = time.perf_counter()
@@ -5195,6 +5215,31 @@ class PPOAgent:
                     self._v2_fast_exact_profile.get("BuilderCalls", 0.0) + 1.0
                 )
             return fast_batch
+
+        def _build_group(group_index: int) -> Any:
+            return _build_memory_group(
+                [item[0] for item in restored[group_index]]
+            )
+
+        def _plan_formal_replay_units(
+            group_indices: list[int],
+        ) -> list[list[tuple[int, Any]]]:
+            if batching_mode == "physical_group":
+                return [list(restored[group_index]) for group_index in group_indices]
+            buckets: dict[int, list[list[tuple[int, Any]]]] = {}
+            for group_index in group_indices:
+                members = list(restored[group_index])
+                if len(members) > encoder_batch_cap:
+                    raise RuntimeError(
+                        "Fast-Exact logical encoder batch cap 小于 physical group: "
+                        f"group_size={len(members)} cap={encoder_batch_cap}"
+                    )
+                dataset_idx = int(memory.states[members[0][0]].get("dataset_idx", 0))
+                dataset_units = buckets.setdefault(dataset_idx, [])
+                if not dataset_units or len(dataset_units[-1]) + len(members) > encoder_batch_cap:
+                    dataset_units.append([])
+                dataset_units[-1].extend(members)
+            return [unit for dataset_units in buckets.values() for unit in dataset_units]
 
         logical_batches_by_epoch = [
             plan_behavior_groups(
@@ -5289,15 +5334,16 @@ class PPOAgent:
 
         def _backward_formal_group(
             *,
-            group_index: int,
+            members: list[tuple[int, Any]],
             group_batch: Any,
             outputs: list[dict[str, torch.Tensor]],
             window_sample_count: int,
         ) -> None:
             """立即消费单个 group 的正式输出，避免跨 group 保留 autograd graph。"""
             sample_losses: list[torch.Tensor] = []
+            assert len(outputs) == len(members)
             for local_index, (output, (memory_index, _trace)) in enumerate(
-                zip(outputs, restored[group_index])
+                zip(outputs, members)
             ):
                 total_lp = output["task"] + output["station"] + output["team"]
                 old_lp = group_batch.batch.y_logprob[local_index].reshape(1).float()
@@ -5444,9 +5490,12 @@ class PPOAgent:
                     # formal replay 输出同时用于当前 KL 和 PPO loss，禁止跨 step 缓存 logits。
                     formal_total_lp: list[torch.Tensor] = []
                     formal_old_lp: list[torch.Tensor] = []
-                    for group_index in batch_groups:
-                        physical_group_count += 1
-                        group_batch = _build_group(group_index)
+                    physical_group_count += len(batch_groups)
+                    replay_units = _plan_formal_replay_units(batch_groups)
+                    for replay_members in replay_units:
+                        group_batch = _build_memory_group(
+                            [item[0] for item in replay_members]
+                        )
                         if self._v2_fast_exact_profile is not None:
                             self._v2_fast_exact_profile_sync()
                             formal_started = time.perf_counter()
@@ -5469,7 +5518,7 @@ class PPOAgent:
                                 + float(len(outputs))
                             )
                         for output, (memory_index, _trace) in zip(
-                            outputs, restored[group_index]
+                            outputs, replay_members
                         ):
                             formal_total_lp.append(
                                 (
@@ -5484,7 +5533,7 @@ class PPOAgent:
                                 .reshape(1)
                             )
                         _backward_formal_group(
-                            group_index=group_index,
+                            members=replay_members,
                             group_batch=group_batch,
                             outputs=outputs,
                             window_sample_count=window_sample_count,

@@ -102,6 +102,8 @@ class Config:
     worker_pointer_v2_behavior_replay: bool = False
     worker_pointer_v2_logical_batch_cap: int = 64
     worker_pointer_v2_replay_mode: str = "batched_vectorized_v2"
+    worker_pointer_v2_fast_replay_batching: str = "physical_group"
+    worker_pointer_v2_fast_replay_encoder_batch_cap: int = 16
     worker_pointer_v2_rollout_group_upper_bound: int = 4
     worker_pointer_v2_fast_exact_profile: bool = False
     # WorkerPointer v2 Fast-Exact：正式训练严禁自动降级，GPU 模板失败/OOM/组不完整

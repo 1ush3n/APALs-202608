@@ -368,6 +368,107 @@ def test_fast_exact_actor_prepass_is_recomputed_after_optimizer_step(
         assert metrics["PPO/UpdateSteps"] == 2.0
 
 
+def _two_sample_memory(agent: PPOAgent, env_a: AirLineEnv_Graph, env_b: AirLineEnv_Graph) -> tuple[Memory, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    first = _rollout_single_step(agent, env_a)
+    second = _rollout_single_step(agent, env_b)
+    memory = Memory()
+    for source, group_id in ((first[0], (0, 0)), (second[0], (1, 0))):
+        memory.states.extend(source.states)
+        memory.actions.extend(source.actions)
+        memory.logprobs.extend(source.logprobs)
+        memory.masks.extend(source.masks)
+        memory.values.extend(source.values)
+        memory.worker_pointer_v2_behavior_traces.extend(
+            [dataclasses.replace(source.worker_pointer_v2_behavior_traces[0], group_id=group_id)]
+        )
+    return (
+        memory,
+        torch.cat((first[1], second[1])),
+        torch.cat((first[2], second[2])),
+        torch.cat((first[3], second[3])),
+        torch.tensor([first[4].item(), second[4].item()]),
+        torch.tensor([0.0, 0.0]),
+        torch.tensor([1.0, 1.0]),
+    )
+
+
+def test_fast_exact_logical_batch_v1_matches_physical_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    overrides = _fast_exact_overrides()
+    overrides["worker_pointer_v2_fast_replay_batching"] = "logical_batch_v1"
+    overrides["worker_pointer_v2_logical_batch_cap"] = 2
+    with temporary_config(configs, overrides):
+        env_a = AirLineEnv_Graph(DATA_PATH, seed=42)
+        env_b = AirLineEnv_Graph(DATA_PATH, seed=43)
+        agent = _make_agent()
+        memory, b_task, b_station, b_team, old_logprobs, rewards, advantages = (
+            _two_sample_memory(agent, env_a, env_b)
+        )
+        builder = GPUExactBatchBuilder(config=configs, env=env_a, device=_DEVICE)
+
+        physical_outputs = []
+        for index in (0, 1):
+            physical_batch = agent._build_v2_fast_exact_group(
+                memory=memory,
+                memory_indices=[index],
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                old_logprobs=old_logprobs,
+                rewards=rewards,
+                advantages=advantages,
+                fast_exact_builder=builder,
+            )
+            physical_outputs.append(agent._replay_v2_fast_exact_group(physical_batch))
+        logical_batch = agent._build_v2_fast_exact_group(
+            memory=memory,
+            memory_indices=[0, 1],
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            old_logprobs=old_logprobs,
+            rewards=rewards,
+            advantages=advantages,
+            fast_exact_builder=builder,
+        )
+        logical_outputs = agent._replay_v2_fast_exact_group(logical_batch)
+
+        for index, physical_group in enumerate(physical_outputs):
+            for key in ("task", "station", "team", "state_value", "entropy", "normalized_entropy"):
+                torch.testing.assert_close(
+                    logical_outputs[index][key].float(),
+                    physical_group[0][key].float(),
+                    rtol=0.0,
+                    atol=1.0e-4,
+                )
+
+        replay_calls: list[tuple[int, bool]] = []
+        original_replay = agent._replay_v2_fast_exact_group
+
+        def capture_replay(fast_batch, *, actor_only=False):
+            replay_calls.append((fast_batch.group_size, actor_only))
+            return original_replay(fast_batch, actor_only=actor_only)
+
+        monkeypatch.setattr(agent, "_replay_v2_fast_exact_group", capture_replay)
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env_a,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        assert (2, False) in replay_calls
+        assert metrics["V2/FastExact/PhysicalGroupCount"] == 2.0
+
+
 def test_fast_exact_formal_graphs_survive_multiple_physical_groups() -> None:
     with temporary_config(configs, _fast_exact_overrides()):
         env_a = AirLineEnv_Graph(DATA_PATH, seed=42)

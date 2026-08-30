@@ -253,3 +253,29 @@ def test_gpu_builder_returns_layout_and_trajectory_metadata() -> None:
         assert len(out.raw_worker_slices) == 2
         assert out.raw_worker_slices[0].shape == (64, 17)
         assert out.raw_worker_slices[1].shape == (68, 17)
+
+
+def test_gpu_builder_reuses_layout_template_across_topologies() -> None:
+    with temporary_config(global_configs, {}):
+        env = _make_env()
+        snapshot = env.get_state_snapshot()
+        first = _truncate_worker(snapshot, 60)
+        second = _truncate_worker(snapshot, 60)
+        worker_features = np.asarray(second["base_worker_x"]).copy()
+        worker_features[0, 1:6] = 0.0
+        worker_features[0, 1] = 1.0
+        second["base_worker_x"] = worker_features
+
+        builder = _gpu_builder(env)
+        first_batch = builder.build([first], masks=None, memory_indices=[0])
+        first_edges = first_batch.batch[
+            "worker", "has_skill", "skill"
+        ].edge_index.clone()
+        second_batch = builder.build([second], masks=None, memory_indices=[1])
+        second_edges = second_batch.batch[
+            "worker", "has_skill", "skill"
+        ].edge_index.clone()
+
+        assert builder.template_hits == 1
+        assert builder.template_misses == 1
+        assert not torch.equal(first_edges, second_edges)

@@ -405,7 +405,6 @@ class GPUExactBatchBuilder:
         task_counts: Tuple[int, ...],
         worker_counts: Tuple[int, ...],
         station_counts: Tuple[int, ...],
-        topo_keys: Tuple[object, ...],
     ) -> tuple:
         layout = resolve_worker_feature_layout(self.config)
         return (
@@ -418,7 +417,6 @@ class GPUExactBatchBuilder:
             layout.total_dim,
             int(getattr(self.config, "task_feat_dim", 18)),
             int(getattr(self.config, "station_feat_dim", 15)),
-            tuple(topo_keys),
         )
 
     def _create_template(
@@ -913,7 +911,6 @@ class GPUExactBatchBuilder:
             task_counts=task_counts,
             worker_counts=worker_counts,
             station_counts=station_counts,
-            topo_keys=topo_keys,
         )
         template = self._get_or_create_template(
             key=key,
