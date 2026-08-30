@@ -118,6 +118,16 @@ def test_fast_exact_encoder_batching_mode_rejects_unknown_value() -> None:
         validate_runtime_config(cfg)
 
 
+def test_fast_exact_encoder_batching_mode_mismatch_is_rejected_on_resume() -> None:
+    current = _fast_exact_config()
+    checkpoint = build_model_spec(
+        _fast_exact_config(worker_pointer_v2_fast_replay_batching="logical_batch_v1")
+    )
+
+    with pytest.raises(ValueError, match="WorkerPointer v2 checkpoint"):
+        apply_checkpoint_model_spec(current, checkpoint)
+
+
 def test_checkpoint_metadata_training_spec_records_fast_exact_semantics() -> None:
     cfg = _fast_exact_config()
     metadata = build_checkpoint_metadata(cfg)

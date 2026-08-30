@@ -61,6 +61,8 @@ STRUCTURAL_FIELDS = {
     "worker_pointer_v2_marginal_scarcity_clip",
     "worker_pointer_v2_interaction_residual",
     "worker_pointer_v2_next_frontier_pressure",
+    "worker_pointer_v2_fast_replay_batching",
+    "worker_pointer_v2_fast_replay_encoder_batch_cap",
     "conditional_head_baseline_mode",
     "graph_encoder_mode", "actor_context_mode",
     "anchor_proposal_mode", "anchor_proposal_prior_margin",

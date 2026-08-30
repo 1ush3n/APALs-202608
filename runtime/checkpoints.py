@@ -545,6 +545,7 @@ def apply_checkpoint_model_spec(
             "worker_pointer_v2_marginal_scarcity_clip",
             "worker_pointer_v2_interaction_residual",
             "worker_pointer_v2_next_frontier_pressure",
+            "worker_pointer_v2_fast_replay_batching",
         )
         explicit = explicit_fields or set()
         if not (
