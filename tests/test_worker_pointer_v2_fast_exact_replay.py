@@ -406,6 +406,18 @@ def test_fast_exact_formal_graphs_survive_multiple_physical_groups() -> None:
         assert metrics["PPO/UpdateSteps"] == 1.0
 
 
+def test_fast_exact_loss_scale_preserves_previous_accumulated_gradient() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([0.0]))
+    parameter.grad = torch.tensor([3.0])
+    gradient_before_batch = ((parameter, parameter.grad.detach().clone()),)
+    parameter.grad = torch.tensor([7.0])
+
+    PPOAgent._rescale_fast_exact_gradient_delta(gradient_before_batch, 0.1)
+
+    assert parameter.grad is not None
+    assert parameter.grad.item() == pytest.approx(3.4)
+
+
 def test_fast_exact_replay_fails_closed_on_contract_break() -> None:
     with temporary_config(configs, _fast_exact_overrides()):
         env = AirLineEnv_Graph(DATA_PATH, seed=42)

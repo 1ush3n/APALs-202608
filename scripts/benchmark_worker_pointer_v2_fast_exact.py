@@ -38,6 +38,7 @@ from configs import configs
 from models.hb_gat_pn import HBGATPN
 from ppo_agent import PPOAgent
 from runtime.seed import set_seed
+from runtime.modes import FAST_EXACT_REPLAY_MODE
 from training.fast_exact_benchmark import (
     compute_replay_performance,
     compute_template_hit_rate,
@@ -167,6 +168,10 @@ def _apply_mode_overrides(
     overrides = {
         "team_selection_mode": team_mode,
         "policy_action_scope": "operation_station_worker",
+        "worker_pointer_v2_replay_mode": (
+            FAST_EXACT_REPLAY_MODE if mode == "v2_fast_exact" else "batched_vectorized_v2"
+        ),
+        "worker_pointer_v2_behavior_replay": mode == "v2_fast_exact",
         "lightning_precision": "bf16-mixed",
         "batch_size": int(batch_size),
         "worker_pointer_v2_logical_batch_cap": int(batch_size),

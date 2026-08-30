@@ -324,6 +324,27 @@ class PPOAgent:
                 + (time.perf_counter() - started) * 1000.0
             )
 
+    @staticmethod
+    def _rescale_fast_exact_gradient_delta(
+        gradient_before_batch: tuple[
+            tuple[torch.nn.Parameter, torch.Tensor | None], ...
+        ],
+        loss_scale: float,
+    ) -> None:
+        """只缩放当前 logical batch 新增的梯度，保留窗口内既有累计梯度。"""
+        scale = float(loss_scale)
+        if scale == 1.0:
+            return
+        with torch.no_grad():
+            for parameter, previous in gradient_before_batch:
+                current = parameter.grad
+                if current is None:
+                    continue
+                if previous is None:
+                    current.mul_(scale)
+                else:
+                    current.copy_(previous + (current - previous) * scale)
+
     def _build_v2_pressure_context(
         self,
         *,
@@ -5259,6 +5280,137 @@ class PPOAgent:
         gradient_diagnostics_all: list[dict[str, float]] = []
         precheck_reused = 0
         stop_after_epoch = False
+        optimizer_parameters = tuple(
+            parameter
+            for parameter_group in self.optimizer.param_groups
+            for parameter in parameter_group["params"]
+            if parameter.requires_grad
+        )
+
+        def _backward_formal_group(
+            *,
+            group_index: int,
+            group_batch: Any,
+            outputs: list[dict[str, torch.Tensor]],
+            window_sample_count: int,
+        ) -> None:
+            """立即消费单个 group 的正式输出，避免跨 group 保留 autograd graph。"""
+            sample_losses: list[torch.Tensor] = []
+            for local_index, (output, (memory_index, _trace)) in enumerate(
+                zip(outputs, restored[group_index])
+            ):
+                total_lp = output["task"] + output["station"] + output["team"]
+                old_lp = group_batch.batch.y_logprob[local_index].reshape(1).float()
+                _, _, ratio = self.compute_stable_log_ratio_and_ratio(
+                    total_lp, old_lp
+                )
+                advantage = group_batch.batch.y_advantage[local_index].reshape(1)
+                if factorized_enabled:
+                    assert old_component_logprobs is not None
+                    assert component_advantages is not None
+                    assert component_active_mask is not None
+                    current_component_logprobs = torch.stack(
+                        [output["task"], output["station"], output["team"]], dim=1
+                    )
+                    policy_loss, _component_ratios, _component_losses = (
+                        self.compute_factorized_clipped_surrogate(
+                            current_logprobs=current_component_logprobs,
+                            old_logprobs=old_component_logprobs[memory_index]
+                            .reshape(1, 3)
+                            .to(self.device),
+                            advantages=component_advantages[memory_index]
+                            .reshape(1, 3)
+                            .to(self.device),
+                            active_mask=component_active_mask[memory_index]
+                            .reshape(1, 3)
+                            .to(self.device),
+                            clip_range=current_eps_clip,
+                        )
+                    )
+                else:
+                    surrogate = torch.minimum(
+                        ratio * advantage,
+                        torch.clamp(
+                            ratio,
+                            1.0 - current_eps_clip,
+                            1.0 + current_eps_clip,
+                        )
+                        * advantage,
+                    )
+                    policy_loss = -surrogate.mean()
+                old_value = (
+                    group_batch.batch.y_value[local_index].reshape(1)
+                    if hasattr(group_batch.batch, "y_value")
+                    else None
+                )
+                value_loss = self.compute_value_loss(
+                    state_values=output["state_value"],
+                    returns=group_batch.batch.y_reward[local_index].reshape(1),
+                    old_values=old_value,
+                    clip_range=current_eps_clip,
+                )
+                if factorized_enabled:
+                    assert old_component_values is not None
+                    assert component_active_mask is not None
+                    conditional_values = output.get("conditional_values")
+                    assert conditional_values is not None
+                    conditional_value_loss = self.compute_factorized_value_loss(
+                        current_values=conditional_values.reshape(1, 3),
+                        old_values=old_component_values[memory_index]
+                        .reshape(1, 3)
+                        .to(self.device),
+                        targets=group_batch.batch.y_reward[local_index].reshape(1),
+                        active_mask=component_active_mask[memory_index]
+                        .reshape(1, 3)
+                        .to(self.device),
+                        clip_range=current_eps_clip,
+                    )
+                    value_loss = self.combine_factorized_value_loss(
+                        base_value_loss=value_loss,
+                        conditional_value_loss=conditional_value_loss,
+                        coefficient=float(
+                            getattr(
+                                self.config,
+                                "conditional_head_value_coef",
+                                1.0,
+                            )
+                        ),
+                    )
+                normalized_entropy = output["normalized_entropy"].mean()
+                sample_loss = (
+                    c_policy * policy_loss
+                    + c_value * value_loss
+                    - c_ent * normalized_entropy
+                )
+                sample_losses.append(sample_loss)
+                metric_values["policy_loss"].append(
+                    policy_loss.detach().float().reshape(1)
+                )
+                metric_values["value_loss"].append(
+                    value_loss.detach().float().reshape(1)
+                )
+                metric_values["entropy"].append(
+                    output["entropy"].detach().float().reshape(1)
+                )
+                metric_values["normalized_entropy"].append(
+                    normalized_entropy.detach().float().reshape(1)
+                )
+                metric_values["ratio"].append(ratio.detach().float().reshape(1))
+            assert sample_losses
+            group_loss_sum = torch.stack(sample_losses).sum()
+            scaled_loss = normalize_group_loss_sum(
+                group_loss_sum,
+                window_sample_count=window_sample_count,
+            )
+            if self._v2_fast_exact_profile is not None:
+                self._v2_fast_exact_profile_sync()
+                backward_started = time.perf_counter()
+            self.scaler.scale(scaled_loss).backward()
+            if self._v2_fast_exact_profile is not None:
+                self._v2_fast_exact_profile_sync()
+                self._v2_fast_exact_profile_add_time(
+                    "BackwardMs", backward_started
+                )
 
         for epoch, logical_batches in enumerate(logical_batches_by_epoch):
             epoch_kl_sum = 0.0
@@ -5280,10 +5432,16 @@ class PPOAgent:
                 self.optimizer.zero_grad()
                 for batch_offset, batch_groups in enumerate(window_batches):
                     logical_batch_count += 1
+                    gradient_before_batch = tuple(
+                        (
+                            parameter,
+                            parameter.grad.detach().clone()
+                            if parameter.grad is not None
+                            else None,
+                        )
+                        for parameter in optimizer_parameters
+                    )
                     # formal replay 输出同时用于当前 KL 和 PPO loss，禁止跨 step 缓存 logits。
-                    formal_replays: list[
-                        tuple[int, Any, list[dict[str, torch.Tensor]]]
-                    ] = []
                     formal_total_lp: list[torch.Tensor] = []
                     formal_old_lp: list[torch.Tensor] = []
                     for group_index in batch_groups:
@@ -5310,7 +5468,6 @@ class PPOAgent:
                                 )
                                 + float(len(outputs))
                             )
-                        formal_replays.append((group_index, group_batch, outputs))
                         for output, (memory_index, _trace) in zip(
                             outputs, restored[group_index]
                         ):
@@ -5326,6 +5483,12 @@ class PPOAgent:
                                 .to(self.device)
                                 .reshape(1)
                             )
+                        _backward_formal_group(
+                            group_index=group_index,
+                            group_batch=group_batch,
+                            outputs=outputs,
+                            window_sample_count=window_sample_count,
+                        )
                     with torch.no_grad():
                         batch_total_lp = torch.cat(formal_total_lp).float()
                         batch_old_lp = torch.cat(formal_old_lp).float()
@@ -5347,137 +5510,10 @@ class PPOAgent:
                             .float()
                             .detach()
                         )
-
-                    # 正式带梯度前向（actor + critic + 完整 PPO loss）。
-                    for group_index, group_batch, outputs in formal_replays:
-                        sample_losses: list[torch.Tensor] = []
-                        for local_index, (output, (memory_index, _trace)) in enumerate(
-                            zip(outputs, restored[group_index])
-                        ):
-                            total_lp = output["task"] + output["station"] + output["team"]
-                            old_lp = group_batch.batch.y_logprob[
-                                local_index
-                            ].reshape(1).float()
-                            _, _, ratio = self.compute_stable_log_ratio_and_ratio(
-                                total_lp, old_lp
-                            )
-                            advantage = group_batch.batch.y_advantage[
-                                local_index
-                            ].reshape(1)
-                            if factorized_enabled:
-                                assert old_component_logprobs is not None
-                                assert component_advantages is not None
-                                assert component_active_mask is not None
-                                current_component_logprobs = torch.stack(
-                                    [output["task"], output["station"], output["team"]],
-                                    dim=1,
-                                )
-                                policy_loss, _component_ratios, _component_losses = (
-                                    self.compute_factorized_clipped_surrogate(
-                                        current_logprobs=current_component_logprobs,
-                                        old_logprobs=old_component_logprobs[
-                                            memory_index
-                                        ].reshape(1, 3).to(self.device),
-                                        advantages=component_advantages[
-                                            memory_index
-                                        ].reshape(1, 3).to(self.device),
-                                        active_mask=component_active_mask[
-                                            memory_index
-                                        ].reshape(1, 3).to(self.device),
-                                        clip_range=current_eps_clip,
-                                    )
-                                )
-                            else:
-                                surrogate = torch.minimum(
-                                    ratio * advantage,
-                                    torch.clamp(
-                                        ratio,
-                                        1.0 - current_eps_clip,
-                                        1.0 + current_eps_clip,
-                                    )
-                                    * advantage,
-                                )
-                                policy_loss = -surrogate.mean()
-                            old_value = (
-                                group_batch.batch.y_value[local_index].reshape(1)
-                                if hasattr(group_batch.batch, "y_value")
-                                else None
-                            )
-                            value_loss = self.compute_value_loss(
-                                state_values=output["state_value"],
-                                returns=group_batch.batch.y_reward[
-                                    local_index
-                                ].reshape(1),
-                                old_values=old_value,
-                                clip_range=current_eps_clip,
-                            )
-                            if factorized_enabled:
-                                assert old_component_values is not None
-                                assert component_active_mask is not None
-                                conditional_values = output.get("conditional_values")
-                                assert conditional_values is not None
-                                conditional_value_loss = (
-                                    self.compute_factorized_value_loss(
-                                        current_values=conditional_values.reshape(1, 3),
-                                        old_values=old_component_values[
-                                            memory_index
-                                        ].reshape(1, 3).to(self.device),
-                                        targets=group_batch.batch.y_reward[
-                                            local_index
-                                        ].reshape(1),
-                                        active_mask=component_active_mask[
-                                            memory_index
-                                        ].reshape(1, 3).to(self.device),
-                                        clip_range=current_eps_clip,
-                                    )
-                                )
-                                value_loss = self.combine_factorized_value_loss(
-                                    base_value_loss=value_loss,
-                                    conditional_value_loss=conditional_value_loss,
-                                    coefficient=float(
-                                        getattr(
-                                            self.config,
-                                            "conditional_head_value_coef",
-                                            1.0,
-                                        )
-                                    ),
-                                )
-                            normalized_entropy = output["normalized_entropy"].mean()
-                            sample_loss = (
-                                c_policy * policy_loss
-                                + c_value * value_loss
-                                - c_ent * normalized_entropy
-                            )
-                            sample_losses.append(sample_loss)
-                            metric_values["policy_loss"].append(
-                                policy_loss.detach().float().reshape(1)
-                            )
-                            metric_values["value_loss"].append(
-                                value_loss.detach().float().reshape(1)
-                            )
-                            metric_values["entropy"].append(
-                                output["entropy"].detach().float().reshape(1)
-                            )
-                            metric_values["normalized_entropy"].append(
-                                normalized_entropy.detach().float().reshape(1)
-                            )
-                            metric_values["ratio"].append(
-                                ratio.detach().float().reshape(1)
-                            )
-                        group_loss_sum = torch.stack(sample_losses).sum()
-                        scaled_loss = normalize_group_loss_sum(
-                            group_loss_sum * float(loss_scale),
-                            window_sample_count=window_sample_count,
-                        )
-                        if self._v2_fast_exact_profile is not None:
-                            self._v2_fast_exact_profile_sync()
-                            backward_started = time.perf_counter()
-                        self.scaler.scale(scaled_loss).backward()
-                        if self._v2_fast_exact_profile is not None:
-                            self._v2_fast_exact_profile_sync()
-                            self._v2_fast_exact_profile_add_time(
-                                "BackwardMs", backward_started
-                            )
+                    self._rescale_fast_exact_gradient_delta(
+                        gradient_before_batch,
+                        loss_scale,
+                    )
 
                 self.scaler.unscale_(self.optimizer)
                 gradient_diagnostics = self._collect_gradient_diagnostics(
