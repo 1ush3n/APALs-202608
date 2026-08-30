@@ -1863,6 +1863,26 @@ class PPOAgent:
         clipped_losses = (clipped_values - returns).pow(2)
         return torch.max(value_losses, clipped_losses).mean()
 
+
+    @staticmethod
+    def combine_factorized_value_loss(
+        *,
+        base_value_loss: torch.Tensor,
+        conditional_value_loss: torch.Tensor,
+        coefficient: float,
+    ) -> torch.Tensor:
+        """保持 factorized critic 扩展前后的 value loss 整体尺度。"""
+        assert base_value_loss.ndim == 0
+        assert conditional_value_loss.ndim == 0
+        coefficient_value = float(coefficient)
+        assert math.isfinite(coefficient_value) and coefficient_value >= 0.0
+        combined = 0.5 * (
+            base_value_loss + coefficient_value * conditional_value_loss
+        )
+        assert torch.isfinite(combined)
+        return combined
+
+
     @staticmethod
     def compute_factorized_component_advantages(
         *,
@@ -3392,14 +3412,6 @@ class PPOAgent:
         action_scope = str(
             getattr(self.config, "policy_action_scope", "operation_station_worker")
         )
-        b_task = torch.tensor([a[0] for a in old_actions], dtype=torch.long)
-        b_station = torch.tensor([a[1] for a in old_actions], dtype=torch.long)
-        max_team_size = max(len(a[2]) for a in old_actions) if old_actions else 1
-        team_list = []
-        for action in old_actions:
-            team = action[2]
-            team_list.append(team + [-1] * (max_team_size - len(team)))
-        b_team = torch.tensor(team_list, dtype=torch.long)
         factorized_enabled = (
             action_scope == "operation_station_worker"
             and str(
@@ -3407,67 +3419,6 @@ class PPOAgent:
             )
             == "factorized"
         )
-        old_component_logprobs = None
-        old_component_values = None
-        component_active_mask = None
-        component_advantages = None
-        if factorized_enabled:
-            required_memory_fields = (
-                "old_task_logprob",
-                "old_station_logprob",
-                "old_team_logprob",
-                "old_V_task",
-                "old_V_station",
-                "old_V_worker",
-            )
-            missing_fields = [
-                field_name
-                for field_name in required_memory_fields
-                if len(getattr(memory, field_name, [])) != len(memory.states)
-                or any(
-                    value is None for value in getattr(memory, field_name, [])
-                )
-            ]
-            if missing_fields:
-                raise RuntimeError(
-                    "factorized conditional PPO 缺少完整 behavior-time Memory 字段: "
-                    + ", ".join(missing_fields)
-                )
-            old_component_logprobs = torch.tensor(
-                list(
-                    zip(
-                        memory.old_task_logprob,
-                        memory.old_station_logprob,
-                        memory.old_team_logprob,
-                        strict=True,
-                    )
-                ),
-                dtype=torch.float32,
-            )
-            old_component_values = torch.tensor(
-                list(
-                    zip(
-                        memory.old_V_task,
-                        memory.old_V_station,
-                        memory.old_V_worker,
-                        strict=True,
-                    )
-                ),
-                dtype=torch.float32,
-            )
-            component_active_mask = torch.stack(
-                [
-                    torch.ones_like(b_station, dtype=torch.bool),
-                    b_station >= 0,
-                    (b_team >= 0).any(dim=1),
-                ],
-                dim=1,
-            )
-            component_advantages = self.compute_factorized_component_advantages(
-                returns=rewards.float(),
-                old_values=old_component_values,
-                active_mask=component_active_mask,
-            )
         if action_scope == "operation_station_gated_team":
             traces = getattr(memory, "gated_team_traces", None)
             if traces is None or len(traces) != len(memory.states):
@@ -3496,6 +3447,10 @@ class PPOAgent:
             team_list.append(t + pad)
         b_team = torch.tensor(team_list, dtype=torch.long)
 
+        old_component_logprobs = None
+        old_component_values = None
+        component_active_mask = None
+        component_advantages = None
         if factorized_enabled:
             (
                 old_component_logprobs,
@@ -4372,13 +4327,17 @@ class PPOAgent:
                                 clip_range=curr_eps_clip,
                             )
                         )
-                        value_loss_raw = value_loss_raw + float(
-                            getattr(
-                                self.config,
-                                "conditional_head_value_coef",
-                                1.0,
-                            )
-                        ) * conditional_value_loss
+                        value_loss_raw = self.combine_factorized_value_loss(
+                            base_value_loss=value_loss_raw,
+                            conditional_value_loss=conditional_value_loss,
+                            coefficient=float(
+                                getattr(
+                                    self.config,
+                                    "conditional_head_value_coef",
+                                    1.0,
+                                )
+                            ),
+                        )
                     value_loss = c_val * value_loss_raw
                     
                     # 鍔ㄦ€佽幏鍙栧綋鍓?batch 涓悇鍐崇瓥鍒嗘敮鐨勬渶澶у姩浣滅淮搴︿互杩涜鐔靛綊涓€鍖?
@@ -5399,13 +5358,17 @@ class PPOAgent:
                                         clip_range=current_eps_clip,
                                     )
                                 )
-                                value_loss = value_loss + float(
-                                    getattr(
-                                        self.config,
-                                        "conditional_head_value_coef",
-                                        1.0,
-                                    )
-                                ) * conditional_value_loss
+                                value_loss = self.combine_factorized_value_loss(
+                                    base_value_loss=value_loss,
+                                    conditional_value_loss=conditional_value_loss,
+                                    coefficient=float(
+                                        getattr(
+                                            self.config,
+                                            "conditional_head_value_coef",
+                                            1.0,
+                                        )
+                                    ),
+                                )
                             normalized_entropy = output["normalized_entropy"].mean()
                             sample_loss = (
                                 c_policy * policy_loss
@@ -5890,13 +5853,17 @@ class PPOAgent:
                                         clip_range=current_eps_clip,
                                     )
                                 )
-                                value_loss = value_loss + float(
-                                    getattr(
-                                        self.config,
-                                        "conditional_head_value_coef",
-                                        1.0,
-                                    )
-                                ) * conditional_value_loss
+                                value_loss = self.combine_factorized_value_loss(
+                                    base_value_loss=value_loss,
+                                    conditional_value_loss=conditional_value_loss,
+                                    coefficient=float(
+                                        getattr(
+                                            self.config,
+                                            "conditional_head_value_coef",
+                                            1.0,
+                                        )
+                                    ),
+                                )
                             normalized_entropy = output["normalized_entropy"].mean()
                             sample_loss = (
                                 c_policy * policy_loss

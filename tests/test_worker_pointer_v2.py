@@ -294,6 +294,18 @@ def test_factorized_value_loss_averages_active_components_and_clips_old_values()
     torch.testing.assert_close(loss, expected)
 
 
+def test_factorized_value_loss_keeps_base_critic_scale() -> None:
+    from ppo_agent import PPOAgent
+
+    combined = PPOAgent.combine_factorized_value_loss(
+        base_value_loss=torch.tensor(2.0),
+        conditional_value_loss=torch.tensor(4.0),
+        coefficient=1.0,
+    )
+
+    torch.testing.assert_close(combined, torch.tensor(3.0))
+
+
 def test_next_frontier_pressure_uses_sparse_physical_predecessors() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
 
