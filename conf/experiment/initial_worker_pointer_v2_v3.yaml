@@ -1,0 +1,14 @@
+defaults:
+  - /experiment/initial_worker_pointer_v2_batched_exploratory@_global_
+  - _self_
+
+experiment:
+  experiment_name: initial_worker_pointer_v2_v3
+
+model:
+  worker_pointer_v2_explicit_team_state: true
+  worker_pointer_v2_marginal_scarcity: true
+  worker_pointer_v2_marginal_scarcity_clip: 10.0
+  worker_pointer_v2_interaction_residual: true
+  worker_pointer_v2_next_frontier_pressure: false
+  conditional_head_baseline_mode: "off"

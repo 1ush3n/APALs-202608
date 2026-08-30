@@ -714,6 +714,88 @@ def test_worker_pointer_v2_a2_nested_initialization_and_step_zero_are_invariant(
     assert torch.isfinite(v2._last_v2_marginal_extra).all()
 
 
+def test_worker_pointer_v2_a3_zero_init_preserves_v2_logits_and_public_parameters() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    v2_config = _pointer_config("autoregressive_pressure_v2")
+    v2_config.worker_pointer_v2_explicit_team_state = True
+    v2_config.worker_pointer_v2_marginal_scarcity = True
+    v3_config = _pointer_config("autoregressive_pressure_v2")
+    v3_config.worker_pointer_v2_explicit_team_state = True
+    v3_config.worker_pointer_v2_marginal_scarcity = True
+    v3_config.worker_pointer_v2_interaction_residual = True
+    torch.manual_seed(1234)
+    v2 = WorkerPointer(v2_config)
+    torch.manual_seed(1234)
+    v3 = WorkerPointer(v3_config)
+
+    for key, value in v2.state_dict().items():
+        torch.testing.assert_close(v3.state_dict()[key], value, atol=0.0, rtol=0.0)
+    assert torch.count_nonzero(v3.v2_interaction_mlp[-1].weight).item() == 0
+    assert torch.count_nonzero(v3.v2_interaction_mlp[-1].bias).item() == 0
+
+    context = build_worker_pressure_context(
+        **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+    )
+    common = {
+        "task_emb": torch.randn((1, 8)),
+        "station_emb": torch.randn((1, 8)),
+        "global_context": torch.randn((1, 24)),
+        "worker_embs": torch.randn((1, 3, 8)),
+        "pressure_context": context,
+        "demand": torch.tensor([2.0]),
+        "mask": torch.tensor([[False, False, True]]),
+        "candidate_skills": _pressure_inputs()["worker_features"][..., 1:6],
+        "task_required_skills": torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0]]),
+    }
+    cache_v2 = v2.build_v2_decode_cache(
+        **{key: value for key, value in common.items() if key != "mask"}
+    )
+    cache_v3 = v3.build_v2_decode_cache(
+        **{key: value for key, value in common.items() if key != "mask"}
+    )
+    logits_v2 = v2.forward_choice_v2(
+        **common,
+        team_state=v2.initialize_v2_state(batch_size=1, device=torch.device("cpu")),
+        decode_cache=cache_v2,
+    )
+    logits_v3 = v3.forward_choice_v2(
+        **common,
+        team_state=v3.initialize_v2_state(batch_size=1, device=torch.device("cpu")),
+        decode_cache=cache_v3,
+    )
+
+    torch.testing.assert_close(logits_v3, logits_v2, atol=1.0e-6, rtol=0.0)
+
+
+def test_worker_pointer_v2_a3_interaction_residual_receives_gradient() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    config = _pointer_config("autoregressive_pressure_v2")
+    config.worker_pointer_v2_interaction_residual = True
+    head = WorkerPointer(config)
+    context = build_worker_pressure_context(
+        **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+    )
+    common = {
+        "task_emb": torch.randn((1, 8)),
+        "station_emb": torch.randn((1, 8)),
+        "global_context": torch.randn((1, 24)),
+        "worker_embs": torch.randn((1, 3, 8)),
+        "pressure_context": context,
+        "team_state": head.initialize_v2_state(batch_size=1, device=torch.device("cpu")),
+        "demand": torch.tensor([2.0]),
+        "mask": torch.tensor([[False, False, True]]),
+        "candidate_skills": _pressure_inputs()["worker_features"][..., 1:6],
+        "task_required_skills": torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0]]),
+    }
+    logits = head.forward_choice_v2(**common)
+    logits[:, :2].sum().backward()
+
+    assert head.v2_interaction_mlp[-1].weight.grad is not None
+    assert torch.isfinite(head.v2_interaction_mlp[-1].weight.grad).all()
+
+
 def test_worker_pointer_v2_a1_uses_log1p_partial_team_operational_state() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
 

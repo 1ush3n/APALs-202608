@@ -313,6 +313,23 @@ def test_experiments_do_not_embed_hardware_profiles() -> None:
         assert "../hardware/" not in path.read_text(encoding="utf-8")
 
 
+def test_worker_pointer_v2_v3_hydra_diff_enables_a1_a2_a3_only() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_v3"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_explicit_team_state is True
+    assert cfg.worker_pointer_v2_marginal_scarcity is True
+    assert cfg.worker_pointer_v2_interaction_residual is True
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "off"
+
+
 def test_unsupported_platform_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="不支持的训练平台"):
         resolve_platform_hardware_config(system_name="Darwin")

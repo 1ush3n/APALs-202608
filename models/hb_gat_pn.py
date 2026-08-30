@@ -378,6 +378,9 @@ class WorkerPointer(nn.Module):
         self.use_marginal_scarcity = bool(
             getattr(config, "worker_pointer_v2_marginal_scarcity", False)
         )
+        self.use_interaction_residual = bool(
+            getattr(config, "worker_pointer_v2_interaction_residual", False)
+        )
         self.query_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
         self.ar_query_proj = nn.Linear(config.hidden_dim * 2, config.hidden_dim) # Autoregressive Optimization A
         self.key_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
@@ -417,6 +420,14 @@ class WorkerPointer(nn.Module):
                 if self.use_marginal_scarcity:
                     self.v2_marginal_proj = nn.Linear(1, hidden_dim, bias=False)
                     nn.init.zeros_(self.v2_marginal_proj.weight)
+                if self.use_interaction_residual:
+                    self.v2_interaction_mlp = nn.Sequential(
+                        nn.Linear(hidden_dim * 4, hidden_dim),
+                        get_activation(),
+                        nn.Linear(hidden_dim, 1),
+                    )
+                    nn.init.zeros_(self.v2_interaction_mlp[-1].weight)
+                    nn.init.zeros_(self.v2_interaction_mlp[-1].bias)
                 if self.use_explicit_team_state:
                     base_proj = self.v2_query_proj
                     with torch.random.fork_rng(devices=[], enabled=True):
@@ -807,7 +818,30 @@ class WorkerPointer(nn.Module):
             else:
                 self._last_v2_marginal_total = None
                 self._last_v2_marginal_extra = None
-            scores = self.v2_attn(torch.tanh(query + cache.candidate_keys + dynamic_keys)).squeeze(-1)  # [B,N]
+            candidate_repr = cache.candidate_keys + dynamic_keys
+            base_scores = self.v2_attn(torch.tanh(query + candidate_repr)).squeeze(-1)  # [B,N]
+            if self.use_interaction_residual:
+                query_expanded = query.expand(-1, num_workers, -1)  # [B,1,H] -> [B,N,H]
+                interaction_features = torch.cat(
+                    [
+                        query_expanded,
+                        candidate_repr,
+                        query_expanded * candidate_repr,
+                        (query_expanded - candidate_repr).abs(),
+                    ],
+                    dim=-1,
+                )  # [B,N,H] * 4 -> [B,N,4H]
+                assert interaction_features.shape == (
+                    batch_size,
+                    num_workers,
+                    hidden_dim * 4,
+                )
+                residual_scores = self.v2_interaction_mlp(
+                    interaction_features
+                ).squeeze(-1)  # [B,N,4H] -> [B,N,1] -> [B,N]
+                scores = base_scores + residual_scores
+            else:
+                scores = base_scores
         # 后续可控消融可比较 query-candidate 交互 MLP 或 legacy score+压力残差；本轮不实现。
         if mask is not None:
             assert mask.shape == (batch_size, num_workers)
