@@ -40,7 +40,9 @@ model:
   worker_pointer_v2_dynamic_eft_features: false
   worker_pointer_v2_dynamic_eft_feature_clip: 10.0
   worker_pointer_v2_fast_default_num_envs: 4
+  worker_pointer_v2_explicit_team_state: false
   worker_pointer_v2_marginal_scarcity: false
+  worker_pointer_v2_marginal_scarcity_clip: 10.0
   worker_pointer_v2_interaction_residual: false
   worker_pointer_v2_next_frontier_pressure: false
   conditional_head_baseline_mode: "off"
