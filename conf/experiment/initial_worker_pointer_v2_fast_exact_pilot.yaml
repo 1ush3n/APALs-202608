@@ -52,7 +52,19 @@ train:
   lightning_precision: bf16-mixed
   eval_freq: 1
   eval_temperature: 0.0
-  async_eval_enabled: false
+  async_eval_enabled: true
+  async_eval_device: cuda
+  async_eval_cpu_threads: 4
+  async_eval_worker_count: 2
+  async_eval_queue_capacity: 4
+  async_eval_submit_every_episodes: 2
+  async_eval_wait_on_finish: true
+  async_eval_failure_policy: fail
+  async_eval_max_retries: 1
+  async_eval_poll_interval_sec: 1.0
+  async_eval_heartbeat_interval_sec: 30.0
+  async_eval_stale_timeout_sec: 3600.0
+  async_eval_use_cached_observation: true
   worker_pointer_v2_behavior_replay: true
   worker_pointer_v2_replay_mode: behavior_group_exact_gpu_template_v2
   worker_pointer_v2_logical_batch_cap: 256

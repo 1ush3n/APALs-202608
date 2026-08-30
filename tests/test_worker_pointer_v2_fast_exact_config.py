@@ -220,3 +220,24 @@ def test_fast_exact_experiment_cli_num_envs_wins_over_platform() -> None:
     )
     assert target.worker_pointer_v2_fast_default_num_envs == 16
     assert resolved == 8
+
+
+def test_fast_exact_pilot_keeps_async_validation_and_effective_batch_contract() -> None:
+    parsed = ParsedHydraArgs(
+        experiment="initial_worker_pointer_v2_fast_exact_pilot_v0",
+        hardware="linux_server",
+        resume=False,
+        resume_checkpoint_path=None,
+        config_overrides=(),
+        final_overrides={"num_envs": 4},
+        explicit_fields={"num_envs"},
+    )
+    hydra_cfg = compose_hydra_config(parsed, config_dir=CONF_DIR)
+    target = Config()
+    apply_hydra_config(hydra_cfg, target=target, config_paths=(str(CONF_DIR),))
+
+    assert target.batch_size == 256
+    assert target.accumulation_steps == 16
+    assert target.async_eval_enabled is True
+    assert target.async_eval_worker_count == 2
+    assert target.async_eval_submit_every_episodes == 2
