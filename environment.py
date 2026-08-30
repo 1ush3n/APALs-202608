@@ -19,6 +19,7 @@ from core.event_engine import Event, EventType, EventQueue
 from core.action_masker import ActionMasker
 from core.constraints import Assignment, ConstraintEngine, ScheduleValidationReport
 from core.time_comparison import release_time_tolerance, time_reached_scalar
+from models.worker_pointer_context import PHYSICAL_PREDECESSOR_EDGE
 from utils.resource_graph import (
     SkillHubTopology,
     apply_resource_graph,
@@ -672,6 +673,18 @@ class AirLineEnv_Graph(gym.Env):
         data['worker'].x = self.base_worker_x.clone()
         data['station'].x = self.base_station_x.clone()
         data['task', 'precedes', 'task'].edge_index = self.raw_data['precedence_edges'].clone().long()
+        physical_edges = [
+            (pred, task_id)
+            for task_id, predecessors in enumerate(
+                self.constraint_engine.physical_predecessors
+            )
+            for pred in predecessors
+        ]
+        data[PHYSICAL_PREDECESSOR_EDGE].edge_index = (
+            torch.tensor(physical_edges, dtype=torch.long).t().contiguous()
+            if physical_edges
+            else torch.empty((2, 0), dtype=torch.long)
+        )
         initial_topology = build_skill_hub_topology(
             self.base_task_x,
             self.base_worker_x,

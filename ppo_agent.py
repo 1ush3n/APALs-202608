@@ -22,6 +22,7 @@ from core.action_completion import (
     build_action_completer,
 )
 from models.worker_pointer_context import (
+    PHYSICAL_PREDECESSOR_EDGE,
     WorkerPointerV2State,
     WorkerPressureContext,
     build_worker_eft_features,
@@ -314,6 +315,7 @@ class PPOAgent:
         task_action_invalid: torch.Tensor | None,
         worker_present: torch.Tensor | None,
         worker_queue_invalid: torch.Tensor | None,
+        physical_predecessor_edges: list[torch.Tensor] | torch.Tensor | None = None,
     ) -> WorkerPressureContext:
         """统一构造 rollout、eval 与 PPO 重算共用的 v2 压力上下文。"""
 
@@ -343,7 +345,39 @@ class PPOAgent:
             worker_queue_invalid=worker_queue_invalid.to(self.device).reshape(batch_size, num_workers),
             temperature=float(self.config.worker_pointer_pressure_temperature),
             supply_epsilon=float(self.config.worker_pointer_supply_epsilon),
+            physical_predecessor_edges=physical_predecessor_edges,
         )
+
+    @staticmethod
+    def _physical_predecessor_edge_list(
+        batch_data: Any,
+        batch_size: int,
+    ) -> list[torch.Tensor]:
+        """从 PyG Batch 提取每个图的局部 physical predecessor 稀疏边。"""
+        if PHYSICAL_PREDECESSOR_EDGE not in batch_data.edge_types:
+            return [
+                torch.empty((2, 0), dtype=torch.long, device=batch_data["task"].x.device)
+                for _ in range(batch_size)
+            ]
+        edge_index = batch_data[PHYSICAL_PREDECESSOR_EDGE].edge_index
+        if batch_size == 1 and not hasattr(batch_data["task"], "batch"):
+            return [edge_index]
+        task_store = batch_data["task"]
+        task_batch = task_store.batch
+        task_ptr = task_store.ptr
+        result: list[torch.Tensor] = []
+        for graph_index in range(batch_size):
+            if edge_index.numel() == 0:
+                result.append(edge_index.new_empty((2, 0)))
+                continue
+            same_graph = (
+                (task_batch[edge_index[0]] == graph_index)
+                & (task_batch[edge_index[1]] == graph_index)
+            )
+            local_edges = edge_index[:, same_graph] - task_ptr[graph_index]
+            result.append(local_edges)
+        assert len(result) == batch_size
+        return result
 
     def _build_v2_dynamic_eft_features(
         self,
@@ -2285,6 +2319,9 @@ class PPOAgent:
                     task_action_invalid=mask_task,
                     worker_present=None,
                     worker_queue_invalid=mask_worker,
+                    physical_predecessor_edges=self._physical_predecessor_edge_list(
+                        obs, 1
+                    ),
                 )
                 v2_team_state = active_policy.worker_head.initialize_v2_state(
                     batch_size=1, device=self.device
@@ -2941,6 +2978,9 @@ class PPOAgent:
                         task_action_invalid=m_task,
                         worker_present=None,
                         worker_queue_invalid=m_worker,
+                        physical_predecessor_edges=self._physical_predecessor_edge_list(
+                            batch_obs, batch_size
+                        )[i : i + 1],
                     )
                     self.worker_pointer_v2_diagnostics.record_context(
                         v2_pressure,
@@ -3941,6 +3981,9 @@ class PPOAgent:
                             task_action_invalid=combined_task_mask,
                             worker_present=raw_worker_present,
                             worker_queue_invalid=replay_worker_mask,
+                            physical_predecessor_edges=self._physical_predecessor_edge_list(
+                                batch, B_size
+                            ),
                         )
                         v2_team_state = self.policy.worker_head.initialize_v2_state(
                             batch_size=B_size, device=self.device
@@ -4870,6 +4913,9 @@ class PPOAgent:
                 task_action_invalid=task_mask,
                 worker_present=None,
                 worker_queue_invalid=worker_queue_mask,
+                physical_predecessor_edges=self._physical_predecessor_edge_list(
+                    batch, group_size
+                )[sample_index : sample_index + 1],
             )
             team_state = self.policy.worker_head.initialize_v2_state(
                 batch_size=1, device=self.device
@@ -6255,6 +6301,9 @@ class PPOAgent:
                 task_action_invalid=task_mask,
                 worker_present=None,
                 worker_queue_invalid=worker_queue_mask,
+                physical_predecessor_edges=self._physical_predecessor_edge_list(
+                    batch, group_size
+                )[sample_index : sample_index + 1],
             )
             team_state = self.policy.worker_head.initialize_v2_state(
                 batch_size=1, device=self.device

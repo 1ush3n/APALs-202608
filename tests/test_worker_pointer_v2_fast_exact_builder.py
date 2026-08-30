@@ -18,6 +18,7 @@ import torch
 
 from configs import Config
 from environment import AirLineEnv_Graph
+from models.worker_pointer_context import PHYSICAL_PREDECESSOR_EDGE
 from tests.runtime_safety import temporary_config
 from training.v2_fast_exact_batch import (
     CPUExactBatchBuilder,
@@ -173,6 +174,30 @@ def test_gpu_builder_matches_cpu_rebuild_homogeneous() -> None:
             rtol=0.0,
         )
         assert set(gpu_out.batch.edge_types) == set(cpu_out.batch.edge_types)
+
+
+def test_gpu_builder_preserves_physical_predecessor_offsets() -> None:
+    with temporary_config(global_configs, {}):
+        env = _make_env()
+        snapshot = env.get_state_snapshot()
+        num_tasks = int(env.num_tasks)
+        base_edges = env.base_data[PHYSICAL_PREDECESSOR_EDGE].edge_index
+
+        out = _gpu_builder(env).build(
+            [snapshot, snapshot], masks=None, memory_indices=[0, 1]
+        )
+        batched_edges = out.batch[PHYSICAL_PREDECESSOR_EDGE].edge_index
+        edge_count = int(base_edges.size(1))
+
+        assert edge_count > 0
+        torch.testing.assert_close(
+            batched_edges[:, :edge_count], base_edges, atol=0.0, rtol=0.0
+        )
+        torch.testing.assert_close(
+            batched_edges[:, edge_count:], base_edges + num_tasks,
+            atol=0.0,
+            rtol=0.0,
+        )
 
 
 def test_gpu_builder_matches_cpu_rebuild_heterogeneous_workers() -> None:

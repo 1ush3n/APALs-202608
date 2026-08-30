@@ -13,6 +13,8 @@ from torch_geometric.nn import (
 )
 from configs import configs
 from models.worker_pointer_context import (
+    NUM_SKILL_TYPES,
+    PHYSICAL_PREDECESSOR_EDGE,
     WorkerPointerV2DecodeCache,
     WorkerPointerV2State,
     WorkerPressureContext,
@@ -428,6 +430,17 @@ class WorkerPointer(nn.Module):
                     )
                     nn.init.zeros_(self.v2_interaction_mlp[-1].weight)
                     nn.init.zeros_(self.v2_interaction_mlp[-1].bias)
+                if bool(
+                    getattr(config, "worker_pointer_v2_next_frontier_pressure", False)
+                ):
+                    self.v2_next_frontier_query_proj = nn.Linear(
+                        NUM_SKILL_TYPES, hidden_dim, bias=False
+                    )
+                    self.v2_next_frontier_key_proj = nn.Linear(
+                        NUM_SKILL_TYPES, hidden_dim, bias=False
+                    )
+                    nn.init.zeros_(self.v2_next_frontier_query_proj.weight)
+                    nn.init.zeros_(self.v2_next_frontier_key_proj.weight)
                 if self.use_explicit_team_state:
                     base_proj = self.v2_query_proj
                     with torch.random.fork_rng(devices=[], enabled=True):
@@ -729,6 +742,23 @@ class WorkerPointer(nn.Module):
         assert cache.pressure_features.shape == (batch_size, 10)
         assert cache.supply_all.shape == (batch_size, 5)
         assert cache.demand.shape == (batch_size,)
+        use_next_frontier = bool(
+            getattr(self.config, "worker_pointer_v2_next_frontier_pressure", False)
+        )
+        if use_next_frontier:
+            if pressure_context.pressure_next_frontier is None:
+                raise ValueError("C1 需要预先计算 pressure_next_frontier")
+            if cache.candidate_skills is None:
+                raise ValueError("C1 需要候选 worker skill 特征")
+            assert pressure_context.pressure_next_frontier.shape == (
+                batch_size,
+                NUM_SKILL_TYPES,
+            )
+            assert cache.candidate_skills.shape == (
+                batch_size,
+                num_workers,
+                NUM_SKILL_TYPES,
+            )
         if self.use_marginal_scarcity:
             if cache.candidate_skills is None or cache.task_required_skills is None:
                 raise ValueError(
@@ -785,6 +815,11 @@ class WorkerPointer(nn.Module):
             )
             assert query_features.shape == (batch_size, expected_query_width)
             query = self.v2_query_proj(query_features).unsqueeze(1)  # [B,1,H]
+            if use_next_frontier:
+                assert pressure_context.pressure_next_frontier is not None
+                query = query + self.v2_next_frontier_query_proj(
+                    pressure_context.pressure_next_frontier.float()
+                ).unsqueeze(1)
             dynamic_keys = torch.zeros_like(cache.candidate_keys)
             if dynamic_eft_features is not None:
                 dynamic_keys = dynamic_keys + self.v2_eft_proj(
@@ -818,6 +853,16 @@ class WorkerPointer(nn.Module):
             else:
                 self._last_v2_marginal_total = None
                 self._last_v2_marginal_extra = None
+            if use_next_frontier:
+                assert pressure_context.pressure_next_frontier is not None
+                assert cache.candidate_skills is not None
+                next_frontier_candidate_pressure = (
+                    cache.candidate_skills.float()
+                    * pressure_context.pressure_next_frontier.float().unsqueeze(1)
+                )
+                dynamic_keys = dynamic_keys + self.v2_next_frontier_key_proj(
+                    next_frontier_candidate_pressure
+                )
             candidate_repr = cache.candidate_keys + dynamic_keys
             base_scores = self.v2_attn(torch.tanh(query + candidate_repr)).squeeze(-1)  # [B,N]
             if self.use_interaction_residual:
@@ -1258,7 +1303,9 @@ class HBGATPN(nn.Module):
         edge_index_dict = {
             edge_type: edge_index
             for edge_type, edge_index in batch_data.edge_index_dict.items()
-            if edge_type[0] in allowed and edge_type[2] in allowed
+            if edge_type != PHYSICAL_PREDECESSOR_EDGE
+            and edge_type[0] in allowed
+            and edge_type[2] in allowed
         }
         if encoder is None:
             return x_dict

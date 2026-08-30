@@ -25,6 +25,7 @@ import torch
 from torch_geometric.data import Batch, HeteroData
 
 from configs import Config
+from models.worker_pointer_context import PHYSICAL_PREDECESSOR_EDGE
 from utils.resource_graph import (
     LEGACY_RESOURCE_EDGE,
     SKILL_FORWARD_EDGES,
@@ -438,6 +439,11 @@ class GPUExactBatchBuilder:
             if ("task", "precedes", "task") in ctx["base_data"].edge_types
             else torch.empty((2, 0), dtype=torch.long)
         )
+        physical_precedes = (
+            ctx["base_data"][PHYSICAL_PREDECESSOR_EDGE].edge_index.clone()
+            if PHYSICAL_PREDECESSOR_EDGE in ctx["base_data"].edge_types
+            else torch.empty((2, 0), dtype=torch.long)
+        )
 
         data_list: list[HeteroData] = []
         for index in range(group_size):
@@ -454,6 +460,7 @@ class GPUExactBatchBuilder:
                     (num_skills, int(self.config.skill_feat_dim))
                 )
             data["task", "precedes", "task"].edge_index = precedes.clone()
+            data[PHYSICAL_PREDECESSOR_EDGE].edge_index = physical_precedes.clone()
             # 动态边占位，随后原位覆写
             data["task", "assigned_to", "station"].edge_index = torch.empty(
                 (2, 0), dtype=torch.long

@@ -294,6 +294,113 @@ def test_factorized_value_loss_averages_active_components_and_clips_old_values()
     torch.testing.assert_close(loss, expected)
 
 
+def test_next_frontier_pressure_uses_sparse_physical_predecessors() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    task_features = torch.zeros((1, 4, 18), dtype=torch.float32)
+    task_features[0, :, 0] = 1.0
+    task_features[0, 0, 2] = 1.0
+    task_features[0, 1, 1] = 1.0
+    task_features[0, 2, 1] = 1.0
+    task_features[0, 3, 1] = 1.0
+    task_features[0, 0:3, 5] = 1.0
+    task_features[0, 2, 16] = 1.0
+    worker_features = torch.zeros((1, 2, 17), dtype=torch.float32)
+    worker_features[0, :, 1] = 1.0
+    present = torch.ones((1, 4), dtype=torch.bool)
+    worker_present = torch.ones((1, 2), dtype=torch.bool)
+    edge_index = torch.tensor([[0, 1], [2, 2]], dtype=torch.long)
+
+    context = build_worker_pressure_context(
+        task_features=task_features,
+        worker_features=worker_features,
+        task_present=present,
+        task_action_invalid=torch.zeros_like(present),
+        worker_present=worker_present,
+        worker_queue_invalid=torch.zeros_like(worker_present),
+        temperature=1.0,
+        supply_epsilon=1.0e-6,
+        physical_predecessor_edges=[edge_index],
+    )
+
+    assert context.pressure_next_frontier is not None
+    assert context.next_frontier_mask is not None
+    assert context.unfinished_physical_predecessor_count is not None
+    assert context.remaining_physical_predecessor_count is not None
+    assert context.next_frontier_mask.shape == (1, 4)
+    assert context.unfinished_physical_predecessor_count.shape == (1, 4)
+    assert context.remaining_physical_predecessor_count.shape == (1, 4)
+    assert not bool(context.next_frontier_mask[0, 2])
+
+    task_features[0, 1, 1] = 0.0
+    task_features[0, 1, 2] = 1.0
+    context = build_worker_pressure_context(
+        task_features=task_features,
+        worker_features=worker_features,
+        task_present=present,
+        task_action_invalid=torch.zeros_like(present),
+        worker_present=worker_present,
+        worker_queue_invalid=torch.zeros_like(worker_present),
+        temperature=1.0,
+        supply_epsilon=1.0e-6,
+        physical_predecessor_edges=[edge_index],
+    )
+    assert bool(context.next_frontier_mask[0, 2])
+    assert float(context.pressure_next_frontier[0, 0]) > 0.0
+    assert context.pressure_next_frontier.shape == (1, 5)
+
+
+def test_v2_diagnostics_report_next_frontier_task_demand_and_pressure() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+    from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
+
+    inputs = _pressure_inputs()
+    task_features = inputs["task_features"].clone()
+    task_features[0, 1, 0] = 2.0
+    task_features[0, 1, 16] = 3.0
+    edge_index = torch.tensor([[0], [1]], dtype=torch.long)
+    context = build_worker_pressure_context(
+        **{**inputs, "task_features": task_features},
+        temperature=1.0,
+        supply_epsilon=1.0e-6,
+        physical_predecessor_edges=[edge_index],
+    )
+    diagnostics = WorkerPointerV2Diagnostics(num_skills=5)
+    diagnostics.record_context(context, host_elapsed_ms=0.0)
+
+    metrics = diagnostics.finalize(require_coverage=False)
+
+    assert metrics["PointerV2/NextFrontier/TaskCountMean"] == pytest.approx(1.0)
+    assert metrics["PointerV2/NextFrontier/DemandMean"] == pytest.approx(6.0)
+    assert metrics["PointerV2/NextFrontier/PressureMean"] > 0.0
+
+
+def test_c1_sparse_predecessor_edges_keep_pyg_batch_offsets() -> None:
+    from torch_geometric.data import Batch, HeteroData
+
+    from models.worker_pointer_context import PHYSICAL_PREDECESSOR_EDGE
+    from ppo_agent import PPOAgent
+
+    graphs: list[HeteroData] = []
+    for _ in range(2):
+        graph = HeteroData()
+        graph["task"].x = torch.zeros((2, 18))
+        graph[PHYSICAL_PREDECESSOR_EDGE].edge_index = torch.tensor(
+            [[0], [1]], dtype=torch.long
+        )
+        graphs.append(graph)
+
+    batch = Batch.from_data_list(graphs)
+    assert batch[PHYSICAL_PREDECESSOR_EDGE].edge_index.tolist() == [
+        [0, 2],
+        [1, 3],
+    ]
+    local_edges = PPOAgent._physical_predecessor_edge_list(batch, batch_size=2)
+
+    assert [edge.tolist() for edge in local_edges] == [[[0], [1]], [[0], [1]]]
+    assert max(int(edge.max()) for edge in local_edges) < 2
+
+
 def test_v2_diagnostics_summarize_action_space_and_eft_rank() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
     from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
@@ -801,6 +908,7 @@ def test_worker_pointer_v2_a3_zero_init_preserves_v2_logits_and_public_parameter
     assert torch.count_nonzero(v3.v2_interaction_mlp[-1].weight).item() == 0
     assert torch.count_nonzero(v3.v2_interaction_mlp[-1].bias).item() == 0
 
+
     context = build_worker_pressure_context(
         **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
     )
@@ -833,6 +941,60 @@ def test_worker_pointer_v2_a3_zero_init_preserves_v2_logits_and_public_parameter
     )
 
     torch.testing.assert_close(logits_v3, logits_v2, atol=1.0e-6, rtol=0.0)
+
+
+def test_worker_pointer_v2_c1_zero_init_preserves_v2_logits_and_public_parameters() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    v3_config = _pointer_config("autoregressive_pressure_v2")
+    v3_config.worker_pointer_v2_explicit_team_state = True
+    v3_config.worker_pointer_v2_marginal_scarcity = True
+    v3_config.worker_pointer_v2_interaction_residual = True
+    c1_config = _pointer_config("autoregressive_pressure_v2")
+    c1_config.worker_pointer_v2_explicit_team_state = True
+    c1_config.worker_pointer_v2_marginal_scarcity = True
+    c1_config.worker_pointer_v2_interaction_residual = True
+    c1_config.worker_pointer_v2_next_frontier_pressure = True
+    torch.manual_seed(1234)
+    v3 = WorkerPointer(v3_config)
+    torch.manual_seed(1234)
+    c1 = WorkerPointer(c1_config)
+
+    for key, value in v3.state_dict().items():
+        torch.testing.assert_close(c1.state_dict()[key], value, atol=0.0, rtol=0.0)
+    assert torch.count_nonzero(c1.v2_next_frontier_query_proj.weight).item() == 0
+    assert torch.count_nonzero(c1.v2_next_frontier_key_proj.weight).item() == 0
+
+    inputs = _pressure_inputs()
+    context = build_worker_pressure_context(
+        **inputs,
+        temperature=1.0,
+        supply_epsilon=1.0e-6,
+        physical_predecessor_edges=[torch.tensor([[0], [1]], dtype=torch.long)],
+    )
+    common = {
+        "task_emb": torch.randn((1, 8)),
+        "station_emb": torch.randn((1, 8)),
+        "global_context": torch.randn((1, 24)),
+        "worker_embs": torch.randn((1, 3, 8)),
+        "pressure_context": context,
+        "demand": torch.tensor([2.0]),
+        "mask": torch.tensor([[False, False, True]]),
+        "candidate_skills": inputs["worker_features"][..., 1:6],
+        "task_required_skills": torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0]]),
+    }
+    v3_logits = v3.forward_choice_v2(
+        **common,
+        team_state=v3.initialize_v2_state(batch_size=1, device=torch.device("cpu")),
+    )
+    c1_logits = c1.forward_choice_v2(
+        **common,
+        team_state=c1.initialize_v2_state(batch_size=1, device=torch.device("cpu")),
+    )
+
+    torch.testing.assert_close(c1_logits, v3_logits, atol=1.0e-6, rtol=0.0)
+    assert context.pressure_next_frontier is not None
+    assert torch.isfinite(context.pressure_next_frontier).all()
 
 
 def test_worker_pointer_v2_a3_interaction_residual_receives_gradient() -> None:

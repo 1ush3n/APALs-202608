@@ -34,6 +34,9 @@ class WorkerPointerV2Diagnostics:
     _scarcity_total_legal: list[torch.Tensor] = field(default_factory=list)
     _scarcity_extra_legal: list[torch.Tensor] = field(default_factory=list)
     _scarcity_extra_selected: list[torch.Tensor] = field(default_factory=list)
+    _next_frontier_task_counts: list[torch.Tensor] = field(default_factory=list)
+    _next_frontier_demands: list[torch.Tensor] = field(default_factory=list)
+    _next_frontier_pressures: list[torch.Tensor] = field(default_factory=list)
     _host_elapsed_ms: list[float] = field(default_factory=list)
 
     def reset(self) -> None:
@@ -59,6 +62,9 @@ class WorkerPointerV2Diagnostics:
         self._scarcity_total_legal.clear()
         self._scarcity_extra_legal.clear()
         self._scarcity_extra_selected.clear()
+        self._next_frontier_task_counts.clear()
+        self._next_frontier_demands.clear()
+        self._next_frontier_pressures.clear()
         self._host_elapsed_ms.clear()
 
     @property
@@ -87,6 +93,9 @@ class WorkerPointerV2Diagnostics:
         tensors.extend(self._scarcity_total_legal)
         tensors.extend(self._scarcity_extra_legal)
         tensors.extend(self._scarcity_extra_selected)
+        tensors.extend(self._next_frontier_task_counts)
+        tensors.extend(self._next_frontier_demands)
+        tensors.extend(self._next_frontier_pressures)
         return sum(tensor.numel() for tensor in tensors)
 
     def record_context(
@@ -103,6 +112,18 @@ class WorkerPointerV2Diagnostics:
         self._supply_near.append(context.supply_near.detach())
         self._zero_supply_all.append(context.zero_supply_all.detach())
         self._zero_supply_near.append(context.zero_supply_near.detach())
+        if context.next_frontier_mask is not None:
+            assert context.next_frontier_demand is not None
+            assert context.pressure_next_frontier is not None
+            self._next_frontier_task_counts.append(
+                context.next_frontier_mask.sum(dim=-1).detach().float()
+            )
+            self._next_frontier_demands.append(
+                context.next_frontier_demand.detach().float()
+            )
+            self._next_frontier_pressures.append(
+                context.pressure_next_frontier.detach().float()
+            )
         self._host_elapsed_ms.append(float(host_elapsed_ms))
 
     def record_selection(
@@ -295,6 +316,27 @@ class WorkerPointerV2Diagnostics:
         metrics = self._summaries("PointerV2/PressureAll", pressure_all)
         metrics.update(self._summaries("PointerV2/PressureNear", pressure_near))
         metrics["PointerV2/ContextHostMs"] = float(sum(self._host_elapsed_ms))
+        if self._next_frontier_task_counts:
+            frontier_tasks = self._cpu_cat(
+                [value.reshape(-1, 1) for value in self._next_frontier_task_counts]
+            ).reshape(-1)
+            frontier_demand = self._cpu_cat(self._next_frontier_demands).sum(dim=-1)
+            frontier_pressure = self._cpu_cat(self._next_frontier_pressures)
+            if not all(
+                bool(torch.isfinite(value).all())
+                for value in (frontier_tasks, frontier_demand, frontier_pressure)
+            ):
+                self.reset()
+                raise RuntimeError("Next-Frontier 诊断出现 NaN 或 Inf")
+            metrics["PointerV2/NextFrontier/TaskCountMean"] = float(
+                frontier_tasks.mean()
+            )
+            metrics["PointerV2/NextFrontier/DemandMean"] = float(
+                frontier_demand.mean()
+            )
+            metrics["PointerV2/NextFrontier/PressureMean"] = float(
+                frontier_pressure.mean()
+            )
         if self._selected_exposures:
             exposure = self._cpu_cat(self._selected_exposures)
             metrics["PointerV2/SelectedExposureMean"] = float(exposure.mean())
