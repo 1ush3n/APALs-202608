@@ -278,6 +278,33 @@ def test_batched_v2_dynamic_eft_feature_can_be_enabled_from_hydra_cli() -> None:
     assert cfg.worker_pointer_v2_dynamic_eft_feature_clip == 10.0
 
 
+@pytest.mark.parametrize(
+    ("experiment", "explicit_team_state"),
+    [
+        ("initial_worker_pointer_v2_v0", False),
+        ("initial_worker_pointer_v2_v1", True),
+    ],
+)
+def test_worker_pointer_v2_v0_v1_hydra_diffs_select_only_a1(
+    experiment: str,
+    explicit_team_state: bool,
+) -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        [f"experiment={experiment}"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_explicit_team_state is explicit_team_state
+    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "off"
+
+
 def test_experiments_do_not_embed_hardware_profiles() -> None:
     experiment_dir = PROJECT_ROOT / "conf" / "experiment"
     for path in experiment_dir.glob("*.yaml"):

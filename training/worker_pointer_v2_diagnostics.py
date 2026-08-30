@@ -29,6 +29,8 @@ class WorkerPointerV2Diagnostics:
     _selected_eft_rank_percentiles: list[torch.Tensor] = field(default_factory=list)
     _legal_relative_eft: list[torch.Tensor] = field(default_factory=list)
     _legal_zscore_eft: list[torch.Tensor] = field(default_factory=list)
+    _team_max_wait: list[torch.Tensor] = field(default_factory=list)
+    _team_capacity_sum: list[torch.Tensor] = field(default_factory=list)
     _host_elapsed_ms: list[float] = field(default_factory=list)
 
     def reset(self) -> None:
@@ -49,6 +51,8 @@ class WorkerPointerV2Diagnostics:
         self._selected_eft_rank_percentiles.clear()
         self._legal_relative_eft.clear()
         self._legal_zscore_eft.clear()
+        self._team_max_wait.clear()
+        self._team_capacity_sum.clear()
         self._host_elapsed_ms.clear()
 
     @property
@@ -72,6 +76,8 @@ class WorkerPointerV2Diagnostics:
         tensors.extend(self._selected_eft_rank_percentiles)
         tensors.extend(self._legal_relative_eft)
         tensors.extend(self._legal_zscore_eft)
+        tensors.extend(self._team_max_wait)
+        tensors.extend(self._team_capacity_sum)
         return sum(tensor.numel() for tensor in tensors)
 
     def record_context(
@@ -152,6 +158,17 @@ class WorkerPointerV2Diagnostics:
     def record_team(self, team_consumption: torch.Tensor) -> None:
         assert team_consumption.shape[-1] == self.num_skills
         self._team_consumptions.append(team_consumption.detach())
+
+    def record_team_state(
+        self,
+        *,
+        selected_max_wait: torch.Tensor,
+        selected_capacity_sum: torch.Tensor,
+    ) -> None:
+        assert selected_max_wait.shape == selected_capacity_sum.shape
+        assert selected_max_wait.ndim == 2 and selected_max_wait.shape[-1] == 1
+        self._team_max_wait.append(selected_max_wait.detach().float())
+        self._team_capacity_sum.append(selected_capacity_sum.detach().float())
 
     @staticmethod
     def _cpu_cat(values: list[torch.Tensor]) -> torch.Tensor:
@@ -249,6 +266,17 @@ class WorkerPointerV2Diagnostics:
             consumption = self._cpu_cat(self._team_consumptions)
             metrics["PointerV2/TeamConsumptionMean"] = float(consumption.mean())
             metrics["PointerV2/TeamConsumptionMax"] = float(consumption.max())
+        if self._team_max_wait:
+            max_wait = self._cpu_cat(self._team_max_wait).reshape(-1)
+            capacity = self._cpu_cat(self._team_capacity_sum).reshape(-1)
+            metrics["PointerV2/TeamState/MaxWaitMean"] = float(max_wait.mean())
+            metrics["PointerV2/TeamState/MaxWaitP95"] = float(
+                torch.quantile(max_wait, 0.95)
+            )
+            metrics["PointerV2/TeamState/CapacityMean"] = float(capacity.mean())
+            metrics["PointerV2/TeamState/CapacityP95"] = float(
+                torch.quantile(capacity, 0.95)
+            )
         if self._ready_task_counts:
             ready = self._cpu_cat([value.reshape(-1, 1) for value in self._ready_task_counts])
             metrics["PointerV2/ActionSpace/ReadyTaskMean"] = float(ready.mean())

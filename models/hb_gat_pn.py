@@ -369,6 +369,9 @@ class WorkerPointer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.use_explicit_team_state = bool(
+            getattr(config, "worker_pointer_v2_explicit_team_state", False)
+        )
         self.query_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
         self.ar_query_proj = nn.Linear(config.hidden_dim * 2, config.hidden_dim) # Autoregressive Optimization A
         self.key_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
@@ -405,6 +408,18 @@ class WorkerPointer(nn.Module):
                 if bool(getattr(config, "worker_pointer_v2_dynamic_eft_features", False)):
                     self.v2_eft_proj = nn.Linear(2, hidden_dim, bias=False)
                     nn.init.zeros_(self.v2_eft_proj.weight)
+                if self.use_explicit_team_state:
+                    base_proj = self.v2_query_proj
+                    with torch.random.fork_rng(devices=[], enabled=True):
+                        torch.manual_seed(local_seed + 1)
+                        expanded_proj = nn.Linear(hidden_dim * 6 + 19, hidden_dim)
+                    with torch.no_grad():
+                        expanded_proj.weight[:, : hidden_dim * 6 + 17].copy_(
+                            base_proj.weight
+                        )
+                        expanded_proj.weight[:, hidden_dim * 6 + 17 :].zero_()
+                        expanded_proj.bias.copy_(base_proj.bias)
+                    self.v2_query_proj = expanded_proj
 
     def forward_choice(self, task_emb, worker_embs, mask=None, current_team_emb=None):
         """选择下一个工人"""
@@ -667,8 +682,23 @@ class WorkerPointer(nn.Module):
             assert dynamic_eft_features.shape == (batch_size, num_workers, 2)
             if not hasattr(self, "v2_eft_proj"):
                 raise RuntimeError("动态 EFT 特征未在当前 WorkerPointer v2 中启用")
-        with torch.autocast(device_type=task_emb.device.type, enabled=False):
+        with torch.amp.autocast(device_type=task_emb.device.type, enabled=False):
             team_repr = self.v2_team_representation(team_state)
+            assert team_state.selected_max_wait.shape == (batch_size, 1)
+            assert team_state.selected_capacity_sum.shape == (batch_size, 1)
+            team_operational_state = torch.cat(
+                [
+                    torch.log1p(
+                        team_state.selected_max_wait.float().clamp_min(0.0)
+                    ),
+                    torch.log1p(
+                        team_state.selected_capacity_sum.float().clamp_min(0.0)
+                    ),
+                ],
+                dim=-1,
+            )  # [B,1] + [B,1] -> [B,2]
+            assert team_operational_state.shape == (batch_size, 2)
+            assert torch.isfinite(team_operational_state).all()
             epsilon = float(getattr(self.config, "worker_pointer_supply_epsilon", 1.0e-6))
             consumption = (
                 team_state.selected_skill_sum.float()
@@ -682,16 +712,20 @@ class WorkerPointer(nn.Module):
                 ],
                 dim=-1,
             )
-            query_features = torch.cat(
-                [
-                    cache.query_prefix,
-                    team_repr.float(),
-                    cache.pressure_features,
-                    consumption,
-                    progress,
-                ],
-                dim=-1,
-            )  # [B,6H+17]
+            query_parts = [
+                cache.query_prefix,
+                team_repr.float(),
+                cache.pressure_features,
+                consumption,
+                progress,
+            ]
+            if self.use_explicit_team_state:
+                query_parts.append(team_operational_state)
+            query_features = torch.cat(query_parts, dim=-1)
+            expected_query_width = hidden_dim * 6 + (
+                19 if self.use_explicit_team_state else 17
+            )
+            assert query_features.shape == (batch_size, expected_query_width)
             query = self.v2_query_proj(query_features).unsqueeze(1)  # [B,1,H]
             dynamic_keys = (
                 torch.zeros_like(cache.candidate_keys)

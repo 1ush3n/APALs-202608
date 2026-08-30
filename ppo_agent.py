@@ -2138,6 +2138,10 @@ class PPOAgent:
                     if v2_mode:
                         assert v2_pressure is not None and v2_team_state is not None
                         assert v2_decode_cache is not None and v2_demand is not None
+                        self.worker_pointer_v2_diagnostics.record_team_state(
+                            selected_max_wait=v2_team_state.selected_max_wait,
+                            selected_capacity_sum=v2_team_state.selected_capacity_sum,
+                        )
                         worker_logits = active_policy.worker_head.forward_choice_v2(
                             task_emb=selected_task_emb,
                             station_emb=x_dict['station'][int(station_action.item())].unsqueeze(0),
@@ -2781,6 +2785,10 @@ class PPOAgent:
                         if v2_mode:
                             assert v2_pressure is not None and v2_team_state is not None
                             assert v2_decode_cache is not None and v2_demand is not None
+                            self.worker_pointer_v2_diagnostics.record_team_state(
+                                selected_max_wait=v2_team_state.selected_max_wait,
+                                selected_capacity_sum=v2_team_state.selected_capacity_sum,
+                            )
                             worker_logits = active_policy.worker_head.forward_choice_v2(
                                 task_emb=selected_task_emb,
                                 station_emb=station_embs[int(station_action.item())].unsqueeze(0),
@@ -3565,6 +3573,10 @@ class PPOAgent:
                             assert v2_decode_cache is not None
                             assert raw_task_x_v2 is not None and raw_worker_x_v2 is not None
                             assert raw_station_x_v2 is not None
+                            self.worker_pointer_v2_diagnostics.record_team_state(
+                                selected_max_wait=v2_team_state.selected_max_wait,
+                                selected_capacity_sum=v2_team_state.selected_capacity_sum,
+                            )
                             logits = self.policy.worker_head.forward_choice_v2(
                                 task_emb=sel_task_emb,
                                 station_emb=selected_station_emb_v2,
@@ -4355,6 +4367,10 @@ class PPOAgent:
             normalized_team_entropy = torch.zeros_like(normalized_task_entropy)
             for worker_id in team_target_ids:
                 assert worker_id < worker_embs.shape[0]
+                self.worker_pointer_v2_diagnostics.record_team_state(
+                    selected_max_wait=team_state.selected_max_wait,
+                    selected_capacity_sum=team_state.selected_capacity_sum,
+                )
                 with self.autocast_context():
                     worker_logits = self.policy.worker_head.forward_choice_v2(
                         task_emb=selected_task_emb,
@@ -5510,6 +5526,10 @@ class PPOAgent:
             normalized_team_entropy = torch.zeros_like(normalized_task_entropy)
             for step in range(int(valid_team.numel())):
                 worker_id_t = valid_team[step]
+                self.worker_pointer_v2_diagnostics.record_team_state(
+                    selected_max_wait=team_state.selected_max_wait,
+                    selected_capacity_sum=team_state.selected_capacity_sum,
+                )
                 with self.autocast_context():
                     worker_logits = self.policy.worker_head.forward_choice_v2(
                         task_emb=selected_task_emb,

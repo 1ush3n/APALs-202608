@@ -175,6 +175,30 @@ def test_v2_diagnostics_summarize_action_space_and_eft_rank() -> None:
     assert metrics["PointerV2/EFT/SelectedRankPercentileMean"] == 0.5
 
 
+def test_v2_diagnostics_summarize_partial_team_operational_state() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+    from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
+
+    diagnostics = WorkerPointerV2Diagnostics(num_skills=5)
+    diagnostics.record_context(
+        build_worker_pressure_context(
+            **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+        ),
+        host_elapsed_ms=1.0,
+    )
+    diagnostics.record_team_state(
+        selected_max_wait=torch.tensor([[0.0], [3.0]]),
+        selected_capacity_sum=torch.tensor([[0.0], [4.0]]),
+    )
+
+    metrics = diagnostics.finalize(require_coverage=False)
+
+    assert metrics["PointerV2/TeamState/MaxWaitMean"] == pytest.approx(1.5)
+    assert metrics["PointerV2/TeamState/MaxWaitP95"] == pytest.approx(2.85)
+    assert metrics["PointerV2/TeamState/CapacityMean"] == pytest.approx(2.0)
+    assert metrics["PointerV2/TeamState/CapacityP95"] == pytest.approx(3.8)
+
+
 def test_v2_diagnostics_summarize_legal_eft_feature_quantiles() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
     from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
@@ -498,6 +522,102 @@ def test_worker_pointer_v2_6h_context_uses_only_first_head() -> None:
         decode_cache=cache_dual,
     )
     torch.testing.assert_close(logits_dual, logits_first, atol=0.0, rtol=0.0)
+
+
+def test_worker_pointer_v2_a1_nested_initialization_preserves_v0_parameters() -> None:
+    v0_config = _pointer_config("autoregressive_pressure_v2")
+    v1_config = _pointer_config("autoregressive_pressure_v2")
+    v1_config.worker_pointer_v2_explicit_team_state = True
+    torch.manual_seed(1234)
+    v0 = WorkerPointer(v0_config)
+    torch.manual_seed(1234)
+    v1 = WorkerPointer(v1_config)
+
+    v0_state = v0.state_dict()
+    v1_state = v1.state_dict()
+    query_weight = "v2_query_proj.weight"
+    assert set(v0_state) == set(v1_state)
+    assert v0.v2_query_proj.in_features == 8 * 6 + 17
+    assert v1.v2_query_proj.in_features == 8 * 6 + 19
+    torch.testing.assert_close(v1_state[query_weight][:, : 8 * 6 + 17], v0_state[query_weight])
+    torch.testing.assert_close(v1_state[query_weight][:, 8 * 6 + 17 :], torch.zeros((8, 2)))
+    for key in v0_state:
+        if key != query_weight:
+            torch.testing.assert_close(v1_state[key], v0_state[key], atol=0.0, rtol=0.0)
+
+
+def test_worker_pointer_v2_a1_uses_log1p_partial_team_operational_state() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    config = _pointer_config("autoregressive_pressure_v2")
+    config.worker_pointer_v2_explicit_team_state = True
+    head = WorkerPointer(config)
+    context = build_worker_pressure_context(
+        **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+    )
+    query_inputs: list[torch.Tensor] = []
+    head.v2_query_proj.register_forward_pre_hook(
+        lambda _module, inputs: query_inputs.append(inputs[0].detach().clone())
+    )
+    kwargs = {
+        "task_emb": torch.zeros((1, 8)),
+        "station_emb": torch.zeros((1, 8)),
+        "global_context": torch.zeros((1, 24)),
+        "worker_embs": torch.zeros((1, 3, 8)),
+        "pressure_context": context,
+        "demand": torch.tensor([2.0]),
+        "mask": torch.tensor([[False, False, True]]),
+    }
+    state = head.initialize_v2_state(batch_size=1, device=torch.device("cpu"))
+    head.forward_choice_v2(**kwargs, team_state=state)
+    state = head.advance_v2_state(
+        state,
+        torch.zeros((1, 8)),
+        torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0]]),
+        selected_wait=torch.tensor([3.0]),
+        selected_capacity=torch.tensor([4.0]),
+    )
+    head.forward_choice_v2(**kwargs, team_state=state)
+
+    assert len(query_inputs) == 2
+    assert query_inputs[0].shape == (1, 8 * 6 + 19)
+    torch.testing.assert_close(query_inputs[0][0, -2:], torch.zeros(2))
+    torch.testing.assert_close(
+        query_inputs[1][0, -2:], torch.log1p(torch.tensor([3.0, 4.0]))
+    )
+
+
+def test_worker_pointer_v2_a1_step_zero_logits_and_mask_match_v0() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    v0 = WorkerPointer(_pointer_config("autoregressive_pressure_v2"))
+    v1_config = _pointer_config("autoregressive_pressure_v2")
+    v1_config.worker_pointer_v2_explicit_team_state = True
+    v1 = WorkerPointer(v1_config)
+    context = build_worker_pressure_context(
+        **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+    )
+    common = {
+        "task_emb": torch.randn((1, 8)),
+        "station_emb": torch.randn((1, 8)),
+        "global_context": torch.randn((1, 24)),
+        "worker_embs": torch.randn((1, 3, 8)),
+        "pressure_context": context,
+        "demand": torch.tensor([2.0]),
+        "mask": torch.tensor([[False, False, True]]),
+    }
+    v0_logits = v0.forward_choice_v2(
+        **common,
+        team_state=v0.initialize_v2_state(batch_size=1, device=torch.device("cpu")),
+    )
+    v1_logits = v1.forward_choice_v2(
+        **common,
+        team_state=v1.initialize_v2_state(batch_size=1, device=torch.device("cpu")),
+    )
+
+    torch.testing.assert_close(v1_logits[:, :2], v0_logits[:, :2], atol=1.0e-6, rtol=0.0)
+    assert v0_logits[0, 2].item() == pytest.approx(-1.0e4)
+    assert v1_logits[0, 2].item() == pytest.approx(-1.0e4)
 
 
 def test_worker_pointer_v2_rejects_context_width_other_than_3h_or_6h() -> None:
