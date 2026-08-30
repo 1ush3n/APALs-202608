@@ -51,6 +51,92 @@ class WorkerPointerV2DecodeCache:
     pressure_features: torch.Tensor
     supply_all: torch.Tensor
     demand: torch.Tensor
+    candidate_skills: torch.Tensor | None = None
+    task_required_skills: torch.Tensor | None = None
+
+
+def gather_selected_task_skills(
+    task_features: torch.Tensor,
+    selected_task: torch.Tensor,
+) -> torch.Tensor:
+    """从原始任务特征中提取当前物理任务的 5 维需求技能 one-hot。"""
+
+    assert task_features.ndim == 3
+    batch_size, num_tasks, task_dim = task_features.shape
+    assert task_dim >= TASK_SKILL_SLICE.stop
+    assert selected_task.ndim == 1 and selected_task.shape == (batch_size,)
+    assert torch.all((selected_task >= 0) & (selected_task < num_tasks))
+    batch_index = torch.arange(batch_size, device=task_features.device)
+    selected_skills = task_features.float()[
+        batch_index, selected_task.to(device=task_features.device), TASK_SKILL_SLICE
+    ]
+    assert selected_skills.shape == (batch_size, NUM_SKILL_TYPES)
+    assert torch.isfinite(selected_skills).all()
+    assert ((selected_skills > 0.5).sum(dim=-1) == 1).all()
+    return selected_skills
+
+
+def build_v2_marginal_reserve_scarcity(
+    *,
+    demand_all: torch.Tensor,
+    supply_all: torch.Tensor,
+    selected_skill_sum: torch.Tensor,
+    candidate_skills: torch.Tensor,
+    task_required_skills: torch.Tensor,
+    epsilon: float,
+    clip: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """计算 ALL horizon 下候选工人的总/可避免技能储备稀缺边际。"""
+
+    assert demand_all.ndim == supply_all.ndim == selected_skill_sum.ndim == 2
+    batch_size = demand_all.size(0)
+    assert demand_all.shape == supply_all.shape == selected_skill_sum.shape
+    assert demand_all.shape == (batch_size, NUM_SKILL_TYPES)
+    assert candidate_skills.ndim == 3
+    assert candidate_skills.shape[0] == batch_size
+    assert candidate_skills.size(-1) == NUM_SKILL_TYPES
+    assert task_required_skills.shape == (batch_size, NUM_SKILL_TYPES)
+    if not torch.isfinite(torch.tensor(float(epsilon))) or float(epsilon) <= 0.0:
+        raise ValueError("epsilon 必须是大于 0 的有限数")
+    if not torch.isfinite(torch.tensor(float(clip))) or float(clip) <= 0.0:
+        raise ValueError("clip 必须是大于 0 的有限数")
+
+    with torch.autocast(device_type=demand_all.device.type, enabled=False):
+        demand = demand_all.float().clamp_min(0.0)
+        supply = supply_all.float().clamp_min(0.0)
+        selected = selected_skill_sum.float().clamp_min(0.0)
+        candidates = candidate_skills.float().clamp_min(0.0)
+        required = task_required_skills.float().clamp(0.0, 1.0)
+        remaining_before = (supply - selected).clamp_min(float(epsilon))
+        remaining_after = (
+            remaining_before.unsqueeze(1) - candidates
+        ).clamp_min(float(epsilon))
+        pressure_before = torch.log1p(demand / remaining_before)
+        pressure_after = torch.log1p(
+            demand.unsqueeze(1) / remaining_after
+        )
+        delta_by_skill = (
+            pressure_after - pressure_before.unsqueeze(1)
+        ).clamp_min(0.0)
+        marginal_total = (delta_by_skill * candidates).sum(
+            dim=-1, keepdim=True
+        )
+        extra_skill_mask = candidates * (1.0 - required.unsqueeze(1))
+        marginal_extra = (delta_by_skill * extra_skill_mask).sum(
+            dim=-1, keepdim=True
+        )
+        marginal_total = marginal_total.clamp(0.0, float(clip))
+        marginal_extra = marginal_extra.clamp(0.0, float(clip))
+
+    assert marginal_total.shape == marginal_extra.shape == (
+        batch_size,
+        candidate_skills.size(1),
+        1,
+    )
+    assert torch.isfinite(marginal_total).all()
+    assert torch.isfinite(marginal_extra).all()
+    assert (marginal_extra <= marginal_total + 1.0e-6).all()
+    return marginal_total, marginal_extra
 
 
 def build_worker_eft_features(
@@ -202,6 +288,8 @@ __all__ = [
     "WorkerPointerV2State",
     "WorkerPressureContext",
     "WorkerPointerV2DecodeCache",
+    "gather_selected_task_skills",
+    "build_v2_marginal_reserve_scarcity",
     "build_worker_eft_features",
     "build_worker_pressure_context",
 ]

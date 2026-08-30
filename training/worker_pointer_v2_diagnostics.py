@@ -31,6 +31,9 @@ class WorkerPointerV2Diagnostics:
     _legal_zscore_eft: list[torch.Tensor] = field(default_factory=list)
     _team_max_wait: list[torch.Tensor] = field(default_factory=list)
     _team_capacity_sum: list[torch.Tensor] = field(default_factory=list)
+    _scarcity_total_legal: list[torch.Tensor] = field(default_factory=list)
+    _scarcity_extra_legal: list[torch.Tensor] = field(default_factory=list)
+    _scarcity_extra_selected: list[torch.Tensor] = field(default_factory=list)
     _host_elapsed_ms: list[float] = field(default_factory=list)
 
     def reset(self) -> None:
@@ -53,6 +56,9 @@ class WorkerPointerV2Diagnostics:
         self._legal_zscore_eft.clear()
         self._team_max_wait.clear()
         self._team_capacity_sum.clear()
+        self._scarcity_total_legal.clear()
+        self._scarcity_extra_legal.clear()
+        self._scarcity_extra_selected.clear()
         self._host_elapsed_ms.clear()
 
     @property
@@ -78,6 +84,9 @@ class WorkerPointerV2Diagnostics:
         tensors.extend(self._legal_zscore_eft)
         tensors.extend(self._team_max_wait)
         tensors.extend(self._team_capacity_sum)
+        tensors.extend(self._scarcity_total_legal)
+        tensors.extend(self._scarcity_extra_legal)
+        tensors.extend(self._scarcity_extra_selected)
         return sum(tensor.numel() for tensor in tensors)
 
     def record_context(
@@ -169,6 +178,38 @@ class WorkerPointerV2Diagnostics:
         assert selected_max_wait.ndim == 2 and selected_max_wait.shape[-1] == 1
         self._team_max_wait.append(selected_max_wait.detach().float())
         self._team_capacity_sum.append(selected_capacity_sum.detach().float())
+
+    def record_scarcity(
+        self,
+        *,
+        marginal_total: torch.Tensor,
+        marginal_extra: torch.Tensor,
+        worker_invalid_mask: torch.Tensor,
+        selected_worker_index: int | torch.Tensor,
+    ) -> None:
+        """记录合法候选与已选候选的 A2 ALL horizon 边际稀缺。"""
+
+        assert marginal_total.shape == marginal_extra.shape
+        assert marginal_total.ndim == 3 and marginal_total.shape[-1] == 1
+        batch_size, num_workers, _ = marginal_total.shape
+        assert worker_invalid_mask.shape == (batch_size, num_workers)
+        selected = torch.as_tensor(
+            selected_worker_index,
+            device=marginal_total.device,
+            dtype=torch.long,
+        ).reshape(-1)
+        if selected.numel() == 1:
+            selected = selected.expand(batch_size)
+        assert selected.shape == (batch_size,)
+        assert torch.all((selected >= 0) & (selected < num_workers))
+        batch_indices = torch.arange(batch_size, device=marginal_total.device)
+        assert not bool(worker_invalid_mask[batch_indices, selected].any())
+        legal = ~worker_invalid_mask.bool()
+        self._scarcity_total_legal.append(marginal_total[legal].detach().float())
+        self._scarcity_extra_legal.append(marginal_extra[legal].detach().float())
+        self._scarcity_extra_selected.append(
+            marginal_extra[batch_indices, selected].detach().float()
+        )
 
     @staticmethod
     def _cpu_cat(values: list[torch.Tensor]) -> torch.Tensor:
@@ -305,6 +346,33 @@ class WorkerPointerV2Diagnostics:
                 self._scalar_quantile_summaries(
                     "ZScoreEFT", self._cpu_cat(self._legal_zscore_eft)
                 )
+            )
+        if self._scarcity_total_legal:
+            scarcity_total = self._cpu_cat(self._scarcity_total_legal).reshape(-1)
+            scarcity_extra = self._cpu_cat(self._scarcity_extra_legal).reshape(-1)
+            scarcity_selected = self._cpu_cat(
+                self._scarcity_extra_selected
+            ).reshape(-1)
+            metrics["PointerV2/Scarcity/ReserveTotalLegalMean"] = float(
+                scarcity_total.mean()
+            )
+            metrics["PointerV2/Scarcity/ReserveTotalLegalP95"] = float(
+                torch.quantile(scarcity_total, 0.95)
+            )
+            metrics["PointerV2/Scarcity/ReserveExtraLegalMean"] = float(
+                scarcity_extra.mean()
+            )
+            metrics["PointerV2/Scarcity/ReserveExtraLegalP95"] = float(
+                torch.quantile(scarcity_extra, 0.95)
+            )
+            metrics["PointerV2/Scarcity/ReserveExtraLegalMax"] = float(
+                scarcity_extra.max()
+            )
+            metrics["PointerV2/Scarcity/ReserveExtraSelectedMean"] = float(
+                scarcity_selected.mean()
+            )
+            metrics["PointerV2/Scarcity/ReserveExtraTotalRatio"] = float(
+                scarcity_extra.mean() / scarcity_total.mean().clamp_min(1.0e-6)
             )
         self.reset()
         return metrics

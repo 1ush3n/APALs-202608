@@ -16,6 +16,7 @@ from models.worker_pointer_context import (
     WorkerPointerV2DecodeCache,
     WorkerPointerV2State,
     WorkerPressureContext,
+    build_v2_marginal_reserve_scarcity,
 )
 from runtime.modes import is_worker_pointer_v2_mode
 
@@ -369,8 +370,13 @@ class WorkerPointer(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self._last_v2_marginal_total: torch.Tensor | None = None
+        self._last_v2_marginal_extra: torch.Tensor | None = None
         self.use_explicit_team_state = bool(
             getattr(config, "worker_pointer_v2_explicit_team_state", False)
+        )
+        self.use_marginal_scarcity = bool(
+            getattr(config, "worker_pointer_v2_marginal_scarcity", False)
         )
         self.query_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
         self.ar_query_proj = nn.Linear(config.hidden_dim * 2, config.hidden_dim) # Autoregressive Optimization A
@@ -408,6 +414,9 @@ class WorkerPointer(nn.Module):
                 if bool(getattr(config, "worker_pointer_v2_dynamic_eft_features", False)):
                     self.v2_eft_proj = nn.Linear(2, hidden_dim, bias=False)
                     nn.init.zeros_(self.v2_eft_proj.weight)
+                if self.use_marginal_scarcity:
+                    self.v2_marginal_proj = nn.Linear(1, hidden_dim, bias=False)
+                    nn.init.zeros_(self.v2_marginal_proj.weight)
                 if self.use_explicit_team_state:
                     base_proj = self.v2_query_proj
                     with torch.random.fork_rng(devices=[], enabled=True):
@@ -584,6 +593,8 @@ class WorkerPointer(nn.Module):
         worker_embs: torch.Tensor,
         pressure_context: WorkerPressureContext,
         demand: torch.Tensor,
+        candidate_skills: torch.Tensor | None = None,
+        task_required_skills: torch.Tensor | None = None,
     ) -> WorkerPointerV2DecodeCache:
         """构造单队复用的静态 key 与 query 特征，不跨团队或 update 保存。"""
 
@@ -597,6 +608,17 @@ class WorkerPointer(nn.Module):
         assert pressure_context.pressure_all.shape == (batch_size, 5)
         assert pressure_context.candidate_exposure.shape == (batch_size, num_workers, 10)
         assert demand.reshape(-1).shape == (batch_size,)
+        if candidate_skills is not None:
+            assert candidate_skills.shape == (batch_size, num_workers, 5)
+            assert torch.isfinite(candidate_skills).all()
+        if task_required_skills is not None:
+            assert task_required_skills.shape == (batch_size, 5)
+            assert torch.isfinite(task_required_skills).all()
+        if self.use_marginal_scarcity:
+            if candidate_skills is None or task_required_skills is None:
+                raise ValueError(
+                    "A2 marginal scarcity 必须同时提供 candidate_skills 和 task_required_skills"
+                )
         with torch.autocast(device_type=task_emb.device.type, enabled=False):
             query_prefix = torch.cat(
                 [task_emb.float(), station_emb.float(), worker_context.float()], dim=-1
@@ -631,12 +653,26 @@ class WorkerPointer(nn.Module):
             demand_f = demand.to(
                 device=task_emb.device, dtype=torch.float32
             ).reshape(-1).clamp_min(1.0)
+            cached_candidate_skills = (
+                None
+                if candidate_skills is None
+                else candidate_skills.to(device=task_emb.device, dtype=torch.float32)
+            )
+            cached_task_required_skills = (
+                None
+                if task_required_skills is None
+                else task_required_skills.to(
+                    device=task_emb.device, dtype=torch.float32
+                )
+            )
         return WorkerPointerV2DecodeCache(
             candidate_keys=candidate_keys,
             query_prefix=query_prefix,
             pressure_features=pressure_features,
             supply_all=supply_all,
             demand=demand_f,
+            candidate_skills=cached_candidate_skills,
+            task_required_skills=cached_task_required_skills,
         )
 
     def forward_choice_v2(
@@ -652,6 +688,8 @@ class WorkerPointer(nn.Module):
         mask: torch.Tensor | None,
         decode_cache: WorkerPointerV2DecodeCache | None = None,
         dynamic_eft_features: torch.Tensor | None = None,
+        candidate_skills: torch.Tensor | None = None,
+        task_required_skills: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """以增强状态表达执行原始 ``tanh(query + key)`` pointer 打分。"""
 
@@ -672,12 +710,21 @@ class WorkerPointer(nn.Module):
             worker_embs=worker_embs,
             pressure_context=pressure_context,
             demand=demand,
+            candidate_skills=candidate_skills,
+            task_required_skills=task_required_skills,
         )
         assert cache.candidate_keys.shape == (batch_size, num_workers, hidden_dim)
         assert cache.query_prefix.shape == (batch_size, hidden_dim * 5)
         assert cache.pressure_features.shape == (batch_size, 10)
         assert cache.supply_all.shape == (batch_size, 5)
         assert cache.demand.shape == (batch_size,)
+        if self.use_marginal_scarcity:
+            if cache.candidate_skills is None or cache.task_required_skills is None:
+                raise ValueError(
+                    "A2 marginal scarcity cache 缺少 candidate_skills 或 task_required_skills"
+                )
+            assert cache.candidate_skills.shape == (batch_size, num_workers, 5)
+            assert cache.task_required_skills.shape == (batch_size, 5)
         if dynamic_eft_features is not None:
             assert dynamic_eft_features.shape == (batch_size, num_workers, 2)
             if not hasattr(self, "v2_eft_proj"):
@@ -727,11 +774,39 @@ class WorkerPointer(nn.Module):
             )
             assert query_features.shape == (batch_size, expected_query_width)
             query = self.v2_query_proj(query_features).unsqueeze(1)  # [B,1,H]
-            dynamic_keys = (
-                torch.zeros_like(cache.candidate_keys)
-                if dynamic_eft_features is None
-                else self.v2_eft_proj(dynamic_eft_features.float())
-            )
+            dynamic_keys = torch.zeros_like(cache.candidate_keys)
+            if dynamic_eft_features is not None:
+                dynamic_keys = dynamic_keys + self.v2_eft_proj(
+                    dynamic_eft_features.float()
+                )
+            if self.use_marginal_scarcity:
+                assert cache.candidate_skills is not None
+                assert cache.task_required_skills is not None
+                marginal_total, marginal_extra = (
+                    build_v2_marginal_reserve_scarcity(
+                        demand_all=pressure_context.demand_all,
+                        supply_all=cache.supply_all,
+                        selected_skill_sum=team_state.selected_skill_sum,
+                        candidate_skills=cache.candidate_skills,
+                        task_required_skills=cache.task_required_skills,
+                        epsilon=epsilon,
+                        clip=float(
+                            getattr(
+                                self.config,
+                                "worker_pointer_v2_marginal_scarcity_clip",
+                                10.0,
+                            )
+                        ),
+                    )
+                )
+                self._last_v2_marginal_total = marginal_total.detach()
+                self._last_v2_marginal_extra = marginal_extra.detach()
+                dynamic_keys = dynamic_keys + self.v2_marginal_proj(
+                    marginal_extra.float()
+                )
+            else:
+                self._last_v2_marginal_total = None
+                self._last_v2_marginal_extra = None
             scores = self.v2_attn(torch.tanh(query + cache.candidate_keys + dynamic_keys)).squeeze(-1)  # [B,N]
         # 后续可控消融可比较 query-candidate 交互 MLP 或 legacy score+压力残差；本轮不实现。
         if mask is not None:

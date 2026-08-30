@@ -26,6 +26,7 @@ from models.worker_pointer_context import (
     WorkerPressureContext,
     build_worker_eft_features,
     build_worker_pressure_context,
+    gather_selected_task_skills,
 )
 from worker_feature_layout import resolve_worker_feature_layout
 from training.best_anchor_teacher import BestAnchorTeacherManager
@@ -395,6 +396,24 @@ class PPOAgent:
             clip=float(self.config.worker_pointer_v2_dynamic_eft_feature_clip),
         )
         return torch.where(virtual_rows[:, None, None], torch.zeros_like(features), features)
+
+    def _record_v2_marginal_scarcity(
+        self,
+        worker_head: Any,
+        *,
+        worker_invalid_mask: torch.Tensor,
+        selected_worker_index: int | torch.Tensor,
+    ) -> None:
+        marginal_total = getattr(worker_head, "_last_v2_marginal_total", None)
+        marginal_extra = getattr(worker_head, "_last_v2_marginal_extra", None)
+        if marginal_total is None or marginal_extra is None:
+            return
+        self.worker_pointer_v2_diagnostics.record_scarcity(
+            marginal_total=marginal_total,
+            marginal_extra=marginal_extra,
+            worker_invalid_mask=worker_invalid_mask,
+            selected_worker_index=selected_worker_index,
+        )
 
     def reset_worker_pointer_v2_diagnostics(self) -> None:
         self.worker_pointer_v2_diagnostics.reset()
@@ -2118,6 +2137,10 @@ class PPOAgent:
                     worker_embs=worker_embs,
                     pressure_context=v2_pressure,
                     demand=v2_demand,
+                    candidate_skills=worker_skills.unsqueeze(0),
+                    task_required_skills=obs['task'].x[
+                        t_idx, 5:task_skill_end
+                    ].reshape(1, -1),
                 )
             
             # 鍔犲叆杩唬闃堝€煎拰 Fallback 闃叉鍥犳帺鐮佽繃搴﹂噸鍙犲彂鐢熸寰幆
@@ -2191,6 +2214,11 @@ class PPOAgent:
                 # 鍒锋柊宸查€夊洟闃熻〃寰佽蹇?
                 if v2_mode:
                     assert v2_team_state is not None
+                    self._record_v2_marginal_scarcity(
+                        active_policy.worker_head,
+                        worker_invalid_mask=current_worker_mask.unsqueeze(0),
+                        selected_worker_index=w_idx,
+                    )
                     v2_team_state = active_policy.worker_head.advance_v2_state(
                         v2_team_state,
                         worker_embs[:, w_idx, :],
@@ -2751,6 +2779,10 @@ class PPOAgent:
                         worker_embs=worker_embs_i,
                         pressure_context=v2_pressure,
                         demand=v2_demand,
+                        candidate_skills=v2_worker_skills.unsqueeze(0),
+                        task_required_skills=source_task_x[
+                            t_idx, 5:task_skill_end
+                        ].reshape(1, -1),
                     )
                 
                 max_iter = demand * 2
@@ -2830,6 +2862,11 @@ class PPOAgent:
                     if v2_mode:
                         assert v2_team_state is not None and v2_pressure is not None
                         assert v2_worker_skills is not None
+                        self._record_v2_marginal_scarcity(
+                            active_policy.worker_head,
+                            worker_invalid_mask=current_worker_mask.unsqueeze(0),
+                            selected_worker_index=w_idx,
+                        )
                         selected_exposure = torch.cat(
                             (
                                 v2_pressure.candidate_exposure[:, w_idx, :],
@@ -3546,6 +3583,9 @@ class PPOAgent:
                         selected_demand_v2 = raw_task_x_v2[
                             batch_indices, batch.y_task, 16
                         ]
+                        selected_task_skills_v2 = gather_selected_task_skills(
+                            raw_task_x_v2, batch.y_task
+                        )
                         v2_decode_cache = self.policy.worker_head.build_v2_decode_cache(
                             task_emb=sel_task_emb,
                             station_emb=selected_station_emb_v2,
@@ -3553,6 +3593,10 @@ class PPOAgent:
                             worker_embs=worker_x,
                             pressure_context=v2_pressure,
                             demand=selected_demand_v2,
+                            candidate_skills=raw_worker_x_v2[
+                                ..., worker_layout.skill_slice
+                            ],
+                            task_required_skills=selected_task_skills_v2,
                         )
                     
                     worker_steps = (
@@ -4361,6 +4405,10 @@ class PPOAgent:
                 worker_embs=worker_embs_i,
                 pressure_context=pressure,
                 demand=demand,
+                candidate_skills=raw_worker[:, worker_layout.skill_slice].unsqueeze(0),
+                task_required_skills=raw_task[
+                    task_id, 5 : 5 + worker_layout.num_skill_types
+                ].reshape(1, -1),
             )
             team_lp = torch.zeros_like(task_lp)
             team_entropy = torch.zeros_like(task_entropy)
@@ -4393,6 +4441,11 @@ class PPOAgent:
                         ),
                     )
                 # 非有限合法 logits 由统一分布入口拒绝。
+                self._record_v2_marginal_scarcity(
+                    self.policy.worker_head,
+                    worker_invalid_mask=current_mask.unsqueeze(0),
+                    selected_worker_index=worker_id,
+                )
                 worker_logits, worker_usable = _finalize_action_logits(
                     worker_logits,
                     current_mask.unsqueeze(0),
@@ -5520,6 +5573,11 @@ class PPOAgent:
                 worker_embs=worker_embs_i,
                 pressure_context=pressure,
                 demand=demand,
+                candidate_skills=raw_worker[:, worker_layout.skill_slice].unsqueeze(0),
+                task_required_skills=raw_task[
+                    y_task[sample_index],
+                    5 : 5 + worker_layout.num_skill_types,
+                ].reshape(1, -1),
             )
             team_lp = torch.zeros_like(task_lp)
             team_entropy = torch.zeros_like(task_entropy)
@@ -5554,6 +5612,11 @@ class PPOAgent:
                         ),
                     )
                 # 非有限合法 logits 由统一分布入口拒绝。
+                self._record_v2_marginal_scarcity(
+                    self.policy.worker_head,
+                    worker_invalid_mask=current_mask.unsqueeze(0),
+                    selected_worker_index=worker_id_t,
+                )
                 worker_logits, worker_usable = _finalize_action_logits(
                     worker_logits,
                     current_mask.unsqueeze(0),

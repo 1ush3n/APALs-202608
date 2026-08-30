@@ -124,6 +124,91 @@ def test_worker_pressure_context_near_demand_respects_action_mask_without_changi
     assert unmasked.demand_near[0, 1].item() == 0.0  # not-ready task remains excluded
 
 
+def test_v2_gather_selected_task_skills_rejects_virtual_or_multi_skill_tasks() -> None:
+    from models.worker_pointer_context import gather_selected_task_skills
+
+    task_features = torch.zeros((2, 3, 18), dtype=torch.float32)
+    task_features[0, 1, 5] = 1.0
+    task_features[1, 2, 7] = 1.0
+    selected_task = torch.tensor([1, 2])
+
+    selected = gather_selected_task_skills(task_features, selected_task)
+
+    assert selected.shape == (2, 5)
+    torch.testing.assert_close(selected, task_features[[0, 1], selected_task, 5:10])
+
+    task_features[0, 1, 6] = 1.0
+    with pytest.raises(AssertionError):
+        gather_selected_task_skills(task_features, selected_task)
+
+    task_features[0, 1, 6] = 0.0
+    task_features[1, 2, 7] = 0.0
+    with pytest.raises(AssertionError):
+        gather_selected_task_skills(task_features, selected_task)
+
+
+def test_v2_marginal_reserve_scarcity_excludes_required_skill_and_reacts_to_supply() -> None:
+    from models.worker_pointer_context import build_v2_marginal_reserve_scarcity
+
+    demand_all = torch.tensor([[20.0, 0.0, 0.0, 0.0, 20.0]])
+    supply_all = torch.tensor([[20.0, 0.0, 0.0, 0.0, 2.0]])
+    selected_skill_sum = torch.zeros((1, 5))
+    candidate_skills = torch.tensor(
+        [[[1.0, 0.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 0.0, 0.0]]]
+    )
+    task_required_skills = torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0]])
+
+    total, extra = build_v2_marginal_reserve_scarcity(
+        demand_all=demand_all,
+        supply_all=supply_all,
+        selected_skill_sum=selected_skill_sum,
+        candidate_skills=candidate_skills,
+        task_required_skills=task_required_skills,
+        epsilon=1.0e-6,
+        clip=10.0,
+    )
+
+    assert total.shape == extra.shape == (1, 2, 1)
+    assert total[0, 0].item() > total[0, 1].item()
+    assert extra[0, 0].item() > 0.0
+    assert extra[0, 1].item() == pytest.approx(0.0)
+    assert torch.all(extra <= total + 1.0e-6)
+
+    abundant_supply = supply_all.clone()
+    abundant_supply[0, 4] = 100.0
+    _, abundant_extra = build_v2_marginal_reserve_scarcity(
+        demand_all=demand_all,
+        supply_all=abundant_supply,
+        selected_skill_sum=selected_skill_sum,
+        candidate_skills=candidate_skills,
+        task_required_skills=task_required_skills,
+        epsilon=1.0e-6,
+        clip=10.0,
+    )
+    assert abundant_extra[0, 0].item() < extra[0, 0].item()
+
+
+def test_v2_marginal_reserve_scarcity_reflects_partial_team_consumption() -> None:
+    from models.worker_pointer_context import build_v2_marginal_reserve_scarcity
+
+    kwargs = {
+        "demand_all": torch.tensor([[20.0, 0.0, 0.0, 0.0, 20.0]]),
+        "supply_all": torch.tensor([[20.0, 0.0, 0.0, 0.0, 2.0]]),
+        "candidate_skills": torch.tensor([[[1.0, 0.0, 0.0, 0.0, 1.0]]]),
+        "task_required_skills": torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0]]),
+        "epsilon": 1.0e-6,
+        "clip": 10.0,
+    }
+    _, before = build_v2_marginal_reserve_scarcity(
+        selected_skill_sum=torch.zeros((1, 5)), **kwargs
+    )
+    _, after = build_v2_marginal_reserve_scarcity(
+        selected_skill_sum=torch.tensor([[0.0, 0.0, 0.0, 0.0, 1.0]]), **kwargs
+    )
+
+    assert after.item() > before.item()
+
+
 def test_normalized_entropy_uses_each_sample_legal_action_count() -> None:
     from ppo_agent import PPOAgent
 
@@ -197,6 +282,35 @@ def test_v2_diagnostics_summarize_partial_team_operational_state() -> None:
     assert metrics["PointerV2/TeamState/MaxWaitP95"] == pytest.approx(2.85)
     assert metrics["PointerV2/TeamState/CapacityMean"] == pytest.approx(2.0)
     assert metrics["PointerV2/TeamState/CapacityP95"] == pytest.approx(3.8)
+
+
+def test_v2_diagnostics_summarize_marginal_reserve_scarcity() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+    from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
+
+    diagnostics = WorkerPointerV2Diagnostics(num_skills=5)
+    diagnostics.record_context(
+        build_worker_pressure_context(
+            **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+        ),
+        host_elapsed_ms=1.0,
+    )
+    diagnostics.record_scarcity(
+        marginal_total=torch.tensor([[[2.0], [4.0], [10.0]]]),
+        marginal_extra=torch.tensor([[[0.0], [1.0], [3.0]]]),
+        worker_invalid_mask=torch.tensor([[False, False, True]]),
+        selected_worker_index=1,
+    )
+
+    metrics = diagnostics.finalize(require_coverage=False)
+
+    assert metrics["PointerV2/Scarcity/ReserveTotalLegalMean"] == pytest.approx(3.0)
+    assert metrics["PointerV2/Scarcity/ReserveTotalLegalP95"] == pytest.approx(3.9)
+    assert metrics["PointerV2/Scarcity/ReserveExtraLegalMean"] == pytest.approx(0.5)
+    assert metrics["PointerV2/Scarcity/ReserveExtraLegalP95"] == pytest.approx(0.95)
+    assert metrics["PointerV2/Scarcity/ReserveExtraLegalMax"] == pytest.approx(1.0)
+    assert metrics["PointerV2/Scarcity/ReserveExtraSelectedMean"] == pytest.approx(1.0)
+    assert metrics["PointerV2/Scarcity/ReserveExtraTotalRatio"] == pytest.approx(1.0 / 6.0)
 
 
 def test_v2_diagnostics_summarize_legal_eft_feature_quantiles() -> None:
@@ -544,6 +658,60 @@ def test_worker_pointer_v2_a1_nested_initialization_preserves_v0_parameters() ->
     for key in v0_state:
         if key != query_weight:
             torch.testing.assert_close(v1_state[key], v0_state[key], atol=0.0, rtol=0.0)
+
+
+def test_worker_pointer_v2_a2_nested_initialization_and_step_zero_are_invariant() -> None:
+    from models.worker_pointer_context import build_worker_pressure_context
+
+    v1_config = _pointer_config("autoregressive_pressure_v2")
+    v1_config.worker_pointer_v2_explicit_team_state = True
+    v2_config = _pointer_config("autoregressive_pressure_v2")
+    v2_config.worker_pointer_v2_explicit_team_state = True
+    v2_config.worker_pointer_v2_marginal_scarcity = True
+    torch.manual_seed(1234)
+    v1 = WorkerPointer(v1_config)
+    torch.manual_seed(1234)
+    v2 = WorkerPointer(v2_config)
+
+    v1_state = v1.state_dict()
+    v2_state = v2.state_dict()
+    for key in v1_state:
+        torch.testing.assert_close(v2_state[key], v1_state[key], atol=0.0, rtol=0.0)
+    assert torch.count_nonzero(v2.v2_marginal_proj.weight).item() == 0
+
+    context = build_worker_pressure_context(
+        **_pressure_inputs(), temperature=1.0, supply_epsilon=1.0e-6
+    )
+    common = {
+        "task_emb": torch.randn((1, 8)),
+        "station_emb": torch.randn((1, 8)),
+        "global_context": torch.randn((1, 24)),
+        "worker_embs": torch.randn((1, 3, 8)),
+        "pressure_context": context,
+        "demand": torch.tensor([2.0]),
+        "mask": torch.tensor([[False, False, True]]),
+        "candidate_skills": _pressure_inputs()["worker_features"][..., 1:6],
+        "task_required_skills": torch.tensor([[1.0, 0.0, 0.0, 0.0, 0.0]]),
+    }
+    cache_common = {
+        key: value for key, value in common.items() if key != "mask"
+    }
+    v1_cache = v1.build_v2_decode_cache(**cache_common)
+    v2_cache = v2.build_v2_decode_cache(**cache_common)
+    state_v1 = v1.initialize_v2_state(batch_size=1, device=torch.device("cpu"))
+    state_v2 = v2.initialize_v2_state(batch_size=1, device=torch.device("cpu"))
+    logits_v1 = v1.forward_choice_v2(
+        **common, team_state=state_v1, decode_cache=v1_cache
+    )
+    logits_v2 = v2.forward_choice_v2(
+        **common, team_state=state_v2, decode_cache=v2_cache
+    )
+
+    torch.testing.assert_close(logits_v2, logits_v1, atol=1.0e-6, rtol=0.0)
+    assert v2._last_v2_marginal_total is not None
+    assert v2._last_v2_marginal_extra is not None
+    assert torch.isfinite(v2._last_v2_marginal_total).all()
+    assert torch.isfinite(v2._last_v2_marginal_extra).all()
 
 
 def test_worker_pointer_v2_a1_uses_log1p_partial_team_operational_state() -> None:

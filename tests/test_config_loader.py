@@ -279,15 +279,17 @@ def test_batched_v2_dynamic_eft_feature_can_be_enabled_from_hydra_cli() -> None:
 
 
 @pytest.mark.parametrize(
-    ("experiment", "explicit_team_state"),
+    ("experiment", "explicit_team_state", "marginal_scarcity"),
     [
-        ("initial_worker_pointer_v2_v0", False),
-        ("initial_worker_pointer_v2_v1", True),
+        ("initial_worker_pointer_v2_v0", False, False),
+        ("initial_worker_pointer_v2_v1", True, False),
+        ("initial_worker_pointer_v2_v2", True, True),
     ],
 )
 def test_worker_pointer_v2_v0_v1_hydra_diffs_select_only_a1(
     experiment: str,
     explicit_team_state: bool,
+    marginal_scarcity: bool,
 ) -> None:
     cfg = Config()
     initialize_hydra_runtime(
@@ -299,7 +301,7 @@ def test_worker_pointer_v2_v0_v1_hydra_diffs_select_only_a1(
     )
 
     assert cfg.worker_pointer_v2_explicit_team_state is explicit_team_state
-    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_marginal_scarcity is marginal_scarcity
     assert cfg.worker_pointer_v2_interaction_residual is False
     assert cfg.worker_pointer_v2_next_frontier_pressure is False
     assert cfg.conditional_head_baseline_mode == "off"

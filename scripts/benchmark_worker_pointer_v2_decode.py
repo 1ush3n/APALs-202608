@@ -171,6 +171,10 @@ def benchmark_worker_pointer_v2_decode(
                 worker_embs=worker_embs,
                 pressure_context=pressure,
                 demand=demand,
+                candidate_skills=skills.unsqueeze(0),
+                task_required_skills=raw_task_gpu[
+                    task_id, 5:10
+                ].reshape(1, -1),
             )
             if cache_enabled
             else None
