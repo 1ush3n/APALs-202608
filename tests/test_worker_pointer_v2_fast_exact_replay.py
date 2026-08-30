@@ -144,6 +144,54 @@ def test_fast_exact_replay_update_runs_with_gpu_builder() -> None:
             assert torch.isfinite(torch.tensor(value)), f"非有限指标: {value}"
 
 
+def test_fast_exact_factorized_replay_update_uses_component_contract() -> None:
+    overrides = _fast_exact_overrides()
+    overrides["conditional_head_baseline_mode"] = "factorized"
+    with temporary_config(configs, overrides):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = _make_agent()
+        (
+            memory,
+            b_task,
+            b_station,
+            b_team,
+            old_logprobs,
+            rewards,
+            advantages,
+        ) = _rollout_single_step(agent, env)
+        component_logprobs = agent.last_v2_behavior_logprobs[0]
+        conditional_values = agent.last_v2_behavior_values[0]
+        assert component_logprobs is not None
+        assert conditional_values is not None
+        memory.old_task_logprob.append(float(component_logprobs[0]))
+        memory.old_station_logprob.append(float(component_logprobs[1]))
+        memory.old_team_logprob.append(float(component_logprobs[2]))
+        memory.old_V_task.append(float(conditional_values[0]))
+        memory.old_V_station.append(float(conditional_values[1]))
+        memory.old_V_worker.append(float(conditional_values[2]))
+        builder = GPUExactBatchBuilder(
+            config=configs, env=env, device=_DEVICE
+        )
+
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        assert metrics["PPO/UpdateSteps"] == 1.0
+        assert metrics["Gradient/Finite"] == 1.0
+        assert metrics["Gradient/V2Coverage"] > 0.0
+
+
 def test_fast_exact_actor_only_precheck_skips_critic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

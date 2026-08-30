@@ -227,6 +227,73 @@ def test_normalized_entropy_uses_each_sample_legal_action_count() -> None:
     torch.testing.assert_close(normalized, torch.tensor([1.0, 1.0, 1.0, 0.0]))
 
 
+def test_factorized_surrogate_averages_active_components_per_sample() -> None:
+    from ppo_agent import PPOAgent
+
+    current = torch.log(
+        torch.tensor([[1.2, 1.2, 1.2], [1.1, 1.1, 1.1]])
+    ).requires_grad_()
+    old = torch.zeros_like(current)
+    advantages = torch.tensor([[1.0, 1.0, 1.0], [2.0, 0.0, 0.0]])
+    active = torch.tensor([[True, True, True], [True, False, False]])
+
+    loss, ratios, component_losses = PPOAgent.compute_factorized_clipped_surrogate(
+        current_logprobs=current,
+        old_logprobs=old,
+        advantages=advantages,
+        active_mask=active,
+        clip_range=0.2,
+    )
+
+    expected = torch.tensor(-(1.2 + 2.2) / 2.0)
+    torch.testing.assert_close(loss, expected)
+    assert ratios.shape == component_losses.shape == (2, 3)
+    loss.backward()
+    assert current.grad is not None
+
+
+def test_factorized_component_advantages_normalize_only_active_samples() -> None:
+    from ppo_agent import PPOAgent
+
+    returns = torch.tensor([10.0, 20.0, 30.0])
+    old_values = torch.tensor(
+        [[9.0, 100.0, 100.0], [17.0, 100.0, 100.0], [100.0, 1.0, 100.0]]
+    )
+    active = torch.tensor(
+        [[True, False, False], [True, False, False], [False, True, False]]
+    )
+
+    advantages = PPOAgent.compute_factorized_component_advantages(
+        returns=returns,
+        old_values=old_values,
+        active_mask=active,
+    )
+
+    torch.testing.assert_close(advantages[:, 0], torch.tensor([-1.0, 1.0, 0.0]))
+    torch.testing.assert_close(advantages[:, 1], torch.tensor([0.0, 0.0, 0.0]))
+    assert torch.isfinite(advantages).all()
+
+
+def test_factorized_value_loss_averages_active_components_and_clips_old_values() -> None:
+    from ppo_agent import PPOAgent
+
+    current = torch.tensor([[1.5, 4.0, 6.0], [2.0, 8.0, 9.0]])
+    old = torch.tensor([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])
+    targets = torch.tensor([1.0, 2.0])
+    active = torch.tensor([[True, True, False], [True, False, False]])
+
+    loss = PPOAgent.compute_factorized_value_loss(
+        current_values=current,
+        old_values=old,
+        targets=targets,
+        active_mask=active,
+        clip_range=0.2,
+    )
+
+    expected = torch.tensor(((0.5**2 + 3.0**2) / 2.0 + 0.0) / 2.0)
+    torch.testing.assert_close(loss, expected)
+
+
 def test_v2_diagnostics_summarize_action_space_and_eft_rank() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
     from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics

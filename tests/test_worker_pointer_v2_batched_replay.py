@@ -45,6 +45,15 @@ def _append_ready_transition(memory: Memory, agent: PPOAgent, env: AirLineEnv_Gr
     memory.rewards.append(0.0)
     memory.is_terminals.append(True)
     memory.is_truncated.append(False)
+    component_logprobs = agent.last_v2_behavior_logprobs[0]
+    conditional_values = agent.last_v2_behavior_values[0]
+    if component_logprobs is not None and conditional_values is not None:
+        memory.old_task_logprob.append(float(component_logprobs[0]))
+        memory.old_station_logprob.append(float(component_logprobs[1]))
+        memory.old_team_logprob.append(float(component_logprobs[2]))
+        memory.old_V_task.append(float(conditional_values[0]))
+        memory.old_V_station.append(float(conditional_values[1]))
+        memory.old_V_worker.append(float(conditional_values[2]))
 
 
 def test_batched_v2_update_uses_vectorized_path_not_exact_replay(
@@ -133,3 +142,37 @@ def test_batched_v2_records_recompute_difference_without_exact_replay_abort() ->
 
     assert metrics["PPO/GradientsFinite"] == 1.0
     assert metrics["PointerV2/PPOFirstRecomputeMaxAE"] > 1.0e-3
+
+
+def test_batched_factorized_update_uses_component_contract() -> None:
+    overrides = _small_overrides(
+        team_selection_mode="autoregressive_pressure_v2",
+        policy_action_scope="operation_station_worker",
+        actor_context_mode="attention",
+        worker_pointer_v2_behavior_replay=False,
+        worker_pointer_v2_replay_mode="batched_vectorized_v2",
+        conditional_head_baseline_mode="factorized",
+        batch_size=2,
+        accumulation_steps=1,
+    )
+    with temporary_config(configs, overrides):
+        env_a = AirLineEnv_Graph(DATA_PATH, seed=42)
+        env_b = AirLineEnv_Graph(DATA_PATH, seed=43)
+        agent = PPOAgent(
+            HBGATPN(configs),
+            lr=1.0e-4,
+            gamma=0.99,
+            k_epochs=1,
+            eps_clip=0.2,
+            device=torch.device("cpu"),
+            batch_size=2,
+            total_timesteps=2,
+            config=configs,
+        )
+        memory = Memory()
+        _append_ready_transition(memory, agent, env_a)
+        _append_ready_transition(memory, agent, env_b)
+        metrics = agent.update(memory, env=env_a, current_ep=1)
+
+    assert metrics["PPO/GradientsFinite"] == 1.0
+    assert metrics["V2/BatchedReplayUpdateSeconds"] > 0.0

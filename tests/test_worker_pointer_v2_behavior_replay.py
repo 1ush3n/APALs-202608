@@ -181,6 +181,62 @@ def test_v2_behavior_snapshot_stores_component_logprobs_and_conditional_values()
         assert all(torch.isfinite(torch.tensor(value)) for value in conditional_values)
 
 
+def test_v2_factorized_behavior_replay_update_uses_component_contract() -> None:
+    overrides = _v2_overrides()
+    overrides["conditional_head_baseline_mode"] = "factorized"
+    with temporary_config(configs, overrides):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = PPOAgent(
+            HBGATPN(configs),
+            lr=1.0e-4,
+            gamma=0.99,
+            k_epochs=1,
+            eps_clip=0.2,
+            device=_DEVICE,
+            batch_size=4,
+            total_timesteps=1,
+            config=configs,
+        )
+        (
+            memory,
+            b_task,
+            b_station,
+            b_team,
+            old_logprobs,
+            rewards,
+            advantages,
+        ) = _rollout_single_step(agent, env)
+        component_logprobs = agent.last_v2_behavior_logprobs[0]
+        conditional_values = agent.last_v2_behavior_values[0]
+        assert component_logprobs is not None
+        assert conditional_values is not None
+        memory.old_task_logprob.append(float(component_logprobs[0]))
+        memory.old_station_logprob.append(float(component_logprobs[1]))
+        memory.old_team_logprob.append(float(component_logprobs[2]))
+        memory.old_V_task.append(float(conditional_values[0]))
+        memory.old_V_station.append(float(conditional_values[1]))
+        memory.old_V_worker.append(float(conditional_values[2]))
+
+        metrics = agent._run_v2_behavior_replay_update(
+            memory,
+            env,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+        )
+
+        assert metrics["PPO/UpdateSteps"] == 1.0
+        assert metrics["PPO/GradientsFinite"] == 1.0
+        assert metrics["PointerV2/GradientCoverage"] > 0.0
+        for value in metrics.values():
+            assert torch.isfinite(torch.tensor(value))
+
+
 def test_v2_behavior_replay_fails_closed_on_contract_break() -> None:
     with temporary_config(configs, _v2_overrides()):
         env = AirLineEnv_Graph(DATA_PATH, seed=42)

@@ -1829,6 +1829,166 @@ class PPOAgent:
         clipped_losses = (clipped_values - returns).pow(2)
         return torch.max(value_losses, clipped_losses).mean()
 
+    @staticmethod
+    def compute_factorized_component_advantages(
+        *,
+        returns: torch.Tensor,
+        old_values: torch.Tensor,
+        active_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """按 component 的 active 样本生成一次冻结、归一化 advantage。"""
+
+        assert returns.ndim == 1
+        batch_size = returns.size(0)
+        assert old_values.shape == active_mask.shape
+        assert old_values.ndim == 2 and old_values.shape[0] == batch_size
+        assert old_values.shape[1] == 3 and active_mask.dtype == torch.bool
+        raw = returns.float().unsqueeze(-1) - old_values.float()
+        mask = active_mask.to(dtype=raw.dtype)
+        count = mask.sum(dim=0)
+        mean = (raw * mask).sum(dim=0) / count.clamp_min(1.0)
+        variance = ((raw - mean).square() * mask).sum(dim=0) / count.clamp_min(1.0)
+        std = variance.sqrt()
+        normalized = (raw - mean) / std.clamp_min(1.0e-7)
+        normalized = torch.where(active_mask & (std > 1.0e-7), normalized, torch.zeros_like(normalized))
+        assert normalized.shape == (batch_size, 3)
+        assert torch.isfinite(normalized).all()
+        return normalized
+
+    @staticmethod
+    def compute_factorized_clipped_surrogate(
+        *,
+        current_logprobs: torch.Tensor,
+        old_logprobs: torch.Tensor,
+        advantages: torch.Tensor,
+        active_mask: torch.Tensor,
+        clip_range: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """计算按样本 active component 平均的 factorized PPO surrogate。"""
+
+        assert current_logprobs.shape == old_logprobs.shape == advantages.shape
+        assert current_logprobs.ndim == 2 and current_logprobs.shape[1] == 3
+        assert active_mask.shape == current_logprobs.shape
+        assert active_mask.dtype == torch.bool
+        assert float(clip_range) >= 0.0
+        safe_log_ratio = torch.clamp(
+            current_logprobs.float() - old_logprobs.float(), -20.0, 20.0
+        )
+        ratios = torch.exp(safe_log_ratio)
+        clipped_ratios = torch.clamp(
+            ratios, 1.0 - float(clip_range), 1.0 + float(clip_range)
+        )
+        surrogate = torch.minimum(
+            ratios * advantages,
+            clipped_ratios * advantages,
+        )
+        component_losses = -surrogate
+        active = active_mask.to(dtype=component_losses.dtype)
+        per_sample_loss = (component_losses * active).sum(dim=-1) / active.sum(
+            dim=-1
+        ).clamp_min(1.0)
+        loss = per_sample_loss.mean()
+        assert torch.isfinite(loss)
+        assert torch.isfinite(ratios).all()
+        return loss, ratios, component_losses
+
+    @staticmethod
+    def compute_factorized_value_loss(
+        *,
+        current_values: torch.Tensor,
+        old_values: torch.Tensor,
+        targets: torch.Tensor,
+        active_mask: torch.Tensor,
+        clip_range: float,
+    ) -> torch.Tensor:
+        """计算按样本 active component 平均的 clipped conditional value loss。"""
+
+        assert current_values.shape == old_values.shape == active_mask.shape
+        assert current_values.ndim == 2 and current_values.shape[1] == 3
+        assert targets.ndim == 1 and targets.shape[0] == current_values.shape[0]
+        assert active_mask.dtype == torch.bool
+        clipped_values = old_values + torch.clamp(
+            current_values - old_values,
+            -float(clip_range),
+            float(clip_range),
+        )
+        losses = torch.maximum(
+            (current_values - targets.unsqueeze(-1)).square(),
+            (clipped_values - targets.unsqueeze(-1)).square(),
+        )
+        active = active_mask.to(dtype=losses.dtype)
+        per_sample_loss = (losses * active).sum(dim=-1) / active.sum(
+            dim=-1
+        ).clamp_min(1.0)
+        valid_sample = active.any(dim=-1)
+        loss = per_sample_loss[valid_sample].mean()
+        assert torch.isfinite(loss)
+        return loss
+
+    @staticmethod
+    def _prepare_factorized_update_data(
+        memory: Any,
+        returns: torch.Tensor,
+        b_station: torch.Tensor,
+        b_team: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """准备一次 PPO update 内冻结的 component 行为数据和 advantage。"""
+        required_fields = (
+            "old_task_logprob",
+            "old_station_logprob",
+            "old_team_logprob",
+            "old_V_task",
+            "old_V_station",
+            "old_V_worker",
+        )
+        missing_fields = [
+            field_name
+            for field_name in required_fields
+            if len(getattr(memory, field_name, [])) != len(memory.states)
+            or any(value is None for value in getattr(memory, field_name, []))
+        ]
+        if missing_fields:
+            raise RuntimeError(
+                "factorized conditional PPO 缺少完整 behavior-time Memory 字段: "
+                + ", ".join(missing_fields)
+            )
+        old_logprobs = torch.tensor(
+            list(
+                zip(
+                    memory.old_task_logprob,
+                    memory.old_station_logprob,
+                    memory.old_team_logprob,
+                    strict=True,
+                )
+            ),
+            dtype=torch.float32,
+        )
+        old_values = torch.tensor(
+            list(
+                zip(
+                    memory.old_V_task,
+                    memory.old_V_station,
+                    memory.old_V_worker,
+                    strict=True,
+                )
+            ),
+            dtype=torch.float32,
+        )
+        active_mask = torch.stack(
+            [
+                torch.ones_like(b_station, dtype=torch.bool),
+                b_station >= 0,
+                (b_team >= 0).any(dim=1),
+            ],
+            dim=1,
+        )
+        advantages = PPOAgent.compute_factorized_component_advantages(
+            returns=returns.float(),
+            old_values=old_values,
+            active_mask=active_mask,
+        )
+        return old_logprobs, old_values, active_mask, advantages
+
     def select_action(
         self,
         obs: HeteroData,
@@ -3192,6 +3352,82 @@ class PPOAgent:
         action_scope = str(
             getattr(self.config, "policy_action_scope", "operation_station_worker")
         )
+        b_task = torch.tensor([a[0] for a in old_actions], dtype=torch.long)
+        b_station = torch.tensor([a[1] for a in old_actions], dtype=torch.long)
+        max_team_size = max(len(a[2]) for a in old_actions) if old_actions else 1
+        team_list = []
+        for action in old_actions:
+            team = action[2]
+            team_list.append(team + [-1] * (max_team_size - len(team)))
+        b_team = torch.tensor(team_list, dtype=torch.long)
+        factorized_enabled = (
+            action_scope == "operation_station_worker"
+            and str(
+                getattr(self.config, "conditional_head_baseline_mode", "off")
+            )
+            == "factorized"
+        )
+        old_component_logprobs = None
+        old_component_values = None
+        component_active_mask = None
+        component_advantages = None
+        if factorized_enabled:
+            required_memory_fields = (
+                "old_task_logprob",
+                "old_station_logprob",
+                "old_team_logprob",
+                "old_V_task",
+                "old_V_station",
+                "old_V_worker",
+            )
+            missing_fields = [
+                field_name
+                for field_name in required_memory_fields
+                if len(getattr(memory, field_name, [])) != len(memory.states)
+                or any(
+                    value is None for value in getattr(memory, field_name, [])
+                )
+            ]
+            if missing_fields:
+                raise RuntimeError(
+                    "factorized conditional PPO 缺少完整 behavior-time Memory 字段: "
+                    + ", ".join(missing_fields)
+                )
+            old_component_logprobs = torch.tensor(
+                list(
+                    zip(
+                        memory.old_task_logprob,
+                        memory.old_station_logprob,
+                        memory.old_team_logprob,
+                        strict=True,
+                    )
+                ),
+                dtype=torch.float32,
+            )
+            old_component_values = torch.tensor(
+                list(
+                    zip(
+                        memory.old_V_task,
+                        memory.old_V_station,
+                        memory.old_V_worker,
+                        strict=True,
+                    )
+                ),
+                dtype=torch.float32,
+            )
+            component_active_mask = torch.stack(
+                [
+                    torch.ones_like(b_station, dtype=torch.bool),
+                    b_station >= 0,
+                    (b_team >= 0).any(dim=1),
+                ],
+                dim=1,
+            )
+            component_advantages = self.compute_factorized_component_advantages(
+                returns=rewards.float(),
+                old_values=old_component_values,
+                active_mask=component_active_mask,
+            )
         if action_scope == "operation_station_gated_team":
             traces = getattr(memory, "gated_team_traces", None)
             if traces is None or len(traces) != len(memory.states):
@@ -3219,6 +3455,19 @@ class PPOAgent:
             pad = [-1] * (max_team_size - len(t))
             team_list.append(t + pad)
         b_team = torch.tensor(team_list, dtype=torch.long)
+
+        if factorized_enabled:
+            (
+                old_component_logprobs,
+                old_component_values,
+                component_active_mask,
+                component_advantages,
+            ) = self._prepare_factorized_update_data(
+                memory=memory,
+                returns=rewards,
+                b_station=b_station,
+                b_team=b_team,
+            )
         
         # Attach targets to Data objects for Batching
         enable_gpu_batch = getattr(self.config, 'enable_gpu_batch_rebuild', False) and env is not None
@@ -3497,7 +3746,32 @@ class PPOAgent:
                     x_dict, global_context = self.policy(batch)
                     
                     # 鐙珛楠ㄥ共璇勪及 state_values
-                    state_values = self.policy.get_value(batch, actor_x_dict_encoded=x_dict).view(-1)
+                    conditional_value_predictions = None
+                    if factorized_enabled:
+                        critic_x_dict, critic_context = self.policy.get_critic_context(
+                            batch,
+                            actor_x_dict_encoded=x_dict,
+                        )
+                        state_values = self.policy.critic(critic_context).reshape(-1)
+                        batch_indices = torch.arange(
+                            batch.y_task.size(0), device=self.device
+                        )
+                        conditional_value_predictions = (
+                            self.policy.get_conditional_values(
+                                batch,
+                                selected_task=batch.y_task,
+                                selected_station=batch.y_station,
+                                batch_indices=batch_indices,
+                                actor_x_dict_encoded=x_dict,
+                                critic_x_dict_encoded=critic_x_dict,
+                                critic_context=critic_context,
+                            )
+                        )
+                    else:
+                        state_values = self.policy.get_value(
+                            batch,
+                            actor_x_dict_encoded=x_dict,
+                        ).view(-1)
                     
                     # --- Re-evaluate LogProbs ---
                     # A. Task LogProb
@@ -3979,7 +4253,34 @@ class PPOAgent:
                         clip_mask = torch.abs(ratios - 1.0) > curr_eps_clip
                         clip_fractions.append(clip_mask.float().mean().detach())
                     
-                    policy_loss = -torch.min(surr1, surr2).mean()
+                    component_ratios = None
+                    if factorized_enabled:
+                        assert old_component_logprobs is not None
+                        assert component_advantages is not None
+                        assert component_active_mask is not None
+                        memory_indices = batch.y_memory_index.reshape(-1).to(
+                            device=self.device, dtype=torch.long
+                        )
+                        current_component_logprobs = torch.stack(
+                            [task_lp, station_lp, team_lp], dim=1
+                        )
+                        policy_loss, component_ratios, _component_losses = (
+                            self.compute_factorized_clipped_surrogate(
+                                current_logprobs=current_component_logprobs,
+                                old_logprobs=old_component_logprobs[
+                                    memory_indices
+                                ].to(self.device),
+                                advantages=component_advantages[
+                                    memory_indices
+                                ].to(self.device),
+                                active_mask=component_active_mask[
+                                    memory_indices
+                                ].to(self.device),
+                                clip_range=curr_eps_clip,
+                            )
+                        )
+                    else:
+                        policy_loss = -torch.min(surr1, surr2).mean()
                     
                     c_val = self.config.c_value
                     decay_eps = max(1, self.config.entropy_decay_episodes)
@@ -4000,6 +4301,41 @@ class PPOAgent:
                         old_values=old_values,
                         clip_range=curr_eps_clip,
                     )
+                    if factorized_enabled:
+                        assert conditional_value_predictions is not None
+                        assert old_component_values is not None
+                        assert component_active_mask is not None
+                        memory_indices = batch.y_memory_index.reshape(-1).to(
+                            device=self.device, dtype=torch.long
+                        )
+                        current_conditional_values = torch.cat(
+                            [
+                                conditional_value_predictions["task"],
+                                conditional_value_predictions["station"],
+                                conditional_value_predictions["worker"],
+                            ],
+                            dim=1,
+                        )
+                        conditional_value_loss = (
+                            self.compute_factorized_value_loss(
+                                current_values=current_conditional_values,
+                                old_values=old_component_values[
+                                    memory_indices
+                                ].to(self.device),
+                                targets=b_reward,
+                                active_mask=component_active_mask[
+                                    memory_indices
+                                ].to(self.device),
+                                clip_range=curr_eps_clip,
+                            )
+                        )
+                        value_loss_raw = value_loss_raw + float(
+                            getattr(
+                                self.config,
+                                "conditional_head_value_coef",
+                                1.0,
+                            )
+                        ) * conditional_value_loss
                     value_loss = c_val * value_loss_raw
                     
                     # 鍔ㄦ€佽幏鍙栧綋鍓?batch 涓悇鍐崇瓥鍒嗘敮鐨勬渶澶у姩浣滅淮搴︿互杩涜鐔靛綊涓€鍖?
@@ -4375,9 +4711,35 @@ class PPOAgent:
         """编码器/critic 按原行为组前向，动作 head 按 rollout 的 B=1 逐样本重放。"""
         with self.autocast_context():
             x_dict, global_context = self.policy(batch)
-            state_values = self.policy.get_value(
-                batch, actor_x_dict_encoded=x_dict
-            ).reshape(-1)
+            conditional_value_predictions = None
+            if (
+                str(getattr(self.config, "policy_action_scope", ""))
+                == "operation_station_worker"
+                and str(
+                    getattr(self.config, "conditional_head_baseline_mode", "off")
+                )
+                == "factorized"
+            ):
+                critic_x_dict, critic_context = self.policy.get_critic_context(
+                    batch, actor_x_dict_encoded=x_dict
+                )
+                state_values = self.policy.critic(critic_context).reshape(-1)
+                batch_indices = torch.arange(
+                    batch.y_task.size(0), device=self.device
+                )
+                conditional_value_predictions = self.policy.get_conditional_values(
+                    batch,
+                    selected_task=batch.y_task,
+                    selected_station=batch.y_station,
+                    batch_indices=batch_indices,
+                    actor_x_dict_encoded=x_dict,
+                    critic_x_dict_encoded=critic_x_dict,
+                    critic_context=critic_context,
+                )
+            else:
+                state_values = self.policy.get_value(
+                    batch, actor_x_dict_encoded=x_dict
+                ).reshape(-1)
 
         group_size = int(batch.num_graphs)
         assert global_context.shape[0] == group_size
@@ -4439,6 +4801,16 @@ class PPOAgent:
             is_virtual = not team_target_ids
             zero = torch.zeros_like(task_lp)
             if is_virtual:
+                conditional_values = None
+                if conditional_value_predictions is not None:
+                    conditional_values = torch.cat(
+                        [
+                            conditional_value_predictions["task"],
+                            conditional_value_predictions["station"],
+                            conditional_value_predictions["worker"],
+                        ],
+                        dim=1,
+                    )[sample_index].reshape(1, 3)
                 outputs.append(
                     {
                         "task": task_lp,
@@ -4447,6 +4819,7 @@ class PPOAgent:
                         "entropy": task_entropy,
                         "normalized_entropy": normalized_task_entropy,
                         "state_value": state_values[sample_index].reshape(1),
+                        "conditional_values": conditional_values,
                     }
                 )
                 continue
@@ -4605,6 +4978,18 @@ class PPOAgent:
                     "entropy": task_entropy + station_entropy + team_entropy,
                     "normalized_entropy": normalized_entropy,
                     "state_value": state_values[sample_index].reshape(1),
+                    "conditional_values": (
+                        torch.cat(
+                            [
+                                conditional_value_predictions["task"],
+                                conditional_value_predictions["station"],
+                                conditional_value_predictions["worker"],
+                            ],
+                            dim=1,
+                        )[sample_index].reshape(1, 3)
+                        if conditional_value_predictions is not None
+                        else None
+                    ),
                 }
             )
         assert len(outputs) == group_size
@@ -4690,6 +5075,28 @@ class PPOAgent:
         accumulation_steps = max(1, int(self.accumulation_steps))
         seed = int(getattr(self.config, "seed", 42))
         threshold = 1.0e-3 if self.amp_dtype == torch.bfloat16 else 1.0e-4
+
+        factorized_enabled = (
+            action_scope == "operation_station_worker"
+            and str(
+                getattr(self.config, "conditional_head_baseline_mode", "off")
+            )
+            == "factorized"
+        )
+        old_component_logprobs = old_component_values = None
+        component_active_mask = component_advantages = None
+        if factorized_enabled:
+            (
+                old_component_logprobs,
+                old_component_values,
+                component_active_mask,
+                component_advantages,
+            ) = self._prepare_factorized_update_data(
+                memory=memory,
+                returns=rewards,
+                b_station=b_station,
+                b_team=b_team,
+            )
 
         if fast_exact_builder is None:
             cached = getattr(self, "_v2_fast_exact_builder", None)
@@ -4879,16 +5286,40 @@ class PPOAgent:
                             advantage = group_batch.batch.y_advantage[
                                 local_index
                             ].reshape(1)
-                            surrogate = torch.minimum(
-                                ratio * advantage,
-                                torch.clamp(
-                                    ratio,
-                                    1.0 - current_eps_clip,
-                                    1.0 + current_eps_clip,
+                            if factorized_enabled:
+                                assert old_component_logprobs is not None
+                                assert component_advantages is not None
+                                assert component_active_mask is not None
+                                current_component_logprobs = torch.stack(
+                                    [output["task"], output["station"], output["team"]],
+                                    dim=1,
                                 )
-                                * advantage,
-                            )
-                            policy_loss = -surrogate.mean()
+                                policy_loss, _component_ratios, _component_losses = (
+                                    self.compute_factorized_clipped_surrogate(
+                                        current_logprobs=current_component_logprobs,
+                                        old_logprobs=old_component_logprobs[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        advantages=component_advantages[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        active_mask=component_active_mask[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        clip_range=current_eps_clip,
+                                    )
+                                )
+                            else:
+                                surrogate = torch.minimum(
+                                    ratio * advantage,
+                                    torch.clamp(
+                                        ratio,
+                                        1.0 - current_eps_clip,
+                                        1.0 + current_eps_clip,
+                                    )
+                                    * advantage,
+                                )
+                                policy_loss = -surrogate.mean()
                             old_value = (
                                 group_batch.batch.y_value[local_index].reshape(1)
                                 if hasattr(group_batch.batch, "y_value")
@@ -4902,6 +5333,33 @@ class PPOAgent:
                                 old_values=old_value,
                                 clip_range=current_eps_clip,
                             )
+                            if factorized_enabled:
+                                assert old_component_values is not None
+                                assert component_active_mask is not None
+                                conditional_values = output.get("conditional_values")
+                                assert conditional_values is not None
+                                conditional_value_loss = (
+                                    self.compute_factorized_value_loss(
+                                        current_values=conditional_values.reshape(1, 3),
+                                        old_values=old_component_values[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        targets=group_batch.batch.y_reward[
+                                            local_index
+                                        ].reshape(1),
+                                        active_mask=component_active_mask[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        clip_range=current_eps_clip,
+                                    )
+                                )
+                                value_loss = value_loss + float(
+                                    getattr(
+                                        self.config,
+                                        "conditional_head_value_coef",
+                                        1.0,
+                                    )
+                                ) * conditional_value_loss
                             normalized_entropy = output["normalized_entropy"].mean()
                             sample_loss = (
                                 c_policy * policy_loss
@@ -5133,6 +5591,28 @@ class PPOAgent:
         seed = int(getattr(self.config, "seed", 42))
         threshold = 1.0e-3 if self.amp_dtype == torch.bfloat16 else 1.0e-4
 
+        factorized_enabled = (
+            action_scope == "operation_station_worker"
+            and str(
+                getattr(self.config, "conditional_head_baseline_mode", "off")
+            )
+            == "factorized"
+        )
+        old_component_logprobs = old_component_values = None
+        component_active_mask = component_advantages = None
+        if factorized_enabled:
+            (
+                old_component_logprobs,
+                old_component_values,
+                component_active_mask,
+                component_advantages,
+            ) = self._prepare_factorized_update_data(
+                memory=memory,
+                returns=rewards,
+                b_station=b_station,
+                b_team=b_team,
+            )
+
         def _build_group(group_index: int) -> Any:
             memory_indices = [item[0] for item in restored[group_index]]
             return self._build_v2_behavior_group_batch(
@@ -5299,16 +5779,40 @@ class PPOAgent:
                                 total_lp, old_lp
                             )
                             advantage = group_batch.y_advantage[local_index].reshape(1)
-                            surrogate = torch.minimum(
-                                ratio * advantage,
-                                torch.clamp(
-                                    ratio,
-                                    1.0 - current_eps_clip,
-                                    1.0 + current_eps_clip,
+                            if factorized_enabled:
+                                assert old_component_logprobs is not None
+                                assert component_advantages is not None
+                                assert component_active_mask is not None
+                                current_component_logprobs = torch.stack(
+                                    [output["task"], output["station"], output["team"]],
+                                    dim=1,
                                 )
-                                * advantage,
-                            )
-                            policy_loss = -surrogate.mean()
+                                policy_loss, _component_ratios, _component_losses = (
+                                    self.compute_factorized_clipped_surrogate(
+                                        current_logprobs=current_component_logprobs,
+                                        old_logprobs=old_component_logprobs[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        advantages=component_advantages[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        active_mask=component_active_mask[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        clip_range=current_eps_clip,
+                                    )
+                                )
+                            else:
+                                surrogate = torch.minimum(
+                                    ratio * advantage,
+                                    torch.clamp(
+                                        ratio,
+                                        1.0 - current_eps_clip,
+                                        1.0 + current_eps_clip,
+                                    )
+                                    * advantage,
+                                )
+                                policy_loss = -surrogate.mean()
                             old_value = (
                                 group_batch.y_value[local_index].reshape(1)
                                 if hasattr(group_batch, "y_value")
@@ -5320,6 +5824,33 @@ class PPOAgent:
                                 old_values=old_value,
                                 clip_range=current_eps_clip,
                             )
+                            if factorized_enabled:
+                                assert old_component_values is not None
+                                assert component_active_mask is not None
+                                conditional_values = output.get("conditional_values")
+                                assert conditional_values is not None
+                                conditional_value_loss = (
+                                    self.compute_factorized_value_loss(
+                                        current_values=conditional_values.reshape(1, 3),
+                                        old_values=old_component_values[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        targets=group_batch.y_reward[
+                                            local_index
+                                        ].reshape(1),
+                                        active_mask=component_active_mask[
+                                            memory_index
+                                        ].reshape(1, 3).to(self.device),
+                                        clip_range=current_eps_clip,
+                                    )
+                                )
+                                value_loss = value_loss + float(
+                                    getattr(
+                                        self.config,
+                                        "conditional_head_value_coef",
+                                        1.0,
+                                    )
+                                ) * conditional_value_loss
                             normalized_entropy = output["normalized_entropy"].mean()
                             sample_loss = (
                                 c_policy * policy_loss
@@ -5554,10 +6085,36 @@ class PPOAgent:
         with self.autocast_context():
             x_dict, global_context = self.policy(batch)
             state_values = None
+            conditional_value_predictions = None
             if not actor_only:
-                state_values = self.policy.get_value(
-                    batch, actor_x_dict_encoded=x_dict
-                ).reshape(-1)
+                if (
+                    str(getattr(self.config, "policy_action_scope", ""))
+                    == "operation_station_worker"
+                    and str(
+                        getattr(self.config, "conditional_head_baseline_mode", "off")
+                    )
+                    == "factorized"
+                ):
+                    critic_x_dict, critic_context = self.policy.get_critic_context(
+                        batch, actor_x_dict_encoded=x_dict
+                    )
+                    state_values = self.policy.critic(critic_context).reshape(-1)
+                    batch_indices = torch.arange(group_size, device=self.device)
+                    conditional_value_predictions = (
+                        self.policy.get_conditional_values(
+                            batch,
+                            selected_task=batch.y_task,
+                            selected_station=batch.y_station,
+                            batch_indices=batch_indices,
+                            actor_x_dict_encoded=x_dict,
+                            critic_x_dict_encoded=critic_x_dict,
+                            critic_context=critic_context,
+                        )
+                    )
+                else:
+                    state_values = self.policy.get_value(
+                        batch, actor_x_dict_encoded=x_dict
+                    ).reshape(-1)
 
         outputs: list[dict[str, torch.Tensor]] = []
         worker_layout = resolve_worker_feature_layout(self.config)
@@ -5621,6 +6178,16 @@ class PPOAgent:
             is_virtual = int(valid_team.numel()) == 0
             zero = torch.zeros_like(task_lp)
             if is_virtual:
+                conditional_values = None
+                if conditional_value_predictions is not None:
+                    conditional_values = torch.cat(
+                        [
+                            conditional_value_predictions["task"],
+                            conditional_value_predictions["station"],
+                            conditional_value_predictions["worker"],
+                        ],
+                        dim=1,
+                    )[sample_index].reshape(1, 3)
                 outputs.append(
                     {
                         "task": task_lp,
@@ -5633,6 +6200,7 @@ class PPOAgent:
                             if state_values is not None
                             else None
                         ),
+                        "conditional_values": conditional_values,
                     }
                 )
                 continue
@@ -5823,6 +6391,18 @@ class PPOAgent:
                     "state_value": (
                         state_values[sample_index].reshape(1)
                         if state_values is not None
+                        else None
+                    ),
+                    "conditional_values": (
+                        torch.cat(
+                            [
+                                conditional_value_predictions["task"],
+                                conditional_value_predictions["station"],
+                                conditional_value_predictions["worker"],
+                            ],
+                            dim=1,
+                        )[sample_index].reshape(1, 3)
+                        if conditional_value_predictions is not None
                         else None
                     ),
                 }

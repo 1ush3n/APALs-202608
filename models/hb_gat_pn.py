@@ -1380,6 +1380,7 @@ class HBGATPN(nn.Module):
         batch_data: HeteroData,
         node_type: str,
         local_indices: torch.Tensor,
+        graph_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         node_embeddings = encoded[node_type]
         assert local_indices.ndim == 1
@@ -1388,11 +1389,18 @@ class HBGATPN(nn.Module):
         node_batch = getattr(node_store, "batch", None)
         if ptr is not None:
             ptr = ptr.to(device=local_indices.device, dtype=torch.long)
-            batch_indices = torch.arange(
-                local_indices.numel(), device=local_indices.device
+            if graph_indices is None:
+                graph_indices = torch.arange(
+                    local_indices.numel(), device=local_indices.device
+                )
+            graph_indices = graph_indices.to(
+                device=local_indices.device, dtype=torch.long
             )
-            global_indices = ptr[:-1] + local_indices
-            assert batch_indices.numel() + 1 <= ptr.numel()
+            assert graph_indices.shape == local_indices.shape
+            global_indices = ptr[graph_indices] + local_indices
+            assert torch.all(
+                (graph_indices >= 0) & (graph_indices + 1 < ptr.numel())
+            )
         else:
             assert node_batch is None
             global_indices = local_indices
@@ -1407,6 +1415,7 @@ class HBGATPN(nn.Module):
         *,
         selected_task: torch.Tensor,
         selected_station: torch.Tensor,
+        batch_indices: torch.Tensor | None = None,
         actor_x_dict_encoded: dict[str, torch.Tensor] | None = None,
         critic_x_dict_encoded: dict[str, torch.Tensor] | None = None,
         critic_context: torch.Tensor | None = None,
@@ -1418,6 +1427,14 @@ class HBGATPN(nn.Module):
         selected_task = selected_task.reshape(-1).to(dtype=torch.long)
         selected_station = selected_station.reshape(-1).to(dtype=torch.long)
         assert selected_task.shape == selected_station.shape
+        if batch_indices is None:
+            batch_indices = torch.arange(
+                selected_task.numel(), device=selected_task.device
+            )
+        batch_indices = batch_indices.reshape(-1).to(
+            device=selected_task.device, dtype=torch.long
+        )
+        assert batch_indices.shape == selected_task.shape
         if critic_x_dict_encoded is None or critic_context is None:
             critic_x_dict_encoded, critic_context = self.get_critic_context(
                 batch_data,
@@ -1428,6 +1445,7 @@ class HBGATPN(nn.Module):
             batch_data,
             "task",
             selected_task,
+            batch_indices,
         )
         virtual_station = selected_station < 0
         assert torch.all(
@@ -1439,6 +1457,7 @@ class HBGATPN(nn.Module):
             batch_data,
             "station",
             selected_station.clamp_min(0),
+            batch_indices,
         )
         return self.compute_conditional_values(
             critic_context=critic_context,
