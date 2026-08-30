@@ -24,6 +24,7 @@ import training.fast_exact_benchmark as benchmark_runtime
 from training.fast_exact_benchmark import (
     compute_replay_performance,
     compute_template_hit_rate,
+    summarize_group_sizes,
     summarize_utilization,
 )
 
@@ -89,6 +90,19 @@ def test_template_hit_rate_no_misses() -> None:
 
 def test_template_hit_rate_all_misses() -> None:
     assert compute_template_hit_rate(hits=0, misses=7) == pytest.approx(0.0)
+
+
+def test_group_size_summary_reports_mean_p50_and_p95() -> None:
+    summary = summarize_group_sizes([1, 2, 3, 4])
+
+    assert summary["mean"] == pytest.approx(2.5)
+    assert summary["p50"] == pytest.approx(2.5)
+    assert summary["p95"] == pytest.approx(3.85)
+
+
+def test_group_size_summary_rejects_empty_input() -> None:
+    with pytest.raises(ValueError, match="group_sizes"):
+        summarize_group_sizes([])
 
 
 def test_measure_operation_samples_the_operation_interval() -> None:

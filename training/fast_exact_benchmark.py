@@ -49,6 +49,19 @@ def summarize_utilization(
     }
 
 
+def summarize_group_sizes(samples: Sequence[int]) -> dict[str, float]:
+    """统计 Fast-Exact physical group 的均值、P50 和 P95。"""
+    values = [int(value) for value in samples]
+    if not values:
+        raise ValueError("group_sizes 不能为空")
+    array = np.asarray(values, dtype=float)
+    return {
+        "mean": float(array.mean()),
+        "p50": float(np.percentile(array, 50)),
+        "p95": float(np.percentile(array, 95)),
+    }
+
+
 def measure_operation(
     operation: Callable[[], _T],
     *,
@@ -135,5 +148,6 @@ __all__ = [
     "compute_template_hit_rate",
     "measure_operation",
     "resolve_benchmark_num_envs",
+    "summarize_group_sizes",
     "summarize_utilization",
 ]
