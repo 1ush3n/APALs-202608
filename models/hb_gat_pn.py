@@ -1051,6 +1051,15 @@ class AnchorProposalGate(nn.Module):
         branch_logits = torch.cat([anchor_logit, proposal_logit], dim=-1)  # [B, 2]
         return branch_logits, delta_a, g
 
+
+def _build_conditional_value_head(input_dim: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Linear(input_dim, 64),
+        get_head_layer_norm(64),
+        get_activation(),
+        nn.Linear(64, 1),
+    )
+
 # ---------------------------------------------------------------------------
 # 完整模型: HB-GAT-PN (Heterogeneous Graph Attention Pointer Network)
 # ---------------------------------------------------------------------------
@@ -1136,9 +1145,88 @@ class HBGATPN(nn.Module):
             get_activation(),
             nn.Linear(64, 1)
         )
+
+        self.conditional_head_baseline_mode = str(
+            getattr(config, "conditional_head_baseline_mode", "off")
+        )
+        if self.conditional_head_baseline_mode not in {
+            "off",
+            "diagnostic",
+            "factorized",
+        }:
+            raise ValueError(
+                "conditional_head_baseline_mode 必须是 off、diagnostic 或 factorized"
+            )
+        self.critic_task_cond = None
+        self.critic_station_cond = None
+        self.critic_worker_cond = None
+        if self.conditional_head_baseline_mode != "off":
+            conditional_seed = int(getattr(config, "seed", 42)) + 2009
+            with torch.random.fork_rng(devices=[], enabled=True):
+                torch.manual_seed(conditional_seed)
+                self.critic_task_cond = _build_conditional_value_head(c_dim)
+                self.critic_station_cond = _build_conditional_value_head(
+                    c_dim + config.hidden_dim
+                )
+                self.critic_worker_cond = _build_conditional_value_head(
+                    c_dim + config.hidden_dim * 2
+                )
         
         self.last_s_weights = None 
         self.last_s_var = 0.0      # [新增] 站位关注度方差，用于衡量 Critic 是否定位到瓶颈
+
+    def compute_conditional_values(
+        self,
+        *,
+        critic_context: torch.Tensor,
+        critic_task_emb: torch.Tensor,
+        critic_station_emb: torch.Tensor,
+        virtual_station: torch.Tensor | None = None,
+        detach_inputs: bool | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """基于同一 Critic context 计算 task/station/worker 条件基线。"""
+
+        if self.conditional_head_baseline_mode == "off":
+            raise RuntimeError("conditional critic heads 未启用")
+        hidden_dim = int(self.config.hidden_dim)
+        batch_size = critic_context.size(0)
+        assert critic_context.shape == (batch_size, hidden_dim * 3)
+        assert critic_task_emb.shape == (batch_size, hidden_dim)
+        assert critic_station_emb.shape == (batch_size, hidden_dim)
+        if virtual_station is not None:
+            assert virtual_station.shape == (batch_size,)
+            assert virtual_station.dtype == torch.bool
+            critic_station_emb = torch.where(
+                virtual_station.unsqueeze(-1),
+                torch.zeros_like(critic_station_emb),
+                critic_station_emb,
+            )
+        if detach_inputs is None:
+            detach_inputs = self.conditional_head_baseline_mode == "diagnostic"
+        if detach_inputs:
+            critic_context = critic_context.detach()
+            critic_task_emb = critic_task_emb.detach()
+            critic_station_emb = critic_station_emb.detach()
+        assert self.critic_task_cond is not None
+        assert self.critic_station_cond is not None
+        assert self.critic_worker_cond is not None
+        task_value = self.critic_task_cond(critic_context)
+        station_input = torch.cat(
+            [critic_context, critic_task_emb], dim=-1
+        )  # [B,3H] + [B,H] -> [B,4H]
+        station_value = self.critic_station_cond(station_input)
+        worker_input = torch.cat(
+            [critic_context, critic_task_emb, critic_station_emb], dim=-1
+        )  # [B,3H] + [B,H] + [B,H] -> [B,5H]
+        worker_value = self.critic_worker_cond(worker_input)
+        values = {
+            "task": task_value,
+            "station": station_value,
+            "worker": worker_value,
+        }
+        assert all(value.shape == (batch_size, 1) for value in values.values())
+        assert all(torch.isfinite(value).all() for value in values.values())
+        return values
 
     def _policy_node_types(self) -> set[str]:
         scope = str(getattr(self.config, "policy_observation_scope", "full"))
@@ -1279,6 +1367,104 @@ class HBGATPN(nn.Module):
         )
              
         return x_dict_encoded, global_context
+
+    @staticmethod
+    def _select_critic_node_embeddings(
+        encoded: dict[str, torch.Tensor],
+        batch_data: HeteroData,
+        node_type: str,
+        local_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        node_embeddings = encoded[node_type]
+        assert local_indices.ndim == 1
+        node_store = batch_data[node_type]
+        ptr = getattr(node_store, "ptr", None)
+        node_batch = getattr(node_store, "batch", None)
+        if ptr is not None:
+            ptr = ptr.to(device=local_indices.device, dtype=torch.long)
+            batch_indices = torch.arange(
+                local_indices.numel(), device=local_indices.device
+            )
+            global_indices = ptr[:-1] + local_indices
+            assert batch_indices.numel() + 1 <= ptr.numel()
+        else:
+            assert node_batch is None
+            global_indices = local_indices
+        assert torch.all(
+            (global_indices >= 0) & (global_indices < node_embeddings.size(0))
+        )
+        return node_embeddings[global_indices]
+
+    def get_conditional_values(
+        self,
+        batch_data: HeteroData,
+        *,
+        selected_task: torch.Tensor,
+        selected_station: torch.Tensor,
+        actor_x_dict_encoded: dict[str, torch.Tensor] | None = None,
+        critic_x_dict_encoded: dict[str, torch.Tensor] | None = None,
+        critic_context: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """从同一 Critic context 和 Critic 节点 embedding 得到三项基线。"""
+
+        if self.conditional_head_baseline_mode == "off":
+            raise RuntimeError("conditional critic heads 未启用")
+        selected_task = selected_task.reshape(-1).to(dtype=torch.long)
+        selected_station = selected_station.reshape(-1).to(dtype=torch.long)
+        assert selected_task.shape == selected_station.shape
+        if critic_x_dict_encoded is None or critic_context is None:
+            critic_x_dict_encoded, critic_context = self.get_critic_context(
+                batch_data,
+                actor_x_dict_encoded=actor_x_dict_encoded,
+            )
+        task_emb = self._select_critic_node_embeddings(
+            critic_x_dict_encoded,
+            batch_data,
+            "task",
+            selected_task,
+        )
+        virtual_station = selected_station < 0
+        assert torch.all(
+            virtual_station
+            | (selected_station < int(batch_data["station"].num_nodes))
+        )
+        station_emb = self._select_critic_node_embeddings(
+            critic_x_dict_encoded,
+            batch_data,
+            "station",
+            selected_station.clamp_min(0),
+        )
+        return self.compute_conditional_values(
+            critic_context=critic_context,
+            critic_task_emb=task_emb,
+            critic_station_emb=station_emb,
+            virtual_station=virtual_station,
+        )
+
+    def get_critic_context(self, batch_data, actor_x_dict_encoded=None):
+        """计算一次 Critic 编码与 context，供 state value 和条件 heads 复用。"""
+        if getattr(self.config, "use_shared_trunk", False):
+            if actor_x_dict_encoded is None:
+                actor_x_dict_encoded = self._encode_policy_graph(
+                    batch_data,
+                    self.embedder,
+                    self.encoder,
+                )
+            c_x_dict_encoded = actor_x_dict_encoded
+        else:
+            c_x_dict_encoded = self._encode_policy_graph(
+                batch_data,
+                self.critic_embedder,
+                self.critic_encoder,
+            )
+        c_global_context = self._compute_global_context(
+            c_x_dict_encoded,
+            batch_data,
+            mode="attention",
+            station_attn=self.critic_station_attn,
+            task_worker_attn=self.critic_task_worker_attn,
+        )
+        return c_x_dict_encoded, c_global_context
 
     def get_value(self, batch_data, actor_x_dict_encoded=None):
         """

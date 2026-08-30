@@ -796,6 +796,46 @@ def test_worker_pointer_v2_a3_interaction_residual_receives_gradient() -> None:
     assert torch.isfinite(head.v2_interaction_mlp[-1].weight.grad).all()
 
 
+def test_conditional_critic_diagnostic_heads_detach_shared_inputs() -> None:
+    from models.hb_gat_pn import HBGATPN
+
+    config = Config()
+    config.hidden_dim = 8
+    config.conditional_head_baseline_mode = "diagnostic"
+    model = HBGATPN(config)
+    critic_context = torch.randn((2, 24), requires_grad=True)
+    critic_task_emb = torch.randn((2, 8), requires_grad=True)
+    critic_station_emb = torch.randn((2, 8), requires_grad=True)
+    virtual_station = torch.tensor([False, True])
+
+    values = model.compute_conditional_values(
+        critic_context=critic_context,
+        critic_task_emb=critic_task_emb,
+        critic_station_emb=critic_station_emb,
+        virtual_station=virtual_station,
+    )
+    assert set(values) == {"task", "station", "worker"}
+    assert all(value.shape == (2, 1) for value in values.values())
+    values["task"].sum().backward()
+
+    assert model.critic_task_cond[-1].weight.grad is not None
+    assert torch.isfinite(model.critic_task_cond[-1].weight.grad).all()
+    assert critic_context.grad is None
+    assert critic_task_emb.grad is None
+    assert critic_station_emb.grad is None
+    assert all(parameter.grad is None for parameter in model.critic.parameters())
+
+    torch.testing.assert_close(
+        values["station"][1],
+        model.compute_conditional_values(
+            critic_context=critic_context.detach(),
+            critic_task_emb=critic_task_emb.detach(),
+            critic_station_emb=torch.zeros_like(critic_station_emb),
+            virtual_station=torch.tensor([False, True]),
+        )["station"][1],
+    )
+
+
 def test_worker_pointer_v2_a1_uses_log1p_partial_team_operational_state() -> None:
     from models.worker_pointer_context import build_worker_pressure_context
 
