@@ -135,7 +135,7 @@ def test_fast_exact_replay_update_runs_with_gpu_builder() -> None:
 
         assert metrics["V2/FastExact/BehaviorReplayGroups"] == 1.0
         assert metrics["V2/FastExact/BehaviorReplaySamples"] == 1.0
-        assert metrics["V2/FastExact/PrecheckReusedGroups"] >= 1.0
+        assert metrics["V2/FastExact/PrecheckReusedGroups"] == 0.0
         assert metrics["PPO/UpdateSteps"] == 1.0
         assert metrics["Gradient/Finite"] == 1.0
         assert metrics["Gradient/V2Coverage"] > 0.0
@@ -309,7 +309,7 @@ def test_fast_exact_actor_only_precheck_skips_critic(
             fast_exact_builder=builder,
         )
         # 预检不调用 critic；正式带梯度前向调用一次。
-        assert metrics["V2/FastExact/PrecheckReusedGroups"] == 1.0
+        assert metrics["V2/FastExact/PrecheckReusedGroups"] == 0.0
         assert len(get_value_calls) == 1
 
 
@@ -362,10 +362,48 @@ def test_fast_exact_actor_prepass_is_recomputed_after_optimizer_step(
         )
 
         # 第一次来自合同预检；第二次来自 optimizer.step 后的新策略重算。
-        assert actor_only_calls == 2
+        assert actor_only_calls == 1
         assert metrics["V2/FastExact/PrecheckGroups"] == 1.0
-        assert metrics["V2/FastExact/PrecheckReusedGroups"] == 1.0
+        assert metrics["V2/FastExact/PrecheckReusedGroups"] == 0.0
         assert metrics["PPO/UpdateSteps"] == 2.0
+
+
+def test_fast_exact_formal_graphs_survive_multiple_physical_groups() -> None:
+    with temporary_config(configs, _fast_exact_overrides()):
+        env_a = AirLineEnv_Graph(DATA_PATH, seed=42)
+        env_b = AirLineEnv_Graph(DATA_PATH, seed=43)
+        agent = _make_agent()
+        first = _rollout_single_step(agent, env_a)
+        second = _rollout_single_step(agent, env_b)
+
+        memory = Memory()
+        for source, group_id in ((first[0], (0, 0)), (second[0], (1, 0))):
+            memory.states.extend(source.states)
+            memory.actions.extend(source.actions)
+            memory.logprobs.extend(source.logprobs)
+            memory.masks.extend(source.masks)
+            memory.values.extend(source.values)
+            memory.worker_pointer_v2_behavior_traces.extend(
+                [dataclasses.replace(source.worker_pointer_v2_behavior_traces[0], group_id=group_id)]
+            )
+
+        builder = GPUExactBatchBuilder(config=configs, env=env_a, device=_DEVICE)
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env_a,
+            current_ep=1,
+            advantages=torch.tensor([1.0, 1.0]),
+            rewards=torch.tensor([0.0, 0.0]),
+            old_logprobs=torch.tensor([first[4].item(), second[4].item()]),
+            b_task=torch.cat((first[1], second[1])),
+            b_station=torch.cat((first[2], second[2])),
+            b_team=torch.cat((first[3], second[3])),
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        assert metrics["V2/FastExact/BehaviorReplayGroups"] == 2.0
+        assert metrics["PPO/UpdateSteps"] == 1.0
 
 
 def test_fast_exact_replay_fails_closed_on_contract_break() -> None:

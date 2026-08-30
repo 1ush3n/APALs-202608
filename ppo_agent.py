@@ -5041,9 +5041,9 @@ class PPOAgent:
 
         - 每个物理 group 经 GPUExactBatchBuilder 构建（布局元数据 CPU 缓存，
           热路径无 ``.cpu().tolist()`` / 逐样本 ``.item()``）；
-        - 首次同形合同为 actor-only 无梯度预检（不计算 critic 与熵），输出
-          缓存复用为该逻辑 batch 首次 PPO 计算的 ratio/KL/loss-scale；
-        - 正式梯度前向仍计算 actor + critic + 完整 PPO loss。
+        - 首次同形合同为 actor-only 无梯度预检（不计算 critic 与熵），仅用于
+          first recompute contract；
+        - 正式梯度前向同时产生当前 KL 所需 logprob 与 actor + critic PPO loss。
         """
         import math
 
@@ -5188,7 +5188,7 @@ class PPOAgent:
         if not logical_batches_by_epoch[0]:
             raise RuntimeError("v2 fast-exact 行为重放未生成逻辑 batch")
 
-        # ---- 首次同形合同：actor-only 无梯度预检，输出缓存复用 ----
+        # ---- 首次同形合同：actor-only 无梯度预检，仅用于 identity validation ----
         group_team_sizes = [
             [len(memory.actions[memory_index][2]) for memory_index, _trace in group]
             for group in restored
@@ -5197,7 +5197,6 @@ class PPOAgent:
             group_team_sizes,
             logical_cap=logical_cap,
         )
-        precheck_cache: dict[int, list[dict[str, torch.Tensor]]] = {}
         behavior_rows: list[tuple[float, float, float]] = []
         replayed_rows: list[tuple[float, float, float]] = []
         with torch.no_grad():
@@ -5213,7 +5212,6 @@ class PPOAgent:
                     self._v2_fast_exact_profile_add_time(
                         "PrecheckMs", precheck_started
                     )
-                precheck_cache[group_index] = outputs
                 assert len(outputs) == len(restored[group_index])
                 for output, (_memory_index, trace) in zip(
                     outputs, restored[group_index]
@@ -5282,52 +5280,12 @@ class PPOAgent:
                 self.optimizer.zero_grad()
                 for batch_offset, batch_groups in enumerate(window_batches):
                     logical_batch_count += 1
-                    # 无梯度 actor-only 预放：优先复用首次合同缓存，其余按组缓存。
-                    prepass_total_lp: list[torch.Tensor] = []
-                    prepass_old_lp: list[torch.Tensor] = []
-                    with torch.no_grad():
-                        for group_index in batch_groups:
-                            if group_index in precheck_cache:
-                                outputs = precheck_cache[group_index]
-                                precheck_reused += 1
-                            else:
-                                outputs = self._replay_v2_fast_exact_group(
-                                    _build_group(group_index), actor_only=True
-                                )
-                                precheck_cache[group_index] = outputs
-                            for output, (memory_index, _trace) in zip(
-                                outputs, restored[group_index]
-                            ):
-                                prepass_total_lp.append(
-                                    output["task"] + output["station"] + output["team"]
-                                )
-                                prepass_old_lp.append(
-                                    old_logprobs[memory_index]
-                                    .to(self.device)
-                                    .reshape(1)
-                                )
-                        batch_total_lp = torch.cat(prepass_total_lp).float()
-                        batch_old_lp = torch.cat(prepass_old_lp).float()
-                        _, safe_log_ratio, batch_ratios = (
-                            self.compute_stable_log_ratio_and_ratio(
-                                batch_total_lp, batch_old_lp
-                            )
-                        )
-                        batch_kl_values = (batch_ratios - 1.0) - safe_log_ratio
-                        batch_kl = batch_kl_values.mean()
-                        loss_scale = 0.01 if batch_kl > self.kl_early_stop else 1.0
-                        epoch_kl_sum += float(batch_kl_values.sum().item())
-                        epoch_samples += int(batch_kl_values.numel())
-                        metric_values["approx_kl"].append(
-                            batch_kl_values.detach().float()
-                        )
-                        metric_values["clip"].append(
-                            (torch.abs(batch_ratios - 1.0) > current_eps_clip)
-                            .float()
-                            .detach()
-                        )
-
-                    # 正式带梯度前向（actor + critic + 完整 PPO loss）。
+                    # formal replay 输出同时用于当前 KL 和 PPO loss，禁止跨 step 缓存 logits。
+                    formal_replays: list[
+                        tuple[int, Any, list[dict[str, torch.Tensor]]]
+                    ] = []
+                    formal_total_lp: list[torch.Tensor] = []
+                    formal_old_lp: list[torch.Tensor] = []
                     for group_index in batch_groups:
                         physical_group_count += 1
                         group_batch = _build_group(group_index)
@@ -5352,6 +5310,46 @@ class PPOAgent:
                                 )
                                 + float(len(outputs))
                             )
+                        formal_replays.append((group_index, group_batch, outputs))
+                        for output, (memory_index, _trace) in zip(
+                            outputs, restored[group_index]
+                        ):
+                            formal_total_lp.append(
+                                (
+                                    output["task"]
+                                    + output["station"]
+                                    + output["team"]
+                                ).detach()
+                            )
+                            formal_old_lp.append(
+                                old_logprobs[memory_index]
+                                .to(self.device)
+                                .reshape(1)
+                            )
+                    with torch.no_grad():
+                        batch_total_lp = torch.cat(formal_total_lp).float()
+                        batch_old_lp = torch.cat(formal_old_lp).float()
+                        _, safe_log_ratio, batch_ratios = (
+                            self.compute_stable_log_ratio_and_ratio(
+                                batch_total_lp, batch_old_lp
+                            )
+                        )
+                        batch_kl_values = (batch_ratios - 1.0) - safe_log_ratio
+                        batch_kl = batch_kl_values.mean()
+                        loss_scale = 0.01 if batch_kl > self.kl_early_stop else 1.0
+                        epoch_kl_sum += float(batch_kl_values.sum().item())
+                        epoch_samples += int(batch_kl_values.numel())
+                        metric_values["approx_kl"].append(
+                            batch_kl_values.detach().float()
+                        )
+                        metric_values["clip"].append(
+                            (torch.abs(batch_ratios - 1.0) > current_eps_clip)
+                            .float()
+                            .detach()
+                        )
+
+                    # 正式带梯度前向（actor + critic + 完整 PPO loss）。
+                    for group_index, group_batch, outputs in formal_replays:
                         sample_losses: list[torch.Tensor] = []
                         for local_index, (output, (memory_index, _trace)) in enumerate(
                             zip(outputs, restored[group_index])
@@ -5509,7 +5507,6 @@ class PPOAgent:
                 update_steps += 1
                 # actor-only 输出只对生成它们的策略参数版本有效。每次参数更新后
                 # 立即失效，防止后续累计窗口或 PPO epoch 使用旧策略计算 KL。
-                precheck_cache.clear()
                 # 窗口边界同步：模板字段张量在本 window 释放后可能被下一 window
                 # 的 build 直接复用；在无同步的异步执行下（autograd 引擎跨 stream）
                 # 会与上一 window 的尾部 kernel 竞争同一块显存，表现为后续 GAT
