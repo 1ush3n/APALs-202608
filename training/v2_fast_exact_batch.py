@@ -351,7 +351,7 @@ _SNAPSHOT_REQUIRED_KEYS = (
 class GPUExactBatchBuilder:
     """生产实现：GPU 常驻图模板原位更新，支持组内异质 worker 数。
 
-    - 模板缓存键含数据集、组大小、每图节点数、worker 拓扑与特征布局版本；
+    - 模板缓存键含数据集、组大小、每图节点数与特征布局版本（worker 拓扑已解耦并按 (dataset_idx, topology_key) 独立缓存）；
     - 布局元数据（各节点类型 ptr / 每图节点数）在模板创建阶段提取为 CPU
       整数元数据并挂在模板上，热路径不再对 GPU 张量执行 ``.cpu().tolist()``；
     - 动态特征与动态边通过批量张量原位覆写，静态拓扑与 batch 向量常驻；

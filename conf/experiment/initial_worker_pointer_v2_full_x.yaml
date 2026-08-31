@@ -1,4 +1,4 @@
-defaults:
+﻿defaults:
   - /model/hb_gat_pn@_global_
   - /env/apal_default@_global_
   - /env/initial_schedule@_global_
@@ -9,8 +9,8 @@ defaults:
   - _self_
 
 experiment:
-  experiment_name: initial_worker_pointer_v2_fast_exact_pilot
-  runs_root: runs/worker_pointer_v2_fast_exact_pilot
+  experiment_name: initial_worker_pointer_v2_full_x
+  runs_root: results/01_initial_main
   checkpoint_root: checkpoints
   evaluation_protocol: training_auto_eval_only
   train_data_path_or_dir: data/scale_400_800_datasets
@@ -32,26 +32,29 @@ model:
   team_selection_mode: autoregressive_pressure_v2_fast_exact
   policy_action_scope: operation_station_worker
   actor_context_mode: attention
+  use_shared_trunk: false
   worker_pointer_context_version: pressure_v2_normwork_headcount_physicalwait_v1
   worker_pointer_pressure_temperature: 1.0
   worker_pointer_supply_epsilon: 1.0e-6
   worker_pointer_wait_discount_mode: physical_wait_exponential_v1
   worker_pointer_v2_init_seed_offset: 1009
-  worker_pointer_v2_dynamic_eft_features: false
+  worker_pointer_v2_dynamic_eft_features: true
   worker_pointer_v2_dynamic_eft_feature_clip: 10.0
-  worker_pointer_v2_fast_default_num_envs: 4
-  worker_pointer_v2_explicit_team_state: false
-  worker_pointer_v2_marginal_scarcity: false
+  worker_pointer_v2_fast_default_num_envs: 16
+  worker_pointer_v2_explicit_team_state: true
+  worker_pointer_v2_marginal_scarcity: true
   worker_pointer_v2_marginal_scarcity_clip: 10.0
-  worker_pointer_v2_interaction_residual: false
-  worker_pointer_v2_next_frontier_pressure: false
-  conditional_head_baseline_mode: "off"
+  worker_pointer_v2_interaction_residual: true
+  worker_pointer_v2_next_frontier_pressure: true
+  conditional_head_baseline_mode: "factorized"
 
 train:
   batch_size: 256
   accumulation_steps: 16
-  num_envs: 4
+  num_envs: 16
   lightning_precision: bf16-mixed
+  conditional_head_value_coef: 1.0
+  max_episodes: 60
   eval_freq: 1
   eval_temperature: 0.0
   async_eval_enabled: true

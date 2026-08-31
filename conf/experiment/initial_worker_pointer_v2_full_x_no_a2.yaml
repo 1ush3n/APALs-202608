@@ -1,0 +1,9 @@
+﻿defaults:
+  - /experiment/initial_worker_pointer_v2_full_x@_global_
+  - _self_
+
+experiment:
+  experiment_name: initial_worker_pointer_v2_full_x_no_a2
+
+model:
+  worker_pointer_v2_marginal_scarcity: false

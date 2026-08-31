@@ -392,12 +392,17 @@ def _two_sample_memory(agent: PPOAgent, env_a: AirLineEnv_Graph, env_b: AirLineE
     )
 
 
+@pytest.mark.parametrize("precision", ["32-true", "bf16-mixed"])
 def test_fast_exact_logical_batch_v1_matches_physical_reference(
     monkeypatch: pytest.MonkeyPatch,
+    precision: str,
 ) -> None:
+    if precision == "bf16-mixed" and not torch.cuda.is_available():
+        pytest.skip("bf16 parity 测试需要 CUDA 设备")
     overrides = _fast_exact_overrides()
     overrides["worker_pointer_v2_fast_replay_batching"] = "logical_batch_v1"
     overrides["worker_pointer_v2_logical_batch_cap"] = 2
+    overrides["lightning_precision"] = precision
     with temporary_config(configs, overrides):
         env_a = AirLineEnv_Graph(DATA_PATH, seed=42)
         env_b = AirLineEnv_Graph(DATA_PATH, seed=43)
@@ -434,13 +439,14 @@ def test_fast_exact_logical_batch_v1_matches_physical_reference(
         )
         logical_outputs = agent._replay_v2_fast_exact_group(logical_batch)
 
+        tolerance = 1.0e-3 if precision == "bf16-mixed" else 1.0e-4
         for index, physical_group in enumerate(physical_outputs):
             for key in ("task", "station", "team", "state_value", "entropy", "normalized_entropy"):
                 torch.testing.assert_close(
                     logical_outputs[index][key].float(),
                     physical_group[0][key].float(),
                     rtol=0.0,
-                    atol=1.0e-4,
+                    atol=tolerance,
                 )
 
         replay_calls: list[tuple[int, bool]] = []
@@ -467,6 +473,144 @@ def test_fast_exact_logical_batch_v1_matches_physical_reference(
 
         assert (2, False) in replay_calls
         assert metrics["V2/FastExact/PhysicalGroupCount"] == 2.0
+        if precision == "bf16-mixed":
+            assert metrics["PointerV2/AutocastBF16"] == 1.0
+            assert metrics["V2/FirstContractTotalMaxAE"] <= 1.0e-3
+        else:
+            assert metrics["PointerV2/AutocastBF16"] == 0.0
+            assert metrics["V2/FirstContractTotalMaxAE"] <= 1.0e-4
+
+
+def test_fast_exact_logical_batch_v1_mixed_datasets_bucketed_correctly_and_matches_physical_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """生产 400-800 混合数据集场景：同一 logical batch 内不同 dataset_idx 必须正确分桶、不跨图混淆且保持 exact 等价。"""
+    overrides = _fast_exact_overrides()
+    overrides["worker_pointer_v2_fast_replay_batching"] = "logical_batch_v1"
+    overrides["worker_pointer_v2_logical_batch_cap"] = 4
+    overrides["worker_pointer_v2_fast_replay_encoder_batch_cap"] = 16
+    dataset_paths = [DATA_PATH, DATA_PATH.parent / "680.csv"]
+    with temporary_config(configs, overrides):
+        env = AirLineEnv_Graph(dataset_paths, seed=42)
+        agent = _make_agent()
+
+        # 生成 4 个样本：数据集 0 产生 2 个，数据集 1 产生 2 个
+        env.switch_dataset(0)
+        res0 = _rollout_single_step(agent, env)
+        res1 = _rollout_single_step(agent, env)
+        env.switch_dataset(1)
+        res2 = _rollout_single_step(agent, env)
+        res3 = _rollout_single_step(agent, env)
+
+        memory = Memory()
+        for source, group_id in (
+            (res0[0], (0, 0)),
+            (res1[0], (0, 1)),
+            (res2[0], (1, 0)),
+            (res3[0], (1, 1)),
+        ):
+            memory.states.extend(source.states)
+            memory.actions.extend(source.actions)
+            memory.logprobs.extend(source.logprobs)
+            memory.masks.extend(source.masks)
+            memory.values.extend(source.values)
+            memory.worker_pointer_v2_behavior_traces.extend(
+                [dataclasses.replace(source.worker_pointer_v2_behavior_traces[0], group_id=group_id)]
+            )
+
+        b_task = torch.cat([res0[1], res1[1], res2[1], res3[1]])
+        b_station = torch.cat([res0[2], res1[2], res2[2], res3[2]])
+        b_team = torch.cat([res0[3], res1[3], res2[3], res3[3]])
+        old_logprobs = torch.tensor([res0[4].item(), res1[4].item(), res2[4].item(), res3[4].item()])
+        rewards = torch.tensor([0.0, 0.0, 0.0, 0.0])
+        advantages = torch.tensor([1.0, 1.0, 1.0, 1.0])
+
+        builder = GPUExactBatchBuilder(config=configs, env=env, device=_DEVICE)
+
+        # 1. 逐样本 Physical Replay 基准
+        physical_outputs = []
+        for idx in range(4):
+            pbatch = agent._build_v2_fast_exact_group(
+                memory=memory,
+                memory_indices=[idx],
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                old_logprobs=old_logprobs,
+                rewards=rewards,
+                advantages=advantages,
+                fast_exact_builder=builder,
+            )
+            physical_outputs.append(agent._replay_v2_fast_exact_group(pbatch)[0])
+
+        # 2. 逻辑分桶 Replay：数据集 0 (indices 0, 1) 与 数据集 1 (indices 2, 3)
+        lbatch0 = agent._build_v2_fast_exact_group(
+            memory=memory,
+            memory_indices=[0, 1],
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            old_logprobs=old_logprobs,
+            rewards=rewards,
+            advantages=advantages,
+            fast_exact_builder=builder,
+        )
+        loutputs0 = agent._replay_v2_fast_exact_group(lbatch0)
+
+        lbatch1 = agent._build_v2_fast_exact_group(
+            memory=memory,
+            memory_indices=[2, 3],
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            old_logprobs=old_logprobs,
+            rewards=rewards,
+            advantages=advantages,
+            fast_exact_builder=builder,
+        )
+        loutputs1 = agent._replay_v2_fast_exact_group(lbatch1)
+
+        combined_logical = loutputs0 + loutputs1
+        for idx in range(4):
+            for key in ("task", "station", "team", "state_value", "entropy", "normalized_entropy"):
+                torch.testing.assert_close(
+                    combined_logical[idx][key].float(),
+                    physical_outputs[idx][key].float(),
+                    rtol=0.0,
+                    atol=1.0e-4,
+                )
+
+        # 3. 完整 Update 过程验证分桶融合与指标健全
+        formal_replay_calls: list[tuple[int, bool]] = []
+        original_replay = agent._replay_v2_fast_exact_group
+
+        def capture_replay(fast_batch, *, actor_only=False):
+            formal_replay_calls.append((fast_batch.group_size, actor_only))
+            return original_replay(fast_batch, actor_only=actor_only)
+
+        monkeypatch.setattr(agent, "_replay_v2_fast_exact_group", capture_replay)
+
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        # 4 个 physical group 被分桶融合为 2 次 formal replay 调用 (每个大小为 2)
+        formal_fused_calls = [c for c in formal_replay_calls if not c[1]]
+        assert len(formal_fused_calls) == 2
+        assert all(call[0] == 2 for call in formal_fused_calls)
+        assert metrics["V2/FastExact/PhysicalGroupCount"] == 4.0
+        assert metrics["V2/FirstContractTotalMaxAE"] <= 1.0e-4
+        assert metrics["Gradient/Finite"] == 1.0
 
 
 def test_fast_exact_formal_graphs_survive_multiple_physical_groups() -> None:

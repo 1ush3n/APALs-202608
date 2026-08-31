@@ -7,6 +7,7 @@ ModelSpec、training_spec 与统一模式判断函数识别。
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
@@ -271,3 +272,56 @@ def test_fast_exact_pilot_keeps_async_validation_and_effective_batch_contract() 
     assert target.async_eval_enabled is True
     assert target.async_eval_worker_count == 2
     assert target.async_eval_submit_every_episodes == 2
+    assert target.worker_pointer_v2_fast_replay_batching == "logical_batch_v1"
+    assert target.worker_pointer_v2_fast_replay_encoder_batch_cap == 16
+
+
+def test_fast_exact_pilot_v0_v1_inherit_logical_batch_and_match_except_team_state() -> None:
+    def _compose(exp_name: str) -> Config:
+        parsed = ParsedHydraArgs(
+            experiment=exp_name,
+            hardware="linux_server",
+            resume=False,
+            resume_checkpoint_path=None,
+            config_overrides=(),
+            final_overrides={"num_envs": 4},
+            explicit_fields={"num_envs"},
+        )
+        hydra_cfg = compose_hydra_config(parsed, config_dir=CONF_DIR)
+        cfg = Config()
+        apply_hydra_config(hydra_cfg, target=cfg, config_paths=(str(CONF_DIR),))
+        return cfg
+
+    v0_cfg = _compose("initial_worker_pointer_v2_fast_exact_pilot_v0")
+    v1_cfg = _compose("initial_worker_pointer_v2_fast_exact_pilot_v1")
+
+    # 1. 继承验证：V0/V1 均必须继承 P2 logical_batch_v1 与 cap=16
+    assert v0_cfg.worker_pointer_v2_fast_replay_batching == "logical_batch_v1"
+    assert v0_cfg.worker_pointer_v2_fast_replay_encoder_batch_cap == 16
+    assert v1_cfg.worker_pointer_v2_fast_replay_batching == "logical_batch_v1"
+    assert v1_cfg.worker_pointer_v2_fast_replay_encoder_batch_cap == 16
+
+    # 2. 状态变量控制：V0 为 False，V1 为 True
+    assert v0_cfg.worker_pointer_v2_explicit_team_state is False
+    assert v1_cfg.worker_pointer_v2_explicit_team_state is True
+
+    # 3. 严格等价：除 explicit_team_state 外，所有配置属性必须完全一致
+    differing_keys = []
+    for key in dir(v0_cfg):
+        if key.startswith("_"):
+            continue
+        val_v0 = getattr(v0_cfg, key)
+        if callable(val_v0):
+            continue
+        val_v1 = getattr(v1_cfg, key)
+        if val_v0 != val_v1 and not (
+            isinstance(val_v0, float)
+            and isinstance(val_v1, float)
+            and math.isnan(val_v0)
+            and math.isnan(val_v1)
+        ):
+            differing_keys.append(key)
+
+    assert differing_keys == ["worker_pointer_v2_explicit_team_state"], (
+        f"V0 与 V1 出现非预期配置差异: {differing_keys}"
+    )

@@ -61,6 +61,8 @@ train:
   async_eval_heartbeat_interval_sec: 30.0
   async_eval_stale_timeout_sec: 3600.0
   async_eval_use_cached_observation: true
+  worker_pointer_v2_fast_replay_batching: logical_batch_v1
+  worker_pointer_v2_fast_replay_encoder_batch_cap: 16
   worker_pointer_v2_replay_mode: behavior_group_exact_gpu_template_v2
   worker_pointer_v2_logical_batch_cap: 256
   worker_pointer_v2_rollout_group_upper_bound: 16

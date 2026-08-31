@@ -68,6 +68,7 @@ def test_fast_exact_logical_batch_ignores_platform_cap() -> None:
     """Fast-Exact 逻辑 batch 唯一来源是最终 batch_size，不受平台 cap 限幅。"""
     cfg = Config()
     cfg.team_selection_mode = "autoregressive_pressure_v2_fast_exact"
+    cfg.worker_pointer_v2_replay_mode = "behavior_group_exact_gpu_template_v2"
     cfg.ppo_batch_size_cap = 4
     cfg.worker_pointer_v2_logical_batch_cap = 64
     assert resolve_effective_ppo_batch_size(256, cfg) == 256
@@ -84,5 +85,6 @@ def test_legacy_mode_batch_still_respects_platform_cap() -> None:
 def test_legacy_v2_batch_ignores_platform_cap() -> None:
     cfg = Config()
     cfg.team_selection_mode = "autoregressive_pressure_v2"
+    cfg.worker_pointer_v2_replay_mode = "behavior_group_exact_v1"
     cfg.ppo_batch_size_cap = 4
     assert resolve_effective_ppo_batch_size(256, cfg) == 256

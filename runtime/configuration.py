@@ -307,10 +307,13 @@ def validate_runtime_config(config: Config) -> None:
         )
     conditional_mode = str(config.conditional_head_baseline_mode)
     if conditional_mode in {"diagnostic", "factorized"}:
-        if config.team_selection_mode != "autoregressive_pressure_v2":
+        if config.team_selection_mode not in {
+            "autoregressive_pressure_v2",
+            "autoregressive_pressure_v2_fast_exact",
+        }:
             raise ValueError(
                 "conditional_head_baseline_mode=diagnostic/factorized 要求 "
-                "team_selection_mode=autoregressive_pressure_v2"
+                "team_selection_mode=autoregressive_pressure_v2 或 autoregressive_pressure_v2_fast_exact"
             )
         if config.policy_action_scope != "operation_station_worker":
             raise ValueError(

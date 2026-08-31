@@ -27,6 +27,8 @@ methods:
   - full_joint
   - operation_station
   - operation_only
+  - operation_station_ea
+  - operation_only_ea
   - fixed_preallocation
   - static_topq
   - homogeneous_graphsage
@@ -62,11 +64,25 @@ ablations:
     overrides:
       - policy_action_scope=operation_station
       - policy_observation_scope=task_station
+      - action_completion_mode=earliest_finish
   operation_only:
     experiment: scale_400_800_schedule
     overrides:
       - policy_action_scope=operation
       - policy_observation_scope=task
+      - action_completion_mode=earliest_finish
+  operation_station_ea:
+    experiment: scale_400_800_schedule
+    overrides:
+      - policy_action_scope=operation_station
+      - policy_observation_scope=task_station
+      - action_completion_mode=earliest_availability
+  operation_only_ea:
+    experiment: scale_400_800_schedule
+    overrides:
+      - policy_action_scope=operation
+      - policy_observation_scope=task
+      - action_completion_mode=earliest_availability
   fixed_preallocation:
     experiment: scale_400_800_schedule
     overrides:
@@ -98,6 +114,8 @@ checkpoints:
     "680": checkpoints/initial_schedule/best_680.ckpt
   operation_station: {}
   operation_only: {}
+  operation_station_ea: {}
+  operation_only_ea: {}
   fixed_preallocation: {}
   static_topq: {}
   homogeneous_graphsage: {}

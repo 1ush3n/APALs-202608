@@ -347,6 +347,40 @@ def test_worker_pointer_v2_b0_hydra_diff_enables_diagnostic_heads_only() -> None
     assert cfg.conditional_head_baseline_mode == "diagnostic"
 
 
+def test_worker_pointer_v2_b1_hydra_diff_enables_factorized_heads_only() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_b1"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_explicit_team_state is False
+    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "factorized"
+
+
+def test_worker_pointer_v2_c1_hydra_diff_enables_next_frontier_only() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_c1"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_explicit_team_state is False
+    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is True
+    assert cfg.conditional_head_baseline_mode == "off"
+
+
 def test_unsupported_platform_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="不支持的训练平台"):
         resolve_platform_hardware_config(system_name="Darwin")

@@ -966,7 +966,7 @@ python train.py \
 
 常用三类结构消融：
 
-节点范围对比消融的定义如下：`operation_only` 仅向策略网络编码工序节点，`operation_station` 仅编码工序和站位节点；工人、站位的真实负载、等待时间和可行性仍由环境用于动作掩码与完工时间计算，但不会作为这两种策略的图节点输入。主方法 `full_joint` 及其他方法保持 `policy_observation_scope=full`。
+节点范围对比消融的定义如下：`operation_only` 仅向策略网络编码工序节点，`operation_station` 仅编码工序和站位节点；工人、站位的真实负载、等待时间和可行性仍由环境用于动作掩码与完工时间计算，但不会作为这两种策略的图节点输入。旧名称 `operation_only`、`operation_station` 使用 EFT；新增 `operation_only_ea`、`operation_station_ea` 使用 EA。主方法 `full_joint` 及其他方法保持 `policy_observation_scope=full`。
 
 ```bash
 python train.py \
@@ -983,6 +983,28 @@ python train.py \
   experiment_name=scale_400_800_operation_station \
   enable_multi_benchmark_eval=false
 ```
+
+EA 变体从头训练时使用独立的 run ID 和结果目录：
+
+```bash
+python train.py \
+  experiment=scale_400_800_schedule \
+  policy_action_scope=operation \
+  policy_observation_scope=task \
+  action_completion_mode=earliest_availability \
+  experiment_name=scale_400_800_operation_only_ea \
+  enable_multi_benchmark_eval=false
+
+python train.py \
+  experiment=scale_400_800_schedule \
+  policy_action_scope=operation_station \
+  policy_observation_scope=task_station \
+  action_completion_mode=earliest_availability \
+  experiment_name=scale_400_800_operation_station_ea \
+  enable_multi_benchmark_eval=false
+```
+
+把旧 checkpoint 临时切换到 EA 只属于诊断评估；正式论文结果必须来自 EA 训练并使用 EA 评估，不得将 checkpoint 换补全器结果登记为主表结果。
 
 ```bash
 python train.py \
