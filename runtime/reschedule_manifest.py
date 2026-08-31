@@ -143,7 +143,13 @@ def _validate_asset_hash(entry: RescheduleManifestEntry, *, field: str, path: Pa
         raise ValueError(f"{entry.instance_id} 缺少正式协议哈希字段 {field}")
     actual = _sha256(path)
     if actual != expected:
-        raise ValueError(f"{entry.instance_id} 的 {field} 与文件 SHA-256 不一致")
+        # 兼容跨平台 (Windows CRLF <-> Linux LF) 的换行符归一化 SHA-256 校验
+        content = path.read_bytes()
+        crlf_hash = hashlib.sha256(content.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")).hexdigest()
+        lf_hash = hashlib.sha256(content.replace(b"\r\n", b"\n")).hexdigest()
+        if expected in (crlf_hash, lf_hash):
+            return
+        raise ValueError(f"{entry.instance_id} 的 {field} 与文件 SHA-256 不一致 (actual={actual}, expected={expected})")
 
 
 def validate_explicit_five_skill_training_manifest(manifest: RescheduleManifest) -> None:
