@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """WorkerPointer v2 FULL-X 自适应 GPU MAX-FILL 调优扫描器。
 
 三阶段扫描架构：
@@ -425,9 +425,9 @@ def run_adaptive_max_fill_sweep(
             batch_size=256,
             accumulation_steps=16,
             num_envs=4,
-            rollout_episodes=2,
+            rollout_episodes=1,
             seed=seed,
-            warmup=True,
+            warmup=False,
         )
         g1_results.append(res)
         if res.get("status") == "OOM":
@@ -473,9 +473,9 @@ def run_adaptive_max_fill_sweep(
                 batch_size=256,
                 accumulation_steps=16,
                 num_envs=4,
-                rollout_episodes=2,
+                rollout_episodes=1,
                 seed=seed,
-                warmup=True,
+                warmup=False,
             )
             gate_details.append(wc_res)
             if wc_res.get("status") != "SUCCESS" or wc_res.get("OOM", 0) == 1:
@@ -530,9 +530,9 @@ def run_adaptive_max_fill_sweep(
             batch_size=batch,
             accumulation_steps=accum,
             num_envs=4,
-            rollout_episodes=2,
+            rollout_episodes=1,
             seed=seed,
-            warmup=True,
+            warmup=False,
         )
         g2_results.append(res)
         if res.get("status") == "OOM":
@@ -579,9 +579,9 @@ def run_adaptive_max_fill_sweep(
             batch_size=best_g2_pair[0],
             accumulation_steps=best_g2_pair[1],
             num_envs=envs,
-            rollout_episodes=2,
+            rollout_episodes=1,
             seed=seed,
-            warmup=True,
+            warmup=False,
         )
         g3_results.append(res)
         if res.get("status") != "SUCCESS":
