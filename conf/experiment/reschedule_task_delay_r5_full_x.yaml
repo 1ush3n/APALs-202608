@@ -52,7 +52,7 @@ reschedule_task_delay:
   async_eval_enabled: true
   async_eval_device: cuda
   async_eval_worker_count: 3
-  async_eval_queue_capacity: 4
+  async_eval_queue_capacity: 3
   async_eval_submit_every_episodes: 2
   async_eval_wait_on_finish: true
   async_eval_failure_policy: fail
