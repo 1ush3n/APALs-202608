@@ -27,6 +27,7 @@ model:
   worker_pointer_v2_init_seed_offset: 1009
   worker_pointer_v2_dynamic_eft_features: true
   worker_pointer_v2_dynamic_eft_feature_clip: 10.0
+  worker_pointer_v2_fast_default_num_envs: 4
   worker_pointer_v2_explicit_team_state: true
   worker_pointer_v2_marginal_scarcity: true
   worker_pointer_v2_marginal_scarcity_clip: 10.0
@@ -76,5 +77,5 @@ train:
   worker_pointer_v2_behavior_replay: true
   worker_pointer_v2_replay_mode: behavior_group_exact_gpu_template_v2
   worker_pointer_v2_logical_batch_cap: 256
-  worker_pointer_v2_rollout_group_upper_bound: 16
+  worker_pointer_v2_rollout_group_upper_bound: 4
   worker_pointer_v2_strict_gpu_replay: true
