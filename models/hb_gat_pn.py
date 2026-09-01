@@ -334,6 +334,21 @@ class StationSelector(nn.Module):
         self.task_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
         self.station_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
         self.attn = nn.Linear(config.hidden_dim, 1)
+        self.baseline_station_proj = None
+        if bool(getattr(config, "reschedule_baseline_identity_conditioning", False)):
+            with torch.random.fork_rng(
+                devices=(
+                    list(range(torch.cuda.device_count()))
+                    if torch.cuda.is_available()
+                    else []
+                ),
+                enabled=True,
+            ):
+                torch.manual_seed(int(getattr(config, "seed", 42)) + 1701)
+                self.baseline_station_proj = nn.Linear(
+                    1, config.hidden_dim, bias=False
+                )
+            nn.init.zeros_(self.baseline_station_proj.weight)
         
         # Ablation Fallback
         self.ablation_mlp = nn.Sequential(
@@ -342,11 +357,26 @@ class StationSelector(nn.Module):
             nn.Linear(64, 1)
         )
         
-    def forward(self, selected_task_emb, station_embs, mask=None):
+    def forward(
+        self,
+        selected_task_emb,
+        station_embs,
+        mask=None,
+        station_baseline_match=None,
+    ):
         B, S, H = station_embs.size()
         
         t_proj = self.task_proj(selected_task_emb).unsqueeze(1) # [B, 1, H]
         s_proj = self.station_proj(station_embs)                # [B, S, H]
+        if self.baseline_station_proj is not None:
+            if station_baseline_match is None:
+                raise ValueError("BIC station flag is required")
+            assert station_baseline_match.shape == (B, S, 1)
+            assert torch.isfinite(station_baseline_match).all()
+            assert ((station_baseline_match == 0.0) | (station_baseline_match == 1.0)).all()
+            s_proj = s_proj + self.baseline_station_proj(
+                station_baseline_match.to(dtype=s_proj.dtype)
+            )
         
         from configs import configs
         if getattr(configs, 'ablation_no_pointer', False):
@@ -443,7 +473,14 @@ class WorkerPointer(nn.Module):
                     nn.init.zeros_(self.v2_next_frontier_key_proj.weight)
                 if self.use_explicit_team_state:
                     base_proj = self.v2_query_proj
-                    with torch.random.fork_rng(devices=[], enabled=True):
+                    with torch.random.fork_rng(
+                        devices=(
+                            list(range(torch.cuda.device_count()))
+                            if torch.cuda.is_available()
+                            else []
+                        ),
+                        enabled=True,
+                    ):
                         torch.manual_seed(local_seed + 1)
                         expanded_proj = nn.Linear(hidden_dim * 6 + 19, hidden_dim)
                     with torch.no_grad():
@@ -453,6 +490,18 @@ class WorkerPointer(nn.Module):
                         expanded_proj.weight[:, hidden_dim * 6 + 17 :].zero_()
                         expanded_proj.bias.copy_(base_proj.bias)
                     self.v2_query_proj = expanded_proj
+                self.baseline_worker_proj = None
+                if bool(
+                    getattr(config, "reschedule_baseline_identity_conditioning", False)
+                ):
+                    with torch.random.fork_rng(devices=[], enabled=True):
+                        torch.manual_seed(local_seed + 1701)
+                        self.baseline_worker_proj = nn.Linear(
+                            1, hidden_dim, bias=False
+                        )
+                    nn.init.zeros_(self.baseline_worker_proj.weight)
+        else:
+            self.baseline_worker_proj = None
 
     def forward_choice(self, task_emb, worker_embs, mask=None, current_team_emb=None):
         """选择下一个工人"""
@@ -714,6 +763,7 @@ class WorkerPointer(nn.Module):
         dynamic_eft_features: torch.Tensor | None = None,
         candidate_skills: torch.Tensor | None = None,
         task_required_skills: torch.Tensor | None = None,
+        worker_baseline_member: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """以增强状态表达执行原始 ``tanh(query + key)`` pointer 打分。"""
 
@@ -770,6 +820,12 @@ class WorkerPointer(nn.Module):
             assert dynamic_eft_features.shape == (batch_size, num_workers, 2)
             if not hasattr(self, "v2_eft_proj"):
                 raise RuntimeError("动态 EFT 特征未在当前 WorkerPointer v2 中启用")
+        if self.baseline_worker_proj is not None:
+            if worker_baseline_member is None:
+                raise ValueError("BIC worker flag is required")
+            assert worker_baseline_member.shape == (batch_size, num_workers, 1)
+            assert torch.isfinite(worker_baseline_member).all()
+            assert ((worker_baseline_member == 0.0) | (worker_baseline_member == 1.0)).all()
         with torch.amp.autocast(device_type=task_emb.device.type, enabled=False):
             team_repr = self.v2_team_representation(team_state)
             assert team_state.selected_max_wait.shape == (batch_size, 1)
@@ -862,6 +918,11 @@ class WorkerPointer(nn.Module):
                 )
                 dynamic_keys = dynamic_keys + self.v2_next_frontier_key_proj(
                     next_frontier_candidate_pressure
+                )
+            if self.baseline_worker_proj is not None:
+                assert worker_baseline_member is not None
+                dynamic_keys = dynamic_keys + self.baseline_worker_proj(
+                    worker_baseline_member.float()
                 )
             candidate_repr = cache.candidate_keys + dynamic_keys
             base_scores = self.v2_attn(torch.tanh(query + candidate_repr)).squeeze(-1)  # [B,N]

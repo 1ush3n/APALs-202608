@@ -458,6 +458,7 @@ def evaluate_reschedule_model(
                     "deterministic": temperature == 0.0,
                     "temperature": temperature,
                     "is_eval": True,
+                    "baseline_snapshot": env.get_state_snapshot(),
                 }
                 if skip_value_estimation:
                     selection_kwargs.update(

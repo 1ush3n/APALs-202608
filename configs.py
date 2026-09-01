@@ -198,6 +198,7 @@ class Config:
     # 预测-反应式重调度 (Baseline-guided Rescheduling)
     # ------------------
     enable_reschedule_mode: bool = False
+    reschedule_baseline_identity_conditioning: bool = False
     reschedule_manifest_path: str = ""
     reschedule_eval_instance_id: str = ""
     reschedule_baseline_schedule_path: str = "results/final_schedule.csv"

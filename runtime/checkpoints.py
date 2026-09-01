@@ -52,6 +52,7 @@ class ModelSpec:
     worker_pointer_v2_marginal_scarcity_clip: float = 10.0
     worker_pointer_v2_interaction_residual: bool = False
     worker_pointer_v2_next_frontier_pressure: bool = False
+    reschedule_baseline_identity_conditioning: bool = False
     conditional_head_baseline_mode: str = "off"
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
@@ -188,6 +189,9 @@ def build_model_spec(config: Config) -> ModelSpec:
         num_skill_types=worker_layout.num_skill_types,
         worker_skill_feature_slots=worker_layout.skill_slots,
         worker_feature_layout_version=WORKER_FEATURE_LAYOUT_VERSION,
+        reschedule_baseline_identity_conditioning=bool(
+            getattr(config, "reschedule_baseline_identity_conditioning", False)
+        ),
         **pointer_v2_fields,
         **apcf_fields,
     )
@@ -389,6 +393,13 @@ def _infer_worker_pointer_v2_architecture(
             key.startswith("worker_head.v2_next_frontier_query_proj.")
             for key in state_dict
         ),
+        "reschedule_baseline_identity_conditioning": any(
+            key.startswith((
+                "station_head.baseline_station_proj.",
+                "worker_head.baseline_worker_proj.",
+            ))
+            for key in state_dict
+        ),
     }
 
 
@@ -546,6 +557,7 @@ def apply_checkpoint_model_spec(
             "worker_pointer_v2_interaction_residual",
             "worker_pointer_v2_next_frontier_pressure",
             "worker_pointer_v2_fast_replay_batching",
+            "reschedule_baseline_identity_conditioning",
         )
         explicit = explicit_fields or set()
         if not (
@@ -612,6 +624,9 @@ def apply_checkpoint_model_spec(
         "team_selection_mode": spec.team_selection_mode,
         "graph_encoder_mode": spec.graph_encoder_mode,
         "actor_context_mode": spec.actor_context_mode,
+        "reschedule_baseline_identity_conditioning": bool(
+            getattr(spec, "reschedule_baseline_identity_conditioning", False)
+        ),
     }
     explicit_conditional_mode = (
         "conditional_head_baseline_mode" in (explicit_fields or set())

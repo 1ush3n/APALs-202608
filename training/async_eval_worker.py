@@ -318,6 +318,7 @@ def _evaluate_initial_multiscale_job(
                     temperature=0.0,
                     is_eval=True,
                     compute_value=False,
+                    baseline_snapshot=env.get_state_snapshot(),
                 )
                 if action_ret[0] is None:
                     invalid_step_count += 1

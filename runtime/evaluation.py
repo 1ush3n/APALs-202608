@@ -195,6 +195,7 @@ def evaluate_model(
                         deterministic=(temperature == 0.0),
                         temperature=temperature,
                         is_eval=True,
+                        baseline_snapshot=env.get_state_snapshot(),
                     )
                     if action_ret[0] is None:
                         break
@@ -346,6 +347,7 @@ def evaluate_initial_multi_benchmark(agent, config_obj=configs, writer=None, cur
                     deterministic=True,
                     temperature=0.0,
                     is_eval=True,
+                    baseline_snapshot=env.get_state_snapshot(),
                 )
                 if action_ret[0] is None:
                     invalid_step_count += 1

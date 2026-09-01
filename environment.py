@@ -42,6 +42,7 @@ from utils.reschedule import (
 )
 from utils.reschedule_r5 import sample_r5_training_scenario
 from runtime.reschedule_manifest import resolve_manifest_entry_for_data
+from utils.baseline_identity import build_baseline_team_edge_index
 
 Action = Tuple[int, int, List[int]]
 
@@ -133,6 +134,7 @@ class AirLineEnv_Graph(gym.Env):
         # 事件队列 (Priority Queue Engine)
         self.event_queue = EventQueue(max_size=10000)
         self.baseline_schedule: BaselineSchedule | None = None
+        self._baseline_team_edge_index: np.ndarray | None = None
         self.reschedule_scenario: RescheduleScenario | None = None
         self.reschedule_start_time = 0.0
         self.reschedule_lower_bound = 0.0
@@ -208,6 +210,7 @@ class AirLineEnv_Graph(gym.Env):
         self.constraint_engine = ctx['constraint_engine']
         self.is_critical = ctx['is_critical']
         self.baseline_schedule = None
+        self._baseline_team_edge_index = None
         self.reschedule_scenario = None
         
         # 状态变量初始化
@@ -362,6 +365,9 @@ class AirLineEnv_Graph(gym.Env):
             sample = sorted(missing)[:5]
             raise ValueError(f"baseline 调度缺少当前数据集任务: {sample}")
         self.baseline_schedule = baseline
+        self._baseline_team_edge_index = build_baseline_team_edge_index(
+            baseline, num_tasks=self.num_tasks
+        )
         return baseline
 
     def _build_reschedule_scenario(self, baseline: BaselineSchedule) -> RescheduleScenario:
@@ -1943,6 +1949,7 @@ class AirLineEnv_Graph(gym.Env):
                 'baseline_station': base_station,
                 'baseline_team_size': base_team_size,
                 'baseline_frozen': base_frozen,
+                'baseline_team_edge_index': self._baseline_team_edge_index,
             })
         return snapshot
         

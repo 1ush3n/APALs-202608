@@ -171,6 +171,45 @@ class APALRolloutService:
         memory.anchor_proposal_traces.append(anchor_proposal_trace)
         memory.worker_pointer_v2_behavior_traces.append(worker_pointer_v2_behavior_trace)
 
+    @staticmethod
+    def _baseline_identity_metrics(memories: list[Memory]) -> dict[str, float]:
+        station_total = 0
+        station_preserved = 0
+        worker_total = 0
+        worker_member = 0
+        for memory in memories:
+            for state, action in zip(memory.states, memory.actions, strict=True):
+                if not isinstance(state, dict) or action is None:
+                    continue
+                task_id, station_id, team = action
+                baseline_stations = state.get("baseline_station")
+                if baseline_stations is not None and 0 <= int(task_id) < len(baseline_stations):
+                    baseline_station = int(baseline_stations[int(task_id)])
+                    if int(station_id) >= 0 and baseline_station >= 0:
+                        station_total += 1
+                        station_preserved += int(int(station_id) == baseline_station)
+                edge_index = state.get("baseline_team_edge_index")
+                if edge_index is None:
+                    continue
+                edge_array = np.asarray(edge_index, dtype=np.int64)
+                if edge_array.ndim != 2 or edge_array.shape[0] != 2:
+                    raise ValueError("baseline_team_edge_index 形状必须为 [2,E]")
+                baseline_team = set(
+                    int(worker_id)
+                    for worker_id in edge_array[1, edge_array[0] == int(task_id)]
+                )
+                for worker_id in team:
+                    worker_total += 1
+                    worker_member += int(int(worker_id) in baseline_team)
+        return {
+            "BaselineIdentity/SelectedStationPreservedRate": (
+                float(station_preserved) / max(1, station_total)
+            ),
+            "BaselineIdentity/SelectedWorkerMemberRate": (
+                float(worker_member) / max(1, worker_total)
+            ),
+        }
+
     def _collect_episode(
         self,
         episode: int,
@@ -348,6 +387,7 @@ class APALRolloutService:
                             temperature=float(self.config.sample_temperature),
                             is_eval=False,
                             profile_breakdown=profile_breakdown,
+                            baseline_snapshots=[snapshots[idx] for idx in active],
                         )
                 forward_seconds += time.perf_counter() - stage_started
                 if profile_breakdown:
@@ -508,6 +548,10 @@ class APALRolloutService:
             self._merge_memories(merged, memories)
             apcf_metrics = self.agent._anchor_proposal_rollout_metrics(merged)
             extra_metrics.update(apcf_metrics)
+        if bool(
+            getattr(self.config, "reschedule_baseline_identity_conditioning", False)
+        ):
+            extra_metrics.update(self._baseline_identity_metrics(memories))
         if v2_mode:
             extra_metrics.update(self.agent.finalize_worker_pointer_v2_diagnostics())
         if self.device.type == "cuda":
@@ -767,6 +811,7 @@ class APALRolloutService:
                         deterministic=True,
                         temperature=0.0,
                         is_eval=True,
+                        baseline_snapshot=env.get_state_snapshot(),
                     )
                     if action_ret[0] is None:
                         invalid_step_count += 1

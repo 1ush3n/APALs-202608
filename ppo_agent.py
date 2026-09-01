@@ -30,6 +30,10 @@ from models.worker_pointer_context import (
     gather_selected_task_skills,
 )
 from worker_feature_layout import resolve_worker_feature_layout
+from utils.baseline_identity import (
+    build_station_baseline_match,
+    build_worker_baseline_membership,
+)
 from training.best_anchor_teacher import BestAnchorTeacherManager
 from training.worker_pointer_v2_diagnostics import WorkerPointerV2Diagnostics
 from runtime.batch_semantics import (
@@ -630,8 +634,37 @@ class PPOAgent:
                 teacher_task_x, teacher_global, mask=task_mask
             ).float()
             teacher_selected_task = teacher_task_x[batch_indices, batch.y_task]
+            baseline_snapshots = getattr(
+                batch, "_baseline_identity_snapshots", [None] * int(batch_indices.numel())
+            )
+            teacher_station_baseline_match = torch.cat(
+                [
+                    build_station_baseline_match(
+                        None
+                        if snapshot is None
+                        else snapshot.get("baseline_station"),
+                        selected_tasks=batch.y_task[index : index + 1],
+                        candidate_station_ids=torch.arange(
+                            teacher_station_x.size(1), device=self.device
+                        ),
+                        enabled=bool(
+                            getattr(
+                                self.config,
+                                "reschedule_baseline_identity_conditioning",
+                                False,
+                            )
+                        ),
+                        device=self.device,
+                    )
+                    for index, snapshot in enumerate(baseline_snapshots)
+                ],
+                dim=0,
+            )
             teacher_station_logits = manager.teacher.station_head(
-                teacher_selected_task, teacher_station_x, mask=station_mask
+                teacher_selected_task,
+                teacher_station_x,
+                mask=station_mask,
+                station_baseline_match=teacher_station_baseline_match,
             ).float()
         return teacher_task_logits, teacher_station_logits, task_mask, station_mask
 
@@ -2094,6 +2127,7 @@ class PPOAgent:
         *,
         compute_value: bool = True,
         manage_optimizer_mode: bool = True,
+        baseline_snapshot: dict | None = None,
     ) -> Tuple[Optional[Tuple[int, int, List[int]]], float, float, Optional[torch.Tensor], bool]:
         """
         閫夋嫨鍔ㄤ綔 (Select Action)銆?
@@ -2226,8 +2260,26 @@ class PPOAgent:
             
             with self.autocast_context():
                 station_embs = x_dict['station'].unsqueeze(0)
+                station_baseline_match = build_station_baseline_match(
+                    None if baseline_snapshot is None else baseline_snapshot.get("baseline_station"),
+                    selected_tasks=torch.tensor([t_idx], device=self.device),
+                    candidate_station_ids=torch.arange(
+                        station_embs.size(1), device=self.device
+                    ),
+                    enabled=bool(
+                        getattr(
+                            self.config,
+                            "reschedule_baseline_identity_conditioning",
+                            False,
+                        )
+                    ),
+                    device=self.device,
+                )
                 station_logits = active_policy.station_head(
-                    selected_task_emb, station_embs, mask=None
+                    selected_task_emb,
+                    station_embs,
+                    mask=None,
+                    station_baseline_match=station_baseline_match,
                 )
             if not deterministic and temperature != 1.0:
                 station_logits = station_logits / max(float(temperature), 1.0e-5)
@@ -2370,7 +2422,23 @@ class PPOAgent:
             v2_team_state = None
             v2_decode_cache = None
             v2_demand = None
+            worker_baseline_member = None
             if v2_mode:
+                worker_baseline_member = build_worker_baseline_membership(
+                    None
+                    if baseline_snapshot is None
+                    else baseline_snapshot.get("baseline_team_edge_index"),
+                    selected_tasks=torch.tensor([t_idx], device=self.device),
+                    num_workers=worker_embs.size(1),
+                    enabled=bool(
+                        getattr(
+                            self.config,
+                            "reschedule_baseline_identity_conditioning",
+                            False,
+                        )
+                    ),
+                    device=self.device,
+                )
                 v2_pressure = self._build_v2_pressure_context(
                     task_features=obs['task'].x,
                     worker_features=worker_feats,
@@ -2440,6 +2508,7 @@ class PPOAgent:
                                 demand=v2_demand,
                                 mask=current_worker_mask.unsqueeze(0),
                             ),
+                            worker_baseline_member=worker_baseline_member,
                         )
                     else:
                         worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs, mask=None, current_team_emb=current_team_emb)
@@ -2551,6 +2620,7 @@ class PPOAgent:
         *,
         profile_breakdown: bool = False,
         snapshots: Optional[List[dict]] = None,
+        baseline_snapshots: Optional[List[dict | None]] = None,
         fast_exact_builder: Any = None,
     ) -> List[Tuple[Optional[Tuple[int, int, List[int]]], float, float, Optional[torch.Tensor], bool]]:
         """
@@ -2587,6 +2657,10 @@ class PPOAgent:
             batch_size = len(obs_list)
         if len(mask_task_list) != batch_size:
             raise ValueError("obs_list 与动作掩码批次数量不一致")
+        if baseline_snapshots is None:
+            baseline_snapshots = [None] * batch_size
+        if len(baseline_snapshots) != batch_size:
+            raise ValueError("baseline_snapshots count must match batch_size")
         results = []
         state_value_tensors = []
         decoded_actions = []
@@ -2861,8 +2935,60 @@ class PPOAgent:
                 
                 with self.autocast_context():
                     station_embs_i = station_embs.unsqueeze(0) # [1, S, H]
+                    bic_enabled = bool(
+                        getattr(
+                            self.config,
+                            "reschedule_baseline_identity_conditioning",
+                            False,
+                        )
+                    )
+                    if fast_batch is not None:
+                        baseline_stations_i = fast_batch.baseline_station_slices[i]
+                        baseline_edges_i = fast_batch.baseline_team_edge_index
+                        identity_task_i = t_idx + int(task_ptr[i])
+                        worker_offset_i = int(worker_ptr[i])
+                    else:
+                        baseline_snapshot_i = baseline_snapshots[i]
+                        baseline_stations_i = (
+                            None
+                            if baseline_snapshot_i is None
+                            else baseline_snapshot_i.get("baseline_station")
+                        )
+                        baseline_edges_i = (
+                            None
+                            if baseline_snapshot_i is None
+                            else baseline_snapshot_i.get("baseline_team_edge_index")
+                        )
+                        identity_task_i = t_idx
+                        worker_offset_i = 0
+                    station_baseline_match_i = build_station_baseline_match(
+                        baseline_stations_i,
+                        selected_tasks=torch.tensor(
+                            [t_idx], device=self.device
+                        ),
+                        candidate_station_ids=torch.arange(
+                            station_embs.size(0), device=self.device
+                        ),
+                        enabled=bic_enabled,
+                        device=self.device,
+                    )
+                    worker_baseline_member_i = build_worker_baseline_membership(
+                        baseline_edges_i,
+                        selected_tasks=torch.tensor(
+                            [identity_task_i], device=self.device
+                        ),
+                        num_workers=worker_embs.size(0),
+                        candidate_worker_offsets=torch.tensor(
+                            [worker_offset_i], device=self.device
+                        ),
+                        enabled=bic_enabled,
+                        device=self.device,
+                    )
                     station_logits = active_policy.station_head(
-                        selected_task_emb, station_embs_i, mask=None
+                        selected_task_emb,
+                        station_embs_i,
+                        mask=None,
+                        station_baseline_match=station_baseline_match_i,
                     )
                 if not deterministic and temperature != 1.0:
                     station_logits = station_logits / max(float(temperature), 1.0e-5)
@@ -3112,6 +3238,7 @@ class PPOAgent:
                                 mask=None,
                                 decode_cache=v2_decode_cache,
                                 dynamic_eft_features=dynamic_eft_features,
+                                worker_baseline_member=worker_baseline_member_i,
                             )
                         else:
                             worker_logits = active_policy.worker_head.forward_choice(selected_task_emb, worker_embs_i, mask=None, current_team_emb=current_team_emb)
@@ -3554,7 +3681,11 @@ class PPOAgent:
                 idx = int(raw_idx)
                 state = env.rebuild_state_from_snapshot(memory.states[idx])
                 batch_data_list.append(_attach_update_targets(state, idx))
-            return Batch.from_data_list(batch_data_list).to(self.device)
+            batch = Batch.from_data_list(batch_data_list).to(self.device)
+            batch._baseline_identity_snapshots = [
+                memory.states[int(index)] for index in batch_indices
+            ]
+            return batch
 
         def _bind_gpu_batch_targets(batch, batch_indices):
             """为 GPU 原地重建后的 Batch 绑定同一批 PPO 标签与 mask。"""
@@ -3590,6 +3721,9 @@ class PPOAgent:
             )
             batch.y_reward = rewards[batch_indices].to(self.device)
             batch.y_advantage = advantages[batch_indices].to(self.device)
+            batch._baseline_identity_snapshots = [
+                memory.states[int(index)] for index in batch_indices
+            ]
             if len(memory.values) > 0:
                 b_vals = [memory.values[int(idx)] for idx in batch_indices]
                 batch.y_value = torch.tensor(b_vals, dtype=torch.float32, device=self.device)
@@ -3769,9 +3903,18 @@ class PPOAgent:
                     # 姝ゆ椂寮哄埗鍖呰涓?Batch 浠ョ‘淇?to_dense_batch 鍙敤
                     if not hasattr(batch['task'], 'batch'):
                         batch = Batch.from_data_list([batch]).to(self.device)
+                    batch._baseline_identity_snapshots = [
+                        memory.states[int(index)]
+                        for index in batch.y_memory_index.detach().cpu().tolist()
+                    ]
                 batch_vector_repair_count += self.ensure_hetero_batch_vectors(
                     batch,
                     batch_size=int(batch.y_task.view(-1).numel()) if hasattr(batch, 'y_task') else None,
+                )
+                batch_baseline_snapshots = getattr(
+                    batch,
+                    "_baseline_identity_snapshots",
+                    [None] * int(batch.y_task.size(0)),
                 )
                 teacher_outputs = self._teacher_task_station_logits(batch)
                 
@@ -3875,7 +4018,35 @@ class PPOAgent:
                         assert station_x is not None, (
                             "operation_station 及完整动作必须编码 station 节点"
                         )
-                        station_logits = self.policy.station_head(sel_task_emb, station_x, mask=None)
+                        station_baseline_match = torch.cat(
+                            [
+                                build_station_baseline_match(
+                                    None
+                                    if snapshot is None
+                                    else snapshot.get("baseline_station"),
+                                    selected_tasks=batch.y_task[index : index + 1],
+                                    candidate_station_ids=torch.arange(
+                                        station_x.size(1), device=self.device
+                                    ),
+                                    enabled=bool(
+                                        getattr(
+                                            self.config,
+                                            "reschedule_baseline_identity_conditioning",
+                                            False,
+                                        )
+                                    ),
+                                    device=self.device,
+                                )
+                                for index, snapshot in enumerate(batch_baseline_snapshots)
+                            ],
+                            dim=0,
+                        )
+                        station_logits = self.policy.station_head(
+                            sel_task_emb,
+                            station_x,
+                            mask=None,
+                            station_baseline_match=station_baseline_match,
+                        )
                         # 非有限合法 logits 由统一分布入口拒绝。
 
                         station_logits, station_usable = _finalize_action_logits(
@@ -3968,6 +4139,27 @@ class PPOAgent:
                         raw_station_x_v2, _ = to_dense_batch(
                             batch['station'].x, batch['station'].batch
                         )
+                        worker_baseline_member = torch.cat(
+                            [
+                                build_worker_baseline_membership(
+                                    None
+                                    if snapshot is None
+                                    else snapshot.get("baseline_team_edge_index"),
+                                    selected_tasks=batch.y_task[index : index + 1],
+                                    num_workers=worker_x.size(1),
+                                    enabled=bool(
+                                        getattr(
+                                            self.config,
+                                            "reschedule_baseline_identity_conditioning",
+                                            False,
+                                        )
+                                    ),
+                                    device=self.device,
+                                )
+                                for index, snapshot in enumerate(batch_baseline_snapshots)
+                            ],
+                            dim=0,
+                        )
                         v2_pressure = self._build_v2_pressure_context(
                             task_features=raw_task_x_v2,
                             worker_features=raw_worker_x_v2,
@@ -4047,6 +4239,7 @@ class PPOAgent:
                                     demand=selected_demand_v2,
                                     mask=curr_mask,
                                 ),
+                                worker_baseline_member=worker_baseline_member,
                             )
                         else:
                             logits = self.policy.worker_head.forward_choice(sel_task_emb, worker_x, mask=None, current_team_emb=current_team_emb)
@@ -4735,6 +4928,9 @@ class PPOAgent:
             data_list.append(state)
         group_batch = Batch.from_data_list(data_list).to(self.device)
         assert int(group_batch.num_graphs) == len(memory_indices)
+        group_batch._baseline_identity_snapshots = [
+            memory.states[int(index)] for index in memory_indices
+        ]
         return group_batch
 
     @staticmethod
@@ -4791,6 +4987,9 @@ class PPOAgent:
         task_targets_cpu = batch.y_task.detach().cpu().tolist()
         station_targets_cpu = batch.y_station.detach().cpu().tolist()
         team_targets_cpu = batch.y_team.detach().cpu().tolist()
+        baseline_identity_snapshots = getattr(
+            batch, "_baseline_identity_snapshots", [None] * group_size
+        )
         outputs: list[dict[str, torch.Tensor]] = []
         worker_layout = resolve_worker_feature_layout(self.config)
         num_skills = int(worker_layout.num_skill_types)
@@ -4868,6 +5067,24 @@ class PPOAgent:
             station_target = batch.y_station[sample_index].reshape(1)
             station_id = int(station_targets_cpu[sample_index])
             assert 0 <= station_id < station_embs.shape[0]
+            baseline_snapshot = baseline_identity_snapshots[sample_index]
+            station_baseline_match = build_station_baseline_match(
+                None
+                if baseline_snapshot is None
+                else baseline_snapshot.get("baseline_station"),
+                selected_tasks=torch.tensor([task_id], device=self.device),
+                candidate_station_ids=torch.arange(
+                    station_embs.size(0), device=self.device
+                ),
+                enabled=bool(
+                    getattr(
+                        self.config,
+                        "reschedule_baseline_identity_conditioning",
+                        False,
+                    )
+                ),
+                device=self.device,
+            )
             station_mask = station_mask_matrix[task_id].unsqueeze(0)
             if self._v2_fast_exact_profile is not None:
                 self._v2_fast_exact_profile["ActionHeadCalls"] = (
@@ -4878,6 +5095,7 @@ class PPOAgent:
                     selected_task_emb,
                     station_embs.unsqueeze(0),
                     mask=None,
+                    station_baseline_match=station_baseline_match,
                 )
             # 非有限合法 logits 由统一分布入口拒绝。
             station_logits, station_usable = _finalize_action_logits(
@@ -4923,6 +5141,21 @@ class PPOAgent:
                 batch_size=1, device=self.device
             )
             worker_embs_i = worker_embs.unsqueeze(0)
+            worker_baseline_member = build_worker_baseline_membership(
+                None
+                if baseline_snapshot is None
+                else baseline_snapshot.get("baseline_team_edge_index"),
+                selected_tasks=torch.tensor([task_id], device=self.device),
+                num_workers=worker_embs.size(0),
+                enabled=bool(
+                    getattr(
+                        self.config,
+                        "reschedule_baseline_identity_conditioning",
+                        False,
+                    )
+                ),
+                device=self.device,
+            )
             station_emb_i = station_embs[station_id].unsqueeze(0)
             demand = torch.tensor(
                 [float(len(team_target_ids))],
@@ -4969,6 +5202,7 @@ class PPOAgent:
                             demand=demand,
                             mask=current_mask.unsqueeze(0),
                         ),
+                        worker_baseline_member=worker_baseline_member,
                     )
                 # 非有限合法 logits 由统一分布入口拒绝。
                 self._record_v2_marginal_scarcity(
@@ -6451,6 +6685,21 @@ class PPOAgent:
                 0, y_task[sample_index].reshape(1)
             )  # [1, H]; 1-dim 索引规避 CUDA index_add_ 0-dim 快速路径 bug
 
+            station_baseline_match = build_station_baseline_match(
+                fast_batch.baseline_station_slices[sample_index],
+                selected_tasks=y_task[sample_index].reshape(1),
+                candidate_station_ids=torch.arange(
+                    station_embs.size(0), device=self.device
+                ),
+                enabled=bool(
+                    getattr(
+                        self.config,
+                        "reschedule_baseline_identity_conditioning",
+                        False,
+                    )
+                ),
+                device=self.device,
+            )
             team_ids = y_team[sample_index]
             valid_team = team_ids[team_ids >= 0]
             is_virtual = int(valid_team.numel()) == 0
@@ -6492,6 +6741,7 @@ class PPOAgent:
                     selected_task_emb,
                     station_embs.unsqueeze(0),
                     mask=None,
+                    station_baseline_match=station_baseline_match,
                 )
             # 非有限合法 logits 由统一分布入口拒绝。
             station_logits, station_usable = _finalize_action_logits(
@@ -6541,6 +6791,25 @@ class PPOAgent:
                 batch_size=1, device=self.device
             )
             worker_embs_i = worker_embs.unsqueeze(0)
+            worker_baseline_member = build_worker_baseline_membership(
+                fast_batch.baseline_team_edge_index,
+                selected_tasks=(
+                    y_task[sample_index].reshape(1)
+                    + int(task_ptr[sample_index])
+                ),
+                num_workers=worker_embs.size(0),
+                candidate_worker_offsets=torch.tensor(
+                    [int(worker_ptr[sample_index])], device=self.device
+                ),
+                enabled=bool(
+                    getattr(
+                        self.config,
+                        "reschedule_baseline_identity_conditioning",
+                        False,
+                    )
+                ),
+                device=self.device,
+            )
             station_emb_i = station_embs.index_select(
                 0, y_station[sample_index].reshape(1)
             )  # [1, H]; 1-dim 索引规避 CUDA index_add_ 0-dim 快速路径 bug
@@ -6605,6 +6874,7 @@ class PPOAgent:
                             demand=demand,
                             mask=current_mask.unsqueeze(0),
                         ),
+                        worker_baseline_member=worker_baseline_member,
                     )
                 # 非有限合法 logits 由统一分布入口拒绝。
                 self._record_v2_marginal_scarcity(

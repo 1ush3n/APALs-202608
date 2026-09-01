@@ -37,6 +37,7 @@ from utils.resource_graph import (
     clear_resource_graph,
     worker_topology_key,
 )
+from utils.baseline_identity import offset_baseline_team_edge_index
 from worker_feature_layout import resolve_worker_feature_layout
 
 
@@ -64,6 +65,8 @@ class V2FastExactBatch:
     # 每图原始特征切片（独立 CPU tensor），供压力上下文与 mask 计算
     raw_task_slices: list[torch.Tensor] = field(default_factory=list)
     raw_worker_slices: list[torch.Tensor] = field(default_factory=list)
+    baseline_station_slices: list[torch.Tensor | None] = field(default_factory=list)
+    baseline_team_edge_index: torch.Tensor | None = None
     # 节点级动作 mask（可选绑定）
     task_mask: Any = None
     station_mask: Any = None
@@ -111,6 +114,39 @@ def _cumulative_offsets(counts: Sequence[int]) -> Tuple[int, ...]:
         total += int(count)
         offsets.append(total)
     return tuple(offsets)
+
+
+def _build_baseline_identity_batch_metadata(
+    snapshots: Sequence[EnvironmentSnapshot],
+    *,
+    task_offsets: Tuple[int, ...],
+    worker_offsets: Tuple[int, ...],
+    device: torch.device,
+) -> tuple[list[torch.Tensor | None], torch.Tensor]:
+    station_slices = [
+        (
+            torch.as_tensor(snapshot["baseline_station"], dtype=torch.long).clone()
+            if "baseline_station" in snapshot
+            else None
+        )
+        for snapshot in snapshots
+    ]
+    edge_parts: list[np.ndarray] = []
+    for index, snapshot in enumerate(snapshots):
+        edge_index = snapshot.get("baseline_team_edge_index")
+        if edge_index is None:
+            continue
+        offset_edge = offset_baseline_team_edge_index(
+            np.asarray(edge_index, dtype=np.int64),
+            task_offset=task_offsets[index],
+            worker_offset=worker_offsets[index],
+        )
+        edge_parts.append(np.asarray(offset_edge, dtype=np.int64))
+    if edge_parts:
+        edge_array = np.concatenate(edge_parts, axis=1)
+    else:
+        edge_array = np.empty((2, 0), dtype=np.int64)
+    return station_slices, torch.as_tensor(edge_array, dtype=torch.long, device=device)
 
 
 def apply_batched_resource_graph_offsets(
@@ -298,7 +334,6 @@ class CPUExactBatchBuilder:
                 "memory_indices 数量与 snapshot 组大小不一致: "
                 f"{len(resolved_indices)} != {group_size}"
             )
-
         task_mask = station_mask = worker_mask = None
         if masks is not None:
             if len(masks) != group_size:
@@ -309,6 +344,14 @@ class CPUExactBatchBuilder:
             station_mask = torch.cat([mask[1] for mask in masks], dim=0)
             worker_mask = torch.cat([mask[2] for mask in masks], dim=0)
 
+        baseline_station_slices, baseline_team_edge_index = (
+            _build_baseline_identity_batch_metadata(
+                snapshots,
+                task_offsets=tuple(task_ptr),
+                worker_offsets=tuple(worker_ptr),
+                device=self.device,
+            )
+        )
         batch = batch.to(self.device)
         if task_mask is not None:
             # 节点级 mask 绑定到 Batch，供同形重放逐节点读取。
@@ -328,6 +371,8 @@ class CPUExactBatchBuilder:
             group_id=group_id,
             raw_task_slices=raw_task_slices,
             raw_worker_slices=raw_worker_slices,
+            baseline_station_slices=baseline_station_slices,
+            baseline_team_edge_index=baseline_team_edge_index,
             task_mask=task_mask,
             station_mask=station_mask,
             worker_mask=worker_mask,
@@ -905,6 +950,14 @@ class GPUExactBatchBuilder:
         task_offsets = _cumulative_offsets(task_counts)
         worker_offsets = _cumulative_offsets(worker_counts)
         station_offsets = _cumulative_offsets(station_counts)
+        baseline_station_slices, baseline_team_edge_index = (
+            _build_baseline_identity_batch_metadata(
+                snapshots,
+                task_offsets=task_offsets,
+                worker_offsets=worker_offsets,
+                device=self.device,
+            )
+        )
 
         key = self._template_key(
             dataset_idx=dataset_idx,
@@ -980,6 +1033,8 @@ class GPUExactBatchBuilder:
                 ]
                 for index in range(group_size)
             ],
+            baseline_station_slices=baseline_station_slices,
+            baseline_team_edge_index=baseline_team_edge_index,
             task_mask=task_mask,
             station_mask=station_mask,
             worker_mask=worker_mask,

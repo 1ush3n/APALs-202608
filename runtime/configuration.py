@@ -63,6 +63,7 @@ STRUCTURAL_FIELDS = {
     "worker_pointer_v2_next_frontier_pressure",
     "worker_pointer_v2_fast_replay_batching",
     "worker_pointer_v2_fast_replay_encoder_batch_cap",
+    "reschedule_baseline_identity_conditioning",
     "conditional_head_baseline_mode",
     "graph_encoder_mode", "actor_context_mode",
     "anchor_proposal_mode", "anchor_proposal_prior_margin",
@@ -422,6 +423,15 @@ def validate_runtime_config(config: Config) -> None:
         if int(config.worker_pointer_v2_rollout_group_upper_bound) < 1:
             raise ValueError(
                 "worker_pointer_v2_rollout_group_upper_bound 必须大于 0"
+            )
+    if bool(getattr(config, "reschedule_baseline_identity_conditioning", False)):
+        if not bool(getattr(config, "enable_reschedule_mode", False)):
+            raise ValueError(
+                "reschedule_baseline_identity_conditioning=true requires enable_reschedule_mode=true"
+            )
+        if not is_worker_pointer_v2_mode(config):
+            raise ValueError(
+                "reschedule_baseline_identity_conditioning=true requires WorkerPointer v2"
             )
     ratio = float(getattr(config, "workforce_preallocation_ratio", 1.0))
     if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:

@@ -37,6 +37,7 @@ model:
 
 reschedule_task_delay:
   enable_reschedule_mode: true
+  reschedule_baseline_identity_conditioning: true
   reschedule_warm_start: true
   reschedule_baseline_model_path: results/01_initial_main/initial_worker_pointer_v2_full_x/initial_worker_pointer_v2_full_x_260831-144404/checkpoints/best.ckpt
   reschedule_async_protocol: r5_task_delay_v1
