@@ -1,0 +1,85 @@
+﻿defaults:
+  - /model/hb_gat_pn@_global_
+  - /env/apal_default@_global_
+  - /env/reschedule_task_delay@_global_
+  - /reward/default@_global_
+  - /train/ppo_default@_global_
+  - /rollout/fastpath@_global_
+  - _self_
+
+experiment:
+  experiment_name: reschedule_task_delay_r5_full_x_no_a2
+  runs_root: results/02_reschedule_main
+  checkpoint_root: checkpoints
+  lr: 1.0e-4
+  actor_lr_multiplier: 1.0
+
+reward:
+  r_coef_makespan: 0.20
+  r_coef_std: 0.0
+  reward_scale: 0.005
+
+model:
+  team_selection_mode: autoregressive_pressure_v2_fast_exact
+  policy_action_scope: operation_station_worker
+  actor_context_mode: attention
+  use_shared_trunk: false
+  worker_pointer_context_version: pressure_v2_normwork_headcount_physicalwait_v1
+  worker_pointer_pressure_temperature: 1.0
+  worker_pointer_supply_epsilon: 1.0e-6
+  worker_pointer_wait_discount_mode: physical_wait_exponential_v1
+  worker_pointer_v2_init_seed_offset: 1009
+  worker_pointer_v2_dynamic_eft_features: true
+  worker_pointer_v2_dynamic_eft_feature_clip: 10.0
+  worker_pointer_v2_fast_default_num_envs: 4
+  worker_pointer_v2_explicit_team_state: true
+  worker_pointer_v2_marginal_scarcity: false
+  worker_pointer_v2_marginal_scarcity_clip: 10.0
+  worker_pointer_v2_interaction_residual: true
+  worker_pointer_v2_next_frontier_pressure: true
+  conditional_head_baseline_mode:  factorized
+
+reschedule_task_delay:
+  enable_reschedule_mode: true
+  reschedule_warm_start: true
+  reschedule_baseline_model_path: results/01_initial_main/initial_worker_pointer_v2_full_x/initial_worker_pointer_v2_full_x_260831-144404/checkpoints/best.ckpt
+  reschedule_async_protocol: r5_task_delay_v1
+  reschedule_train_scenario_mode: r5_task_delay_v1
+  reschedule_manifest_path: data/r5_task_delay_v1/manifest.json
+  train_data_path_or_dir: data/r5_task_delay_v1/instances/train
+  data_file_path: data/r5_task_delay_v1/instances/validation/validation_0001.csv
+  reschedule_eval_instance_id: validation_0001
+  reschedule_takt_violation_weight: 3.0
+  reschedule_stability_start_weight: 4.0
+  reschedule_stability_station_weight: 4.0
+  reschedule_stability_team_weight: 0.3
+  reschedule_use_objective_delta_reward: true
+  reschedule_objective_delta_multiplier: 100.0
+  reschedule_objective_delta_clip: 50.0
+  async_eval_enabled: true
+  async_eval_device: cuda
+  async_eval_worker_count: 3
+  async_eval_queue_capacity: 3
+  async_eval_submit_every_episodes: 2
+  async_eval_wait_on_finish: true
+  async_eval_failure_policy: fail
+  async_eval_instance_id: validation_0001
+  eval_temperature: 0.0
+
+train:
+  gamma: 0.999
+  batch_size: 64
+  accumulation_steps: 4
+  num_envs: 4
+  lightning_precision: bf16-mixed
+  conditional_head_value_coef: 1.0
+  max_episodes: 60
+  eval_freq: 1
+  eval_temperature: 0.0
+  worker_pointer_v2_fast_replay_batching: logical_batch_v1
+  worker_pointer_v2_fast_replay_encoder_batch_cap: 32
+  worker_pointer_v2_behavior_replay: true
+  worker_pointer_v2_replay_mode: behavior_group_exact_gpu_template_v2
+  worker_pointer_v2_logical_batch_cap: 256
+  worker_pointer_v2_rollout_group_upper_bound: 4
+  worker_pointer_v2_strict_gpu_replay: true

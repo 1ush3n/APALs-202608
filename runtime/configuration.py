@@ -281,7 +281,11 @@ def validate_runtime_config(config: Config) -> None:
             "PPO 采样与重算分布一致性要求 sample_temperature=1.0"
         )
     for field_name, choices in _VALID_EXPERIMENT_MODES.items():
-        value = str(getattr(config, field_name)).lower()
+        raw_val = getattr(config, field_name)
+        if field_name == "conditional_head_baseline_mode" and (raw_val is False or str(raw_val).lower() in {"false", "0", "none", "off"}):
+            value = "off"
+        else:
+            value = str(raw_val).lower()
         if value not in choices:
             raise ValueError(
                 f"{field_name} 无效: {value!r}；允许值={sorted(choices)}"
