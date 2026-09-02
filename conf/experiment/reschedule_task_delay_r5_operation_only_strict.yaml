@@ -1,0 +1,41 @@
+# @package _global_
+defaults:
+  - /experiment/reschedule_task_delay_r5_full_x@_global_
+  - _self_
+
+experiment:
+  experiment_name: reschedule_task_delay_r5_operation_only_strict
+  model:
+    ablation_protocol: strict_v1
+    policy_action_scope: operation
+    policy_observation_scope: task
+    graph_input_scope: task
+    critic_observation_scope: match_policy
+    task_feature_scope: intrinsic
+    action_completion_mode: min_wait
+    task_mask_mode: precedence_release_only
+    station_mask_mode: structural_only
+    team_selection_mode: autoregressive
+    conditional_head_baseline_mode: off
+
+model:
+  ablation_protocol: strict_v1
+  policy_action_scope: operation
+  policy_observation_scope: task
+  graph_input_scope: task
+  critic_observation_scope: match_policy
+  task_feature_scope: intrinsic
+  action_completion_mode: min_wait
+  task_mask_mode: precedence_release_only
+  station_mask_mode: structural_only
+  team_selection_mode: autoregressive
+  conditional_head_baseline_mode: off
+
+reschedule_task_delay:
+  reschedule_baseline_identity_conditioning: false
+
+train:
+  worker_pointer_v2_fast_replay_batching: physical_group
+  worker_pointer_v2_behavior_replay: false
+  worker_pointer_v2_replay_mode: batched_vectorized_v2
+  worker_pointer_v2_strict_gpu_replay: false

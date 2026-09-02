@@ -120,6 +120,12 @@ def test_command_plan_marks_missing_checkpoints(tmp_path: Path) -> None:
     )
     config = load_paper_config(config_path, tmp_path)
     rows = command_plan_rows(config)
+    planned_rows = [row for row in rows if row.get("suite") == "ablation"]
+    assert planned_rows
+    assert all(
+        "reschedule_baseline_identity_conditioning=false" in row["command"]
+        for row in planned_rows
+    )
     eval_rows = [row for row in rows if row.get("suite") == "generalization"]
     assert eval_rows[0]["status"] == "missing_checkpoint"
 
@@ -218,11 +224,14 @@ def test_policy_observation_scope_is_limited_to_two_node_scope_ablations() -> No
 
     for name, spec in config.ablations.items():
         if name not in {
-            "operation_only",
-            "operation_station",
-            "operation_only_ea",
-            "operation_station_ea",
-        }:
+                "operation_only",
+                "operation_station",
+                "operation_only_ea",
+                "operation_station_ea",
+                "operation_only_strict",
+                "operation_station_strict",
+                "homogeneous_graphsage_strict",
+            }:
             assert not any(
                 str(override).startswith("policy_observation_scope=")
                 for override in spec["overrides"]

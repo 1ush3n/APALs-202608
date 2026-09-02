@@ -20,6 +20,7 @@ model:
 
 reschedule_task_delay:
   enable_reschedule_mode: true
+  reschedule_baseline_identity_conditioning: false
   reschedule_async_protocol: r5_task_delay_v1
   reschedule_train_scenario_mode: r5_task_delay_v1
   reschedule_manifest_path: data/r5_task_delay_v1/manifest.json

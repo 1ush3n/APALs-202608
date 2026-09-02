@@ -42,8 +42,15 @@ class Config:
     action_completion_mode: str = "earliest_finish"
     # 策略网络可见节点范围；full 保持历史主方法与旧 checkpoint 语义。
     policy_observation_scope: str = "full"
-    # 策略网络可见节点范围；full 保持历史主方法与旧 checkpoint 语义。
-    policy_observation_scope: str = "full"
+    graph_input_scope: str = "match_policy"
+    # critic 默认跟随 actor，避免价值网络意外读取特权资源信息。
+    critic_observation_scope: str = "match_policy"
+    # task 特征默认保持旧的完整输入；strict operation-only 使用 intrinsic。
+    task_feature_scope: str = "full"
+    # 默认值保持旧的资源感知掩码逻辑。
+    task_mask_mode: str = "resource_aware"
+    station_mask_mode: str = "resource_aware"
+    ablation_protocol: str = "legacy"
     conditional_team_max_candidates: int = 4
     conditional_team_gate_bias: float = -4.0
     conditional_team_nonbaseline_logit: float = -8.0
@@ -114,6 +121,8 @@ class Config:
     worker_pointer_v2_fast_default_num_envs: int = 4
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
+    homogeneous_use_type_embedding: bool = True
+    homogeneous_shared_input_projection: bool = False
     
     # ------------------
     # 模型超参数 (Model Hyperparameters)

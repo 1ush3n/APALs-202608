@@ -51,6 +51,45 @@ def get_gat_layer_norm(dim):
 def get_head_layer_norm(dim):
     return get_layer_norm(dim, getattr(configs, 'use_head_layer_norm', True))
 
+
+def _task_intrinsic_indices(num_skill_types: int, feature_dim: int) -> tuple[int, ...]:
+    """返回只依赖工序自身、状态和物料释放信息的列索引。"""
+    indices = (
+        0,
+        1,
+        2,
+        3,
+        4,
+        *range(5, 5 + int(num_skill_types)),
+        16,
+        17,
+    )
+    if max(indices) >= int(feature_dim):
+        raise ValueError(
+            "task intrinsic 特征要求 task_feat_dim 至少为 18，"
+            f"当前为 {feature_dim}"
+        )
+    return tuple(int(index) for index in indices)
+
+
+def filter_task_features_for_scope(
+    task_x: torch.Tensor,
+    *,
+    scope: str,
+    num_skill_types: int,
+) -> torch.Tensor:
+    """过滤 task 的动态资源/重调度 baseline 列，同时保留原输入宽度以兼容 warm start。"""
+    assert task_x.ndim == 2, f"task_x 必须是二维张量，收到 {tuple(task_x.shape)}"
+    if str(scope).lower() == "full":
+        return task_x
+    if str(scope).lower() != "intrinsic":
+        raise ValueError(f"未知 task_feature_scope: {scope!r}")
+    keep = torch.zeros(task_x.size(1), dtype=torch.bool, device=task_x.device)
+    indices = _task_intrinsic_indices(num_skill_types, int(task_x.size(1)))
+    keep[list(indices)] = True
+    # 输入形状：[T, F] -> [T, F]；非 intrinsic 列置零，保持 checkpoint 输入宽度不变。
+    return torch.where(keep.unsqueeze(0), task_x, torch.zeros_like(task_x))
+
 # ---------------------------------------------------------------------------
 # 特征嵌入模块 (Feature Embedder)
 # 作用: 将原始异构节点特征投影到统一的隐藏层维度
@@ -58,29 +97,66 @@ def get_head_layer_norm(dim):
 class FeatureEmbedder(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # 为每种节点类型定义一个 MLP 
-        self.task_emb = nn.Sequential(
-            nn.Linear(config.task_feat_dim, config.hidden_dim),
-            get_input_layer_norm(config.hidden_dim),
-            get_activation()
+        self.task_feature_scope = str(getattr(config, "task_feature_scope", "full"))
+        self.num_skill_types = int(getattr(config, "num_skill_types", NUM_SKILL_TYPES))
+        self.shared_input_projection = bool(
+            getattr(config, "homogeneous_shared_input_projection", False)
+            and str(getattr(config, "graph_encoder_mode", "hetero_gat"))
+            == "homogeneous_graphsage_strict"
         )
-        self.worker_emb = nn.Sequential(
-            nn.Linear(config.worker_feat_dim, config.hidden_dim),
-            get_input_layer_norm(config.hidden_dim),
-            get_activation()
-        )
-        self.station_emb = nn.Sequential(
-            nn.Linear(config.station_feat_dim, config.hidden_dim),
-            get_input_layer_norm(config.hidden_dim),
-            get_activation()
-        )
-        self.skill_emb = None
-        if getattr(config, 'use_skill_hub', False):
-            self.skill_emb = nn.Sequential(
-                nn.Linear(config.skill_feat_dim, config.hidden_dim),
+        if self.shared_input_projection:
+            self.shared_input_dim = max(
+                int(config.task_feat_dim),
+                int(config.worker_feat_dim),
+                int(config.station_feat_dim),
+                int(config.skill_feat_dim),
+            )
+            self.shared_emb = nn.Sequential(
+                nn.Linear(self.shared_input_dim, config.hidden_dim),
                 get_input_layer_norm(config.hidden_dim),
                 get_activation(),
             )
+            self.task_emb = None
+            self.worker_emb = None
+            self.station_emb = None
+            self.skill_emb = None
+        else:
+            # 为每种节点类型定义一个 MLP。
+            self.task_emb = nn.Sequential(
+                nn.Linear(config.task_feat_dim, config.hidden_dim),
+                get_input_layer_norm(config.hidden_dim),
+                get_activation()
+            )
+            self.worker_emb = nn.Sequential(
+                nn.Linear(config.worker_feat_dim, config.hidden_dim),
+                get_input_layer_norm(config.hidden_dim),
+                get_activation()
+            )
+            self.station_emb = nn.Sequential(
+                nn.Linear(config.station_feat_dim, config.hidden_dim),
+                get_input_layer_norm(config.hidden_dim),
+                get_activation()
+            )
+            self.skill_emb = None
+            if getattr(config, 'use_skill_hub', False):
+                self.skill_emb = nn.Sequential(
+                    nn.Linear(config.skill_feat_dim, config.hidden_dim),
+                    get_input_layer_norm(config.hidden_dim),
+                    get_activation(),
+                )
+
+    def _project(self, node_x: torch.Tensor, module: nn.Module | None) -> torch.Tensor:
+        assert node_x.ndim == 2, f"节点特征必须是二维张量，收到 {tuple(node_x.shape)}"
+        if self.shared_input_projection:
+            if node_x.size(1) > self.shared_input_dim:
+                raise ValueError(
+                    f"共享节点投影输入维度超出上限: {node_x.size(1)} > {self.shared_input_dim}"
+                )
+            # 输入形状：[N, F_node] -> [N, F_max]；右侧补零后进入统一投影。
+            padded = F.pad(node_x, (0, self.shared_input_dim - node_x.size(1)))
+            return self.shared_emb(padded)
+        assert module is not None
+        return module(node_x)
 
     def forward(self, x_dict):
         """
@@ -89,14 +165,22 @@ class FeatureEmbedder(nn.Module):
         """
         out = {}
         if 'task' in x_dict:
-            out['task'] = self.task_emb(x_dict['task'])
+            task_x = filter_task_features_for_scope(
+                x_dict['task'],
+                scope=self.task_feature_scope,
+                num_skill_types=self.num_skill_types,
+            )
+            out['task'] = self._project(task_x, self.task_emb)
         if 'worker' in x_dict:
-            out['worker'] = self.worker_emb(x_dict['worker'])
+            out['worker'] = self._project(x_dict['worker'], self.worker_emb)
         if 'station' in x_dict:
-            out['station'] = self.station_emb(x_dict['station'])
+            out['station'] = self._project(x_dict['station'], self.station_emb)
         if 'skill' in x_dict:
-            assert self.skill_emb is not None, "输入包含 Skill 节点，但模型未启用 use_skill_hub"
-            out['skill'] = self.skill_emb(x_dict['skill'])
+            if self.shared_input_projection:
+                out['skill'] = self._project(x_dict['skill'], None)
+            else:
+                assert self.skill_emb is not None, "输入包含 Skill 节点，但模型未启用 use_skill_hub"
+                out['skill'] = self.skill_emb(x_dict['skill'])
         return out
 
 # ---------------------------------------------------------------------------
@@ -180,16 +264,22 @@ class HeteroGATEncoder(nn.Module):
 class HomogeneousGraphSAGEEncoder(nn.Module):
     """合并全部关系后使用共享 GraphSAGE 参数的关系无关编码器。"""
 
-    def __init__(self, config):
+    def __init__(self, config, *, use_type_embedding: bool | None = None):
         super().__init__()
         self.hidden_dim = int(config.hidden_dim)
         self.node_types = ("task", "worker", "station", "skill")
-        self.type_embedding = nn.ParameterDict(
-            {
-                name: nn.Parameter(torch.zeros(1, self.hidden_dim))
-                for name in self.node_types
-            }
-        )
+        if use_type_embedding is None:
+            use_type_embedding = bool(
+                getattr(config, "homogeneous_use_type_embedding", True)
+            )
+        self.use_type_embedding = bool(use_type_embedding)
+        if self.use_type_embedding:
+            self.type_embedding = nn.ParameterDict(
+                {
+                    name: nn.Parameter(torch.zeros(1, self.hidden_dim))
+                    for name in self.node_types
+                }
+            )
         self.layers = nn.ModuleList(
             SAGEConv(self.hidden_dim, self.hidden_dim)
             for _ in range(int(config.num_gat_layers))
@@ -211,7 +301,10 @@ class HomogeneousGraphSAGEEncoder(nn.Module):
             assert node_x.ndim == 2 and node_x.size(1) == self.hidden_dim
             offsets[node_type] = cursor
             sizes[node_type] = int(node_x.size(0))
-            chunks.append(node_x + self.type_embedding[node_type])
+            if self.use_type_embedding:
+                chunks.append(node_x + self.type_embedding[node_type])
+            else:
+                chunks.append(node_x)
             cursor += int(node_x.size(0))
         # [N_type, H] -> [N_all, H]
         x = torch.cat(chunks, dim=0)
@@ -243,12 +336,21 @@ class HomogeneousGraphSAGEEncoder(nn.Module):
         return result
 
 
+class StrictHomogeneousGraphSAGEEncoder(HomogeneousGraphSAGEEncoder):
+    """去除节点类型身份编码的严格同质 GraphSAGE。"""
+
+    def __init__(self, config):
+        super().__init__(config, use_type_embedding=False)
+
+
 def build_graph_encoder(config) -> nn.Module | None:
     mode = str(getattr(config, "graph_encoder_mode", "hetero_gat"))
     if mode == "hetero_gat":
         return HeteroGATEncoder(config)
     if mode == "homogeneous_graphsage":
         return HomogeneousGraphSAGEEncoder(config)
+    if mode == "homogeneous_graphsage_strict":
+        return StrictHomogeneousGraphSAGEEncoder(config)
     if mode == "none":
         return None
     raise ValueError(f"未知 graph_encoder_mode: {mode}")
@@ -1340,23 +1442,49 @@ class HBGATPN(nn.Module):
         assert all(torch.isfinite(value).all() for value in values.values())
         return values
 
-    def _policy_node_types(self) -> set[str]:
-        scope = str(getattr(self.config, "policy_observation_scope", "full"))
+    @staticmethod
+    def _node_types_for_scope(scope: str) -> set[str]:
         if scope == "task":
             return {"task"}
         if scope == "task_station":
             return {"task", "station"}
         if scope == "full":
             return {"task", "station", "worker", "skill"}
-        raise ValueError(f"未知 policy_observation_scope: {scope!r}")
+        raise ValueError(f"未知 observation scope: {scope!r}")
+
+    def _policy_node_types(self) -> set[str]:
+        scope = str(getattr(self.config, "policy_observation_scope", "full"))
+        return self._node_types_for_scope(scope)
+
+    def _graph_input_scope(self) -> str:
+        scope = str(getattr(self.config, "graph_input_scope", "match_policy"))
+        if scope == "match_policy":
+            scope = str(getattr(self.config, "policy_observation_scope", "full"))
+        self._node_types_for_scope(scope)
+        return scope
+
+    def _critic_observation_scope(self) -> str:
+        scope = str(
+            getattr(self.config, "critic_observation_scope", "match_policy")
+        )
+        if scope == "match_policy":
+            scope = str(getattr(self.config, "policy_observation_scope", "full"))
+        self._node_types_for_scope(scope)
+        return scope
 
     def _encode_policy_graph(
         self,
         batch_data: HeteroData,
         embedder: FeatureEmbedder,
         encoder: nn.Module | None,
+        observation_scope: str | None = None,
     ) -> dict[str, torch.Tensor]:
-        allowed = self._policy_node_types()
+        scope = (
+            self._graph_input_scope()
+            if observation_scope is None
+            else str(observation_scope)
+        )
+        allowed = self._node_types_for_scope(scope)
         raw_x_dict = {
             name: value for name, value in batch_data.x_dict.items() if name in allowed
         }
@@ -1589,6 +1717,7 @@ class HBGATPN(nn.Module):
                 batch_data,
                 self.critic_embedder,
                 self.critic_encoder,
+                observation_scope=self._critic_observation_scope(),
             )
         c_global_context = self._compute_global_context(
             c_x_dict_encoded,
@@ -1618,6 +1747,7 @@ class HBGATPN(nn.Module):
                 batch_data,
                 self.critic_embedder,
                 self.critic_encoder,
+                observation_scope=self._critic_observation_scope(),
             )
             
         # 2. 独立池化 (Attention or Mean+Max)

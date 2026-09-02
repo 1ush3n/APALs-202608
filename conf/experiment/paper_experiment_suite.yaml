@@ -32,6 +32,9 @@ methods:
   - fixed_preallocation
   - static_topq
   - homogeneous_graphsage
+  - operation_station_strict
+  - operation_only_strict
+  - homogeneous_graphsage_strict
   - no_message_passing
   - mean_max_pooling
   - local_only
@@ -108,6 +111,38 @@ ablations:
     experiment: scale_400_800_schedule
     overrides:
       - actor_context_mode=local_only
+  operation_station_strict:
+    experiment: scale_400_800_schedule
+    overrides:
+      - policy_action_scope=operation_station
+      - policy_observation_scope=task_station
+      - graph_input_scope=task_station
+      - critic_observation_scope=match_policy
+      - action_completion_mode=min_wait
+      - station_mask_mode=structural_only
+      - ablation_protocol=strict_v1
+  operation_only_strict:
+    experiment: scale_400_800_schedule
+    overrides:
+      - policy_action_scope=operation
+      - policy_observation_scope=task
+      - graph_input_scope=task
+      - critic_observation_scope=match_policy
+      - task_feature_scope=intrinsic
+      - action_completion_mode=min_wait
+      - task_mask_mode=precedence_release_only
+      - station_mask_mode=structural_only
+      - ablation_protocol=strict_v1
+  homogeneous_graphsage_strict:
+    experiment: scale_400_800_schedule
+    overrides:
+      - graph_encoder_mode=homogeneous_graphsage_strict
+      - homogeneous_use_type_embedding=false
+      - homogeneous_shared_input_projection=false
+      - policy_observation_scope=full
+      - graph_input_scope=full
+      - critic_observation_scope=full
+      - ablation_protocol=strict_v1
 
 checkpoints:
   full_joint:
@@ -122,6 +157,9 @@ checkpoints:
   no_message_passing: {}
   mean_max_pooling: {}
   local_only: {}
+  operation_station_strict: {}
+  operation_only_strict: {}
+  homogeneous_graphsage_strict: {}
 
 # 非活动项目（不进入 commands plan，也不应被一键训练）：
 # - no_mask：当前解码器没有 mask 时不可运行。

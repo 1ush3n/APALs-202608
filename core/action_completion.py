@@ -416,7 +416,7 @@ class EarliestAvailabilityActionCompleter(EarliestFinishActionCompleter):
 
         station_mask_flat = None
         if station_mask is not None:
-            # input shape: [S] or [1, S] -> [S]
+            # 输入形状：[S] 或 [1, S] -> [S]
             station_mask_flat = station_mask.to(
                 device=station_x.device, dtype=torch.bool
             ).reshape(-1)
@@ -432,7 +432,7 @@ class EarliestAvailabilityActionCompleter(EarliestFinishActionCompleter):
             )
             if station_mask_flat is not None:
                 valid &= ~station_mask_flat
-            # input shape: [S] -> [K]，K 为未被 mask 的站位数
+            # 输入形状：[S] -> [K]，K 为未屏蔽站位数
             station_candidates = torch.nonzero(valid, as_tuple=True)[0].tolist()
             station_candidates.sort(
                 key=lambda station_id: (
@@ -463,18 +463,218 @@ class EarliestAvailabilityActionCompleter(EarliestFinishActionCompleter):
         return None
 
 
+class MinWaitActionCompleter(EarliestFinishActionCompleter):
+    """只按资源等待时间和 ID 完成未学习的资源动作。"""
+
+    def _legal_worker_ids(
+        self,
+        worker_x: torch.Tensor,
+        *,
+        required_skill: int,
+        station_id: int,
+        worker_mask: torch.Tensor | None,
+    ) -> list[int]:
+        del worker_mask
+        return super()._legal_worker_ids(
+            worker_x,
+            required_skill=required_skill,
+            station_id=station_id,
+            worker_mask=None,
+        )
+
+    def _complete_for_station(
+        self,
+        *,
+        task_x: torch.Tensor,
+        worker_x: torch.Tensor,
+        station_x: torch.Tensor,
+        task_id: int,
+        station_id: int,
+        worker_mask: torch.Tensor | None,
+    ) -> CompletedResources | None:
+        requirements = self._extract_task_requirements(task_x, task_id)
+        if requirements is None:
+            return CompletedResources(station_id=-1, team=())
+        required_skill, demand, _ = requirements
+        worker_ids = self._legal_worker_ids(
+            worker_x,
+            required_skill=required_skill,
+            station_id=station_id,
+            worker_mask=worker_mask,
+        )
+        if len(worker_ids) < demand:
+            return None
+
+        worker_wait = torch.expm1(
+            worker_x[:, self.worker_layout.wait_idx].float().clamp_min(0.0)
+        )
+        worker_ids.sort(
+            key=lambda worker_id: (
+                float(worker_wait[worker_id].item()),
+                int(worker_id),
+            )
+        )
+        return CompletedResources(
+            station_id=int(station_id),
+            team=tuple(int(worker_id) for worker_id in worker_ids[:demand]),
+        )
+
+    def enumerate_team_candidates_from_features(
+        self,
+        *,
+        task_x: torch.Tensor,
+        worker_x: torch.Tensor,
+        station_x: torch.Tensor,
+        task_id: int,
+        station_id: int,
+        worker_mask: torch.Tensor | None,
+        max_candidates: int | None = None,
+    ) -> TeamCandidates | None:
+        """为误用候选团队接口时提供单一 MinWait 团队，不读取效率等启发式字段。"""
+        limit = int(
+            max_candidates
+            if max_candidates is not None
+            else getattr(self.config, "conditional_team_max_candidates", 4)
+        )
+        if limit < 1:
+            raise ValueError("conditional_team_max_candidates 必须大于等于 1")
+        requirements = self._extract_task_requirements(task_x, task_id)
+        if requirements is None:
+            return TeamCandidates(
+                station_id=-1,
+                teams=((),),
+                gate_features=torch.zeros(5, dtype=task_x.dtype, device=task_x.device),
+                relative_finish_costs=torch.zeros(1, dtype=task_x.dtype, device=task_x.device),
+            )
+        required_skill, demand, _ = requirements
+        completed = self._complete_for_station(
+            task_x=task_x,
+            worker_x=worker_x,
+            station_x=station_x,
+            task_id=task_id,
+            station_id=station_id,
+            worker_mask=worker_mask,
+        )
+        if completed is None:
+            return None
+        legal_workers = self._legal_worker_ids(
+            worker_x,
+            required_skill=required_skill,
+            station_id=station_id,
+            worker_mask=worker_mask,
+        )
+        count = max(1, int(worker_x.size(0)))
+        gate_features = torch.tensor(
+            [
+                min(1.0, float(demand) / count),
+                min(1.0, float(len(legal_workers)) / count),
+                1.0 / float(limit),
+                0.0,
+                0.0,
+            ],
+            dtype=task_x.dtype,
+            device=task_x.device,
+        )
+        return TeamCandidates(
+            station_id=int(station_id),
+            teams=(completed.team,),
+            gate_features=gate_features,
+            relative_finish_costs=torch.zeros(
+                1, dtype=task_x.dtype, device=task_x.device
+            ),
+        )
+
+    def complete(
+        self,
+        obs: HeteroData,
+        *,
+        task_id: int,
+        station_mask: torch.Tensor | None,
+        worker_mask: torch.Tensor | None,
+        selected_station: int | None = None,
+    ) -> CompletedResources | None:
+        """按 station wait/id 与 worker wait/id 返回合法资源动作。"""
+        task_x = obs["task"].x
+        worker_x = obs["worker"].x
+        station_x = obs["station"].x
+        assert task_x.ndim == worker_x.ndim == station_x.ndim == 2
+        assert worker_x.size(1) == self.worker_layout.total_dim
+        assert station_x.size(1) > 4
+
+        requirements = self._extract_task_requirements(task_x, task_id)
+        if requirements is None:
+            return CompletedResources(station_id=-1, team=())
+
+        station_mask_flat = None
+        if station_mask is not None:
+            # input shape: [S] or [1, S] -> [S]
+            station_mask_flat = station_mask.to(
+                device=station_x.device, dtype=torch.bool
+            ).reshape(-1)
+            if station_mask_flat.numel() != station_x.size(0):
+                raise ValueError(
+                    "station_mask 形状必须能展平为 [站位数]，"
+                    f"收到 {tuple(station_mask.shape)}"
+                )
+
+        if selected_station is None:
+            valid = torch.ones(
+                station_x.size(0), dtype=torch.bool, device=station_x.device
+            )
+            if station_mask_flat is not None:
+                valid &= ~station_mask_flat
+            # input shape: [S] -> [K]，K 为未被 mask 的站位数
+            station_candidates = torch.nonzero(valid, as_tuple=True)[0].tolist()
+            station_wait = torch.expm1(
+                station_x[:, 4].float().clamp_min(0.0)
+            )
+            station_candidates.sort(
+                key=lambda station_id: (
+                    float(station_wait[station_id].item()),
+                    int(station_id),
+                )
+            )
+        else:
+            station_candidates = [int(selected_station)]
+
+        for station_id in station_candidates:
+            if not 0 <= station_id < station_x.size(0):
+                raise ValueError(f"selected_station 超出范围: {station_id}")
+            if station_mask_flat is not None and bool(
+                station_mask_flat[station_id].item()
+            ):
+                continue
+            completed = self._complete_for_station(
+                task_x=task_x,
+                worker_x=worker_x,
+                station_x=station_x,
+                task_id=task_id,
+                station_id=station_id,
+                worker_mask=worker_mask,
+            )
+            if completed is not None:
+                return completed
+        return None
+
+
 def build_action_completer(
     config: Any,
-) -> EarliestFinishActionCompleter | EarliestAvailabilityActionCompleter:
+) -> (
+    EarliestFinishActionCompleter
+    | EarliestAvailabilityActionCompleter
+    | MinWaitActionCompleter
+):
     """按 completion mode 构造普通动作补全器。"""
     mode = str(getattr(config, "action_completion_mode", "earliest_finish")).lower()
     if mode == "earliest_finish":
         return EarliestFinishActionCompleter(config)
     if mode == "earliest_availability":
         return EarliestAvailabilityActionCompleter(config)
+    if mode == "min_wait":
+        return MinWaitActionCompleter(config)
     raise ValueError(
         "action_completion_mode 无效："
-        f"{mode!r}；允许值=['earliest_availability', 'earliest_finish']"
+        f"{mode!r}；允许值=['earliest_availability', 'earliest_finish', 'min_wait']"
     )
 
 
@@ -482,6 +682,7 @@ __all__ = [
     "CompletedResources",
     "EarliestAvailabilityActionCompleter",
     "EarliestFinishActionCompleter",
+    "MinWaitActionCompleter",
     "TeamCandidates",
     "build_action_completer",
 ]

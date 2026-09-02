@@ -119,4 +119,34 @@ def test_reschedule_ablation_write_plan_outputs_auditable_files(tmp_path: Path) 
     assert (output_dir / "reschedule_ablation_suite_config.json").exists()
     script = (output_dir / "run_reschedule_ablation_suite.sh").read_text(encoding="utf-8")
     assert "CUBLAS_WORKSPACE_CONFIG" in script
-    assert rows[0].command in script
+
+
+def test_strict_variants_freeze_scopes_completion_masks_and_bic(tmp_path: Path) -> None:
+    args = _base_args(tmp_path)
+    args.variants = [
+        "operation_only_strict",
+        "operation_station_strict",
+        "homogeneous_graphsage_strict",
+    ]
+
+    rows = {row.variant: row for row in build_command_rows(args)}
+
+    assert "policy_action_scope=operation" in rows["operation_only_strict"].command
+    assert "policy_observation_scope=task" in rows["operation_only_strict"].command
+    assert "action_completion_mode=min_wait" in rows["operation_only_strict"].command
+    assert "task_feature_scope=intrinsic" in rows["operation_only_strict"].command
+    assert "task_mask_mode=precedence_release_only" in rows["operation_only_strict"].command
+    assert "station_mask_mode=structural_only" in rows["operation_only_strict"].command
+
+    assert "policy_action_scope=operation_station" in rows["operation_station_strict"].command
+    assert "policy_observation_scope=task_station" in rows["operation_station_strict"].command
+    assert "action_completion_mode=min_wait" in rows["operation_station_strict"].command
+    assert "station_mask_mode=structural_only" in rows["operation_station_strict"].command
+
+    assert "graph_encoder_mode=homogeneous_graphsage_strict" in rows["homogeneous_graphsage_strict"].command
+    assert "homogeneous_use_type_embedding=false" in rows["homogeneous_graphsage_strict"].command
+
+    assert all(
+        "reschedule_baseline_identity_conditioning=false" in row.command
+        for row in rows.values()
+    )

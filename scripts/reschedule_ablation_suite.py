@@ -25,6 +25,7 @@ class RescheduleAblationVariant:
     name: str
     warm_start_argument: str
     overrides: tuple[str, ...] = ()
+    experiment: str = "reschedule_task_delay"
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,46 @@ VARIANTS: dict[str, RescheduleAblationVariant] = {
         "no_attention_model_path",
         ("actor_context_mode=mean_max",),
     ),
+    "operation_only_strict": RescheduleAblationVariant(
+        "operation_only_strict",
+        "full_model_path",
+        (
+            "policy_action_scope=operation",
+            "policy_observation_scope=task",
+            "critic_observation_scope=match_policy",
+            "task_feature_scope=intrinsic",
+            "action_completion_mode=min_wait",
+            "task_mask_mode=precedence_release_only",
+            "station_mask_mode=structural_only",
+            "team_selection_mode=autoregressive",
+            "conditional_head_baseline_mode=off",
+        ),
+        experiment="reschedule_task_delay_r5_operation_only_strict",
+    ),
+    "operation_station_strict": RescheduleAblationVariant(
+        "operation_station_strict",
+        "full_model_path",
+        (
+            "policy_action_scope=operation_station",
+            "policy_observation_scope=task_station",
+            "critic_observation_scope=match_policy",
+            "action_completion_mode=min_wait",
+            "station_mask_mode=structural_only",
+            "team_selection_mode=autoregressive",
+            "conditional_head_baseline_mode=off",
+        ),
+        experiment="reschedule_task_delay_r5_operation_station_strict",
+    ),
+    "homogeneous_graphsage_strict": RescheduleAblationVariant(
+        "homogeneous_graphsage_strict",
+        "full_model_path",
+        (
+            "graph_encoder_mode=homogeneous_graphsage_strict",
+            "homogeneous_use_type_embedding=false",
+            "critic_observation_scope=full",
+        ),
+        experiment="reschedule_task_delay_r5_homogeneous_graphsage_strict",
+    ),
 }
 
 # 这些变体不能被一键套件静默纳入。保留原因可让命令入口直接给出可审计的错误。
@@ -65,7 +106,14 @@ UNAVAILABLE_VARIANT_REASONS: dict[str, str] = {
 EXTRA_ARGUMENTS: dict[str, ExtraArgument] = {
     "mode": ExtraArgument(default="plan", help="plan 只生成命令；run 顺序执行命令"),
     "variants": ExtraArgument(
-        default=["full", "no_gat", "no_attention"],
+        default=[
+            "full",
+            "no_gat",
+            "no_attention",
+            "operation_only_strict",
+            "operation_station_strict",
+            "homogeneous_graphsage_strict",
+        ],
         help="消融变体列表",
     ),
     "instance_ids": ExtraArgument(default=["real_680"], help="manifest 中的验证实例列表"),
@@ -208,7 +256,7 @@ def build_command_rows(args: Any) -> list[CommandRow]:
                 tokens = [
                     str(getattr(args, "python_executable")),
                     "train.py",
-                    "experiment=reschedule_task_delay",
+                    f"experiment={variant.experiment}",
                     f"train_data_path_or_dir={getattr(args, 'train_data_path_or_dir')}",
                     f"reschedule_manifest_path={getattr(args, 'manifest_path')}",
                     f"reschedule_eval_instance_id={instance_id}",
@@ -226,6 +274,8 @@ def build_command_rows(args: Any) -> list[CommandRow]:
                     tokens.append(f"num_envs={int(getattr(args, 'num_envs'))}")
                 tokens.extend(variant.overrides)
                 tokens.extend(extra_overrides)
+                # 对比/消融协议统一关闭 baseline identity conditioning，且放在最后防止被覆盖。
+                tokens.append("reschedule_baseline_identity_conditioning=false")
                 rows.append(
                     CommandRow(
                         variant=variant.name,

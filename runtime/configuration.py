@@ -48,7 +48,10 @@ STRUCTURAL_FIELDS = {
     "skill_hub_bidirectional", "num_skill_types", "skill_feat_dim",
     "worker_skill_feature_slots",
     "use_input_layer_norm", "use_gat_layer_norm", "use_head_layer_norm",
-    "use_shared_trunk", "policy_action_scope", "policy_observation_scope", "conditional_team_max_candidates",
+    "use_shared_trunk", "policy_action_scope", "policy_observation_scope",
+    "graph_input_scope",
+    "critic_observation_scope", "task_feature_scope", "task_mask_mode",
+    "station_mask_mode", "action_completion_mode", "conditional_team_max_candidates",
     "conditional_team_gate_bias", "conditional_team_nonbaseline_logit",
     "conditional_team_scoring_mode", "conditional_team_prior_margin",
     "conditional_team_prior_weight", "workforce_binding_mode",
@@ -65,7 +68,8 @@ STRUCTURAL_FIELDS = {
     "worker_pointer_v2_fast_replay_encoder_batch_cap",
     "reschedule_baseline_identity_conditioning",
     "conditional_head_baseline_mode",
-    "graph_encoder_mode", "actor_context_mode",
+    "graph_encoder_mode", "actor_context_mode", "homogeneous_use_type_embedding",
+    "homogeneous_shared_input_projection",
     "anchor_proposal_mode", "anchor_proposal_prior_margin",
     "anchor_proposal_gate_bias",
     "anchor_proposal_train_branch_floor_start",
@@ -75,18 +79,29 @@ STRUCTURAL_FIELDS = {
 }
 
 _VALID_EXPERIMENT_MODES = {
-    "action_completion_mode": {"earliest_finish", "earliest_availability"},
+    "ablation_protocol": {"legacy", "strict_v1"},
+    "action_completion_mode": {"earliest_finish", "earliest_availability", "min_wait"},
     "policy_action_scope": {
         "operation", "operation_station", "operation_station_worker",
         "operation_station_gated_team", "operation_station_anchor_proposal_team",
     },
     "policy_observation_scope": {"full", "task", "task_station"},
+    "graph_input_scope": {"full", "task", "task_station", "match_policy"},
+    "critic_observation_scope": {"full", "task", "task_station", "match_policy"},
+    "task_feature_scope": {"full", "intrinsic"},
+    "task_mask_mode": {"resource_aware", "precedence_release_only"},
+    "station_mask_mode": {"resource_aware", "structural_only"},
     "workforce_binding_mode": {"endogenous", "preallocated"},
     "team_selection_mode": {
         "autoregressive", "autoregressive_pressure_v2",
         "autoregressive_pressure_v2_fast_exact", "static_topq",
     },
-    "graph_encoder_mode": {"hetero_gat", "homogeneous_graphsage", "none"},
+    "graph_encoder_mode": {
+        "hetero_gat",
+        "homogeneous_graphsage",
+        "homogeneous_graphsage_strict",
+        "none",
+    },
     "actor_context_mode": {"attention", "mean_max", "local_only"},
     "conditional_team_scoring_mode": {
         "fixed_prior_v1", "relative_heuristic_prior_v1",
@@ -264,6 +279,55 @@ def resolve_fast_exact_num_envs(
     )
 
 
+def _validate_strict_ablation_protocol(config: Config) -> None:
+    """校验 strict_v1 的三条信息隔离协议，避免只改标签而遗漏隔离项。"""
+    if config.ablation_protocol != "strict_v1":
+        return
+    if bool(getattr(config, "reschedule_baseline_identity_conditioning", False)):
+        raise ValueError("strict_v1 禁止 reschedule_baseline_identity_conditioning=true")
+
+    policy_scope = str(config.policy_observation_scope)
+    critic_scope = str(config.critic_observation_scope)
+    if critic_scope == "match_policy":
+        critic_scope = policy_scope
+    graph_scope = str(config.graph_input_scope)
+    if graph_scope == "match_policy":
+        graph_scope = policy_scope
+
+    if config.policy_action_scope == "operation":
+        expected = (
+            policy_scope == "task"
+            and graph_scope == "task"
+            and critic_scope == "task"
+            and config.task_feature_scope == "intrinsic"
+            and config.action_completion_mode == "min_wait"
+            and config.task_mask_mode == "precedence_release_only"
+            and config.station_mask_mode == "structural_only"
+        )
+    elif config.policy_action_scope == "operation_station":
+        expected = (
+            policy_scope == "task_station"
+            and graph_scope == "task_station"
+            and critic_scope == "task_station"
+            and config.action_completion_mode == "min_wait"
+            and config.station_mask_mode == "structural_only"
+        )
+    elif config.graph_encoder_mode == "homogeneous_graphsage_strict":
+        expected = (
+            policy_scope == "full"
+            and graph_scope == "full"
+            and critic_scope == "full"
+            and config.homogeneous_use_type_embedding is False
+        )
+    else:
+        raise ValueError(
+            "strict_v1 仅支持 operation、operation_station 或 "
+            "homogeneous_graphsage_strict 协议"
+        )
+    if not expected:
+        raise ValueError("strict_v1 的 action、observation、completion 或 mask 配置不完整")
+
+
 def validate_runtime_config(config: Config) -> None:
     if bool(getattr(config, "ablation_no_mask", False)):
         raise ValueError(
@@ -292,12 +356,28 @@ def validate_runtime_config(config: Config) -> None:
                 f"{field_name} 无效: {value!r}；允许值={sorted(choices)}"
             )
         setattr(config, field_name, value)
+    graph_scope = str(config.graph_input_scope)
+    if graph_scope == "match_policy":
+        graph_scope = str(config.policy_observation_scope)
+    if graph_scope != str(config.policy_observation_scope):
+        raise ValueError(
+            "graph_input_scope 必须与 policy_observation_scope 一致，避免图消息传递泄漏未授权节点"
+        )
+    if config.ablation_protocol == "strict_v1":
+        critic_scope = str(config.critic_observation_scope)
+        if critic_scope == "match_policy":
+            critic_scope = str(config.policy_observation_scope)
+        if critic_scope != str(config.policy_observation_scope):
+            raise ValueError(
+                "strict_v1 要求 critic_observation_scope=match_policy 或与 policy_observation_scope 一致"
+            )
+    _validate_strict_ablation_protocol(config)
     if (
-        config.action_completion_mode == "earliest_availability"
+        config.action_completion_mode in {"earliest_availability", "min_wait"}
         and config.policy_action_scope not in {"operation", "operation_station"}
     ):
         raise ValueError(
-            "action_completion_mode=earliest_availability 仅允许用于 "
+            "action_completion_mode=earliest_availability/min_wait 仅允许用于 "
             "policy_action_scope=operation 或 operation_station"
         )
     marginal_clip = float(config.worker_pointer_v2_marginal_scarcity_clip)

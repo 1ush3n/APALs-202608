@@ -261,6 +261,47 @@ def test_batched_v2_exploratory_config_resolves_without_async_gpu_evaluation() -
     assert cfg.conditional_head_value_coef == 1.0
 
 
+@pytest.mark.parametrize(
+    "experiment_name",
+    [
+        "reschedule_task_delay_r5_operation_only_strict",
+        "reschedule_task_delay_r5_operation_station_strict",
+        "reschedule_task_delay_r5_homogeneous_graphsage_strict",
+    ],
+)
+def test_strict_reschedule_configs_load_with_isolated_protocol(
+    experiment_name: str,
+) -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        [f"experiment={experiment_name}"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Windows",
+        create_run_context=False,
+    )
+
+    assert cfg.reschedule_baseline_identity_conditioning is False
+    assert cfg.ablation_protocol == "strict_v1"
+    assert cfg.graph_input_scope != "match_policy"
+    if experiment_name.endswith("operation_only_strict"):
+        assert cfg.policy_action_scope == "operation"
+        assert cfg.policy_observation_scope == "task"
+        assert cfg.critic_observation_scope == "match_policy"
+        assert cfg.task_feature_scope == "intrinsic"
+        assert cfg.action_completion_mode == "min_wait"
+        assert cfg.task_mask_mode == "precedence_release_only"
+        assert cfg.station_mask_mode == "structural_only"
+    elif experiment_name.endswith("operation_station_strict"):
+        assert cfg.policy_action_scope == "operation_station"
+        assert cfg.policy_observation_scope == "task_station"
+        assert cfg.action_completion_mode == "min_wait"
+        assert cfg.station_mask_mode == "structural_only"
+    else:
+        assert cfg.graph_encoder_mode == "homogeneous_graphsage_strict"
+        assert cfg.homogeneous_use_type_embedding is False
+
+
 def test_batched_v2_dynamic_eft_feature_can_be_enabled_from_hydra_cli() -> None:
     cfg = Config()
     initialize_hydra_runtime(

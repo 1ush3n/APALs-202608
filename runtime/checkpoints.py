@@ -31,6 +31,13 @@ class ModelSpec:
     resource_graph_mode: str
     policy_action_scope: str = "operation_station_worker"
     policy_observation_scope: str = "full"
+    graph_input_scope: str = "match_policy"
+    critic_observation_scope: str = "match_policy"
+    task_feature_scope: str = "full"
+    task_mask_mode: str = "resource_aware"
+    station_mask_mode: str = "resource_aware"
+    action_completion_mode: str = "earliest_finish"
+    ablation_protocol: str = "legacy"
     conditional_team_max_candidates: int = 4
     conditional_team_gate_bias: float = -4.0
     conditional_team_nonbaseline_logit: float = -8.0
@@ -56,6 +63,8 @@ class ModelSpec:
     conditional_head_baseline_mode: str = "off"
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
+    homogeneous_use_type_embedding: bool = True
+    homogeneous_shared_input_projection: bool = False
     hidden_dim: int | None = None
     num_gat_layers: int | None = None
     task_feat_dim: int | None = None
@@ -167,6 +176,19 @@ def build_model_spec(config: Config) -> ModelSpec:
         resource_graph_mode=mode,
         policy_action_scope=str(config.policy_action_scope),
         policy_observation_scope=str(getattr(config, "policy_observation_scope", "full")),
+        graph_input_scope=str(getattr(config, "graph_input_scope", "match_policy")),
+        critic_observation_scope=str(
+            getattr(config, "critic_observation_scope", "match_policy")
+        ),
+        task_feature_scope=str(getattr(config, "task_feature_scope", "full")),
+        task_mask_mode=str(getattr(config, "task_mask_mode", "resource_aware")),
+        station_mask_mode=str(
+            getattr(config, "station_mask_mode", "resource_aware")
+        ),
+        action_completion_mode=str(
+            getattr(config, "action_completion_mode", "earliest_finish")
+        ),
+        ablation_protocol=str(getattr(config, "ablation_protocol", "legacy")),
         conditional_team_max_candidates=int(config.conditional_team_max_candidates),
         conditional_team_gate_bias=float(config.conditional_team_gate_bias),
         conditional_team_nonbaseline_logit=float(config.conditional_team_nonbaseline_logit),
@@ -181,6 +203,12 @@ def build_model_spec(config: Config) -> ModelSpec:
         ),
         graph_encoder_mode=str(config.graph_encoder_mode),
         actor_context_mode=str(config.actor_context_mode),
+        homogeneous_use_type_embedding=bool(
+            getattr(config, "homogeneous_use_type_embedding", True)
+        ),
+        homogeneous_shared_input_projection=bool(
+            getattr(config, "homogeneous_shared_input_projection", False)
+        ),
         hidden_dim=int(config.hidden_dim),
         num_gat_layers=int(config.num_gat_layers),
         task_feat_dim=int(config.task_feat_dim),
@@ -613,6 +641,17 @@ def apply_checkpoint_model_spec(
         "skill_hub_bidirectional": spec.skill_hub_bidirectional,
         "policy_action_scope": spec.policy_action_scope,
         "policy_observation_scope": getattr(spec, "policy_observation_scope", "full"),
+        "graph_input_scope": getattr(spec, "graph_input_scope", "match_policy"),
+        "critic_observation_scope": getattr(
+            spec, "critic_observation_scope", "match_policy"
+        ),
+        "task_feature_scope": getattr(spec, "task_feature_scope", "full"),
+        "task_mask_mode": getattr(spec, "task_mask_mode", "resource_aware"),
+        "station_mask_mode": getattr(spec, "station_mask_mode", "resource_aware"),
+        "action_completion_mode": getattr(
+            spec, "action_completion_mode", "earliest_finish"
+        ),
+        "ablation_protocol": getattr(spec, "ablation_protocol", "legacy"),
         "conditional_team_max_candidates": spec.conditional_team_max_candidates,
         "conditional_team_gate_bias": spec.conditional_team_gate_bias,
         "conditional_team_nonbaseline_logit": spec.conditional_team_nonbaseline_logit,
@@ -624,6 +663,12 @@ def apply_checkpoint_model_spec(
         "team_selection_mode": spec.team_selection_mode,
         "graph_encoder_mode": spec.graph_encoder_mode,
         "actor_context_mode": spec.actor_context_mode,
+        "homogeneous_use_type_embedding": getattr(
+            spec, "homogeneous_use_type_embedding", True
+        ),
+        "homogeneous_shared_input_projection": getattr(
+            spec, "homogeneous_shared_input_projection", False
+        ),
         "reschedule_baseline_identity_conditioning": bool(
             getattr(spec, "reschedule_baseline_identity_conditioning", False)
         ),

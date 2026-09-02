@@ -21,6 +21,12 @@ model:
   policy_action_scope: operation_station_worker
   action_completion_mode: earliest_finish
   policy_observation_scope: full
+  graph_input_scope: match_policy
+  critic_observation_scope: match_policy
+  task_feature_scope: full
+  task_mask_mode: resource_aware
+  station_mask_mode: resource_aware
+  ablation_protocol: legacy
   conditional_team_max_candidates: 4
   conditional_team_gate_bias: -4.0
   conditional_team_nonbaseline_logit: -8.0
@@ -38,3 +44,5 @@ model:
   worker_pointer_v2_next_frontier_pressure: false
   graph_encoder_mode: hetero_gat
   actor_context_mode: attention
+  homogeneous_use_type_embedding: true
+  homogeneous_shared_input_projection: false
