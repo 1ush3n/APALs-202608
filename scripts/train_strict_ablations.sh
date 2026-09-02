@@ -61,4 +61,11 @@ ${PYTHON} train.py \
 
 echo "========================================================================"
 echo "All 3 strict ablation experiments trained successfully!"
+echo "Starting full 36-scenario evaluation..."
+echo "========================================================================"
+
+bash "${SCRIPT_DIR}/eval_strict_ablations.sh"
+
+echo "========================================================================"
+echo "Strict ablation training and evaluation suite completed!"
 echo "========================================================================"
