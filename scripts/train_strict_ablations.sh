@@ -1,7 +1,9 @@
 ﻿#!/usr/bin/env bash
 set -eo pipefail
 
-cd /root/autodl-tmp/APALs-202608-full-x
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_ROOT}"
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -18,6 +20,7 @@ echo "1. reschedule_task_delay_r5_operation_only_strict (60 episodes)"
 echo "2. reschedule_task_delay_r5_operation_station_strict (60 episodes)"
 echo "3. reschedule_task_delay_r5_homogeneous_graphsage_strict (60 episodes)"
 echo "Note: All strict ablations have reschedule_baseline_identity_conditioning=false"
+echo "Working directory: ${PROJECT_ROOT}"
 echo "========================================================================"
 
 # --- Experiment 1: Operation-Only Strict ---

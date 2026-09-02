@@ -1,7 +1,9 @@
 ﻿#!/usr/bin/env bash
 set -eo pipefail
 
-cd /root/autodl-tmp/APALs-202608-full-x
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_ROOT}"
 
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
@@ -13,6 +15,7 @@ PYTHON="/root/miniconda3/bin/python"
 
 echo "========================================================================"
 echo "Evaluating Strict Ablation Checkpoints on 36-scenario R5 Benchmark..."
+echo "Working directory: ${PROJECT_ROOT}"
 echo "========================================================================"
 
 # Find latest best checkpoints for each of the 3 experiments
