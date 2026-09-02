@@ -2972,17 +2972,21 @@ class PPOAgent:
                         enabled=bic_enabled,
                         device=self.device,
                     )
-                    worker_baseline_member_i = build_worker_baseline_membership(
-                        baseline_edges_i,
-                        selected_tasks=torch.tensor(
-                            [identity_task_i], device=self.device
-                        ),
-                        num_workers=worker_embs.size(0),
-                        candidate_worker_offsets=torch.tensor(
-                            [worker_offset_i], device=self.device
-                        ),
-                        enabled=bic_enabled,
-                        device=self.device,
+                    worker_baseline_member_i = (
+                        build_worker_baseline_membership(
+                            baseline_edges_i,
+                            selected_tasks=torch.tensor(
+                                [identity_task_i], device=self.device
+                            ),
+                            num_workers=worker_embs.size(0),
+                            candidate_worker_offsets=torch.tensor(
+                                [worker_offset_i], device=self.device
+                            ),
+                            enabled=bic_enabled,
+                            device=self.device,
+                        )
+                        if worker_embs is not None
+                        else None
                     )
                     station_logits = active_policy.station_head(
                         selected_task_emb,
