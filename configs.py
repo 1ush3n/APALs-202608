@@ -47,6 +47,8 @@ class Config:
     critic_observation_scope: str = "match_policy"
     # task 特征默认保持旧的完整输入；strict operation-only 使用 intrinsic。
     task_feature_scope: str = "full"
+    # station 特征默认保持旧的完整输入；strict operation_station 使用 no_worker_resource。
+    station_feature_scope: str = "full"
     # 默认值保持旧的资源感知掩码逻辑。
     task_mask_mode: str = "resource_aware"
     station_mask_mode: str = "resource_aware"

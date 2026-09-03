@@ -1,0 +1,32 @@
+# @package _global_
+defaults:
+  - /experiment/initial_strict_common@_global_
+  - _self_
+
+experiment:
+  experiment_name: initial_operation_only_strict
+
+model:
+  ablation_protocol: strict_v1
+  policy_action_scope: operation
+  policy_observation_scope: task
+  graph_input_scope: task
+  critic_observation_scope: match_policy
+
+  # 固有工序特征：初始 18 维中置零 10~15 维动态特征
+  task_feature_scope: intrinsic
+  task_mask_mode: precedence_release_only
+  station_mask_mode: structural_only
+
+  # 弱化补全器：纯 (wait, ID) 排序
+  action_completion_mode: min_wait
+  team_selection_mode: autoregressive
+  conditional_head_baseline_mode: off
+  reschedule_baseline_identity_conditioning: false
+
+  # 消融实验严禁使用 Dynamic EFT
+  worker_pointer_v2_dynamic_eft_features: false
+
+train:
+  worker_pointer_v2_behavior_replay: false
+  worker_pointer_v2_strict_gpu_replay: false

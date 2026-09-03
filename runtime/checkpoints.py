@@ -34,6 +34,7 @@ class ModelSpec:
     graph_input_scope: str = "match_policy"
     critic_observation_scope: str = "match_policy"
     task_feature_scope: str = "full"
+    station_feature_scope: str = "full"
     task_mask_mode: str = "resource_aware"
     station_mask_mode: str = "resource_aware"
     action_completion_mode: str = "earliest_finish"
@@ -181,6 +182,7 @@ def build_model_spec(config: Config) -> ModelSpec:
             getattr(config, "critic_observation_scope", "match_policy")
         ),
         task_feature_scope=str(getattr(config, "task_feature_scope", "full")),
+        station_feature_scope=str(getattr(config, "station_feature_scope", "full")),
         task_mask_mode=str(getattr(config, "task_mask_mode", "resource_aware")),
         station_mask_mode=str(
             getattr(config, "station_mask_mode", "resource_aware")
@@ -646,6 +648,7 @@ def apply_checkpoint_model_spec(
             spec, "critic_observation_scope", "match_policy"
         ),
         "task_feature_scope": getattr(spec, "task_feature_scope", "full"),
+        "station_feature_scope": getattr(spec, "station_feature_scope", "full"),
         "task_mask_mode": getattr(spec, "task_mask_mode", "resource_aware"),
         "station_mask_mode": getattr(spec, "station_mask_mode", "resource_aware"),
         "action_completion_mode": getattr(

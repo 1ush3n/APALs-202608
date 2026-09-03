@@ -411,12 +411,20 @@ class APALRolloutService:
                 }
 
                 actions = [None] * self.num_envs
+                deadlocked_in_step = []
                 for result_idx, env_idx in enumerate(active):
                     action, logprob, value, _, is_invalid = results[result_idx]
-                    if is_invalid:
-                        raise RuntimeError(
-                            f"训练阶段产生非法动作: env={env_idx}, action={action}"
-                        )
+                    if is_invalid or action is None:
+                        dones[env_idx] = True
+                        deadlocked_in_step.append(env_idx)
+                        if memories[env_idx].rewards:
+                            memories[env_idx].rewards[-1] -= (
+                                self.config.deadlock_penalty_constant
+                                * self.config.r_coef_makespan
+                                * self.config.reward_scale
+                            )
+                            memories[env_idx].is_terminals[-1] = True
+                        continue
                     actions[env_idx] = action
                     self._append_action(
                         memories[env_idx],
@@ -436,22 +444,26 @@ class APALRolloutService:
                         conditional_values=self.agent.last_v2_behavior_values[result_idx],
                     )
 
+                step_active = [env_idx for env_idx in active if env_idx not in deadlocked_in_step]
+                if not step_active:
+                    break
+
                 heartbeat.update(
                     "environment_step",
                     step,
-                    len(active),
-                    self.num_envs - len(active),
+                    len(step_active),
+                    self.num_envs - len(step_active),
                 )
                 stage_started = time.perf_counter()
                 if self.use_ipc_fusion:
                     fused_steps = self.vector_env.step_rollout_indices(
-                        {index: actions[index] for index in active}
+                        {index: actions[index] for index in step_active}
                     )
                     next_snapshots = list(snapshots)
                     rewards = [0.0] * self.num_envs
                     step_dones = list(dones)
                     step_infos: list[dict | None] = [None] * self.num_envs
-                    for index in active:
+                    for index in step_active:
                         next_masks, next_snapshot, reward, step_done, step_info = (
                             fused_steps[index]
                         )
@@ -461,13 +473,23 @@ class APALRolloutService:
                         step_dones[index] = step_done
                         step_infos[index] = step_info
                 else:
-                    next_snapshots, rewards, step_dones, step_infos = (
-                        self.vector_env.step_snapshot_all(actions)
+                    step_results = self.vector_env.step_snapshot_indices(
+                        {index: actions[index] for index in step_active}
                     )
+                    next_snapshots = list(snapshots)
+                    rewards = [0.0] * self.num_envs
+                    step_dones = list(dones)
+                    step_infos: list[dict | None] = [None] * self.num_envs
+                    for index in step_active:
+                        snap, reward, step_done, step_info = step_results[index]
+                        next_snapshots[index] = snap
+                        rewards[index] = reward
+                        step_dones[index] = step_done
+                        step_infos[index] = step_info
                 environment_step_seconds += time.perf_counter() - stage_started
-                environment_steps += len(active)
+                environment_steps += len(step_active)
 
-                for env_idx in active:
+                for env_idx in step_active:
                     step_info = step_infos[env_idx] or {}
                     if step_info.get("invalid_action", False):
                         action = actions[env_idx]

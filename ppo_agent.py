@@ -3403,7 +3403,7 @@ class PPOAgent:
                 )
 
         state_values = (
-            torch.stack(state_value_tensors)
+            torch.stack([v.reshape(-1) for v in state_value_tensors])
             .detach()
             .float()
             .reshape(-1)
@@ -3411,9 +3411,10 @@ class PPOAgent:
             .tolist()
         )
         action_logprobs = (
-            torch.stack([decoded[3] for decoded in decoded_actions])
+            torch.stack([decoded[3].reshape(-1) for decoded in decoded_actions])
             .detach()
             .float()
+            .reshape(-1)
             .cpu()
             .tolist()
         )

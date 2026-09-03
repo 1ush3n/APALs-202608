@@ -25,8 +25,7 @@ experiment:
   enable_multi_benchmark_eval: false
   multi_benchmark_data_paths: []
   multi_benchmark_reference_makespans: '{}'
-  checkpoint_selection_protocol: multiscale_manifest
-  checkpoint_selection_manifest_path: data/initial_selection_manifests/real_four_instances_temperature0_v1.json
+  checkpoint_selection_protocol: single_standard
 
 model:
   team_selection_mode: autoregressive_pressure_v2_fast_exact

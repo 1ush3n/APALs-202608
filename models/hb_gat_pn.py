@@ -78,7 +78,10 @@ def filter_task_features_for_scope(
     scope: str,
     num_skill_types: int,
 ) -> torch.Tensor:
-    """过滤 task 的动态资源/重调度 baseline 列，同时保留原输入宽度以兼容 warm start。"""
+    """过滤 task 的动态资源/重调度 baseline 列，同时保留原输入宽度以兼容 warm start。
+    - 初始调度 (task_feat_dim=18): intrinsic 保留 0..4 (固有/状态), 5..9 (技能), 16 (需求工人数), 17 (物料等待)，置零 10..15 维动态工序特征。
+    - 重调度 (task_feat_dim=24): 额外置零 18..23 维基准扰动相关特征。
+    """
     assert task_x.ndim == 2, f"task_x 必须是二维张量，收到 {tuple(task_x.shape)}"
     if str(scope).lower() == "full":
         return task_x
@@ -90,6 +93,25 @@ def filter_task_features_for_scope(
     # 输入形状：[T, F] -> [T, F]；非 intrinsic 列置零，保持 checkpoint 输入宽度不变。
     return torch.where(keep.unsqueeze(0), task_x, torch.zeros_like(task_x))
 
+
+def filter_station_features_for_scope(
+    station_x: torch.Tensor,
+    *,
+    scope: str,
+) -> torch.Tensor:
+    """过滤 station 的 worker 宏观资源特征（列 1, 2, 3），防止在 task_station 消融中泄漏 Worker 状态。"""
+    assert station_x.ndim == 2, f"station_x 必须是二维张量，收到 {tuple(station_x.shape)}"
+    if str(scope).lower() == "full":
+        return station_x
+    if str(scope).lower() != "no_worker_resource":
+        raise ValueError(f"未知 station_feature_scope: {scope!r}")
+    keep = torch.ones(station_x.size(1), dtype=torch.bool, device=station_x.device)
+    # 列 1: 站位绑定工人比; 列 2: 全局自由工人比; 列 3: 站内可用工人比
+    keep[1] = False
+    keep[2] = False
+    keep[3] = False
+    return torch.where(keep.unsqueeze(0), station_x, torch.zeros_like(station_x))
+
 # ---------------------------------------------------------------------------
 # 特征嵌入模块 (Feature Embedder)
 # 作用: 将原始异构节点特征投影到统一的隐藏层维度
@@ -98,6 +120,7 @@ class FeatureEmbedder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.task_feature_scope = str(getattr(config, "task_feature_scope", "full"))
+        self.station_feature_scope = str(getattr(config, "station_feature_scope", "full"))
         self.num_skill_types = int(getattr(config, "num_skill_types", NUM_SKILL_TYPES))
         self.shared_input_projection = bool(
             getattr(config, "homogeneous_shared_input_projection", False)
@@ -174,7 +197,11 @@ class FeatureEmbedder(nn.Module):
         if 'worker' in x_dict:
             out['worker'] = self._project(x_dict['worker'], self.worker_emb)
         if 'station' in x_dict:
-            out['station'] = self._project(x_dict['station'], self.station_emb)
+            station_x = filter_station_features_for_scope(
+                x_dict['station'],
+                scope=self.station_feature_scope,
+            )
+            out['station'] = self._project(station_x, self.station_emb)
         if 'skill' in x_dict:
             if self.shared_input_projection:
                 out['skill'] = self._project(x_dict['skill'], None)

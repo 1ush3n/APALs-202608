@@ -24,6 +24,7 @@ reference_makespans:
   "3182": 3622.06
 
 methods:
+  - full_x_initial
   - full_joint
   - operation_station
   - operation_only
@@ -51,7 +52,7 @@ methods:
   - SA
   - GA
 
-reference_method: full_joint
+reference_method: full_x_initial
 seeds: [0, 1, 2, 3, 4]
 bootstrap_samples: 2000
 permutation_samples: 5000
@@ -59,6 +60,9 @@ station_count: 5
 worker_count: 80
 
 ablations:
+  full_x_initial:
+    experiment: initial_worker_pointer_v2_full_x
+    overrides: []
   full_joint:
     experiment: scale_400_800_schedule
     overrides: []
@@ -112,17 +116,20 @@ ablations:
     overrides:
       - actor_context_mode=local_only
   operation_station_strict:
-    experiment: scale_400_800_schedule
+    experiment: initial_operation_station_strict
     overrides:
       - policy_action_scope=operation_station
       - policy_observation_scope=task_station
       - graph_input_scope=task_station
       - critic_observation_scope=match_policy
+      - task_feature_scope=intrinsic
+      - station_feature_scope=no_worker_resource
       - action_completion_mode=min_wait
+      - task_mask_mode=precedence_release_only
       - station_mask_mode=structural_only
       - ablation_protocol=strict_v1
   operation_only_strict:
-    experiment: scale_400_800_schedule
+    experiment: initial_operation_only_strict
     overrides:
       - policy_action_scope=operation
       - policy_observation_scope=task
@@ -134,7 +141,7 @@ ablations:
       - station_mask_mode=structural_only
       - ablation_protocol=strict_v1
   homogeneous_graphsage_strict:
-    experiment: scale_400_800_schedule
+    experiment: initial_homogeneous_graphsage_strict
     overrides:
       - graph_encoder_mode=homogeneous_graphsage_strict
       - homogeneous_use_type_embedding=false
@@ -145,6 +152,7 @@ ablations:
       - ablation_protocol=strict_v1
 
 checkpoints:
+  full_x_initial: {}
   full_joint:
     "680": checkpoints/initial_schedule/best_680.ckpt
   operation_station: {}

@@ -50,8 +50,8 @@ STRUCTURAL_FIELDS = {
     "use_input_layer_norm", "use_gat_layer_norm", "use_head_layer_norm",
     "use_shared_trunk", "policy_action_scope", "policy_observation_scope",
     "graph_input_scope",
-    "critic_observation_scope", "task_feature_scope", "task_mask_mode",
-    "station_mask_mode", "action_completion_mode", "conditional_team_max_candidates",
+    "critic_observation_scope", "task_feature_scope", "station_feature_scope",
+    "task_mask_mode", "station_mask_mode", "action_completion_mode", "conditional_team_max_candidates",
     "conditional_team_gate_bias", "conditional_team_nonbaseline_logit",
     "conditional_team_scoring_mode", "conditional_team_prior_margin",
     "conditional_team_prior_weight", "workforce_binding_mode",
@@ -89,6 +89,7 @@ _VALID_EXPERIMENT_MODES = {
     "graph_input_scope": {"full", "task", "task_station", "match_policy"},
     "critic_observation_scope": {"full", "task", "task_station", "match_policy"},
     "task_feature_scope": {"full", "intrinsic"},
+    "station_feature_scope": {"full", "no_worker_resource"},
     "task_mask_mode": {"resource_aware", "precedence_release_only"},
     "station_mask_mode": {"resource_aware", "structural_only"},
     "workforce_binding_mode": {"endogenous", "preallocated"},
@@ -285,6 +286,8 @@ def _validate_strict_ablation_protocol(config: Config) -> None:
         return
     if bool(getattr(config, "reschedule_baseline_identity_conditioning", False)):
         raise ValueError("strict_v1 禁止 reschedule_baseline_identity_conditioning=true")
+    if bool(getattr(config, "worker_pointer_v2_dynamic_eft_features", False)):
+        raise ValueError("strict_v1 消融与对比协议禁止启用 worker_pointer_v2_dynamic_eft_features")
 
     policy_scope = str(config.policy_observation_scope)
     critic_scope = str(config.critic_observation_scope)
@@ -309,8 +312,11 @@ def _validate_strict_ablation_protocol(config: Config) -> None:
             policy_scope == "task_station"
             and graph_scope == "task_station"
             and critic_scope == "task_station"
-            and config.action_completion_mode == "min_wait"
+            and config.task_feature_scope == "intrinsic"
+            and config.station_feature_scope == "no_worker_resource"
+            and config.task_mask_mode == "precedence_release_only"
             and config.station_mask_mode == "structural_only"
+            and config.action_completion_mode == "min_wait"
         )
     elif config.graph_encoder_mode == "homogeneous_graphsage_strict":
         expected = (

@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from torch import nn
 from torch_geometric.data import HeteroData
@@ -186,10 +187,86 @@ def test_strict_homogeneous_graphsage_merges_relations_without_type_embedding() 
     assert sorted(map(tuple, capture.edge_index.t().tolist())) == [(0, 0), (0, 1)]
 
 
+def test_station_scope_filters_worker_macro_features_for_actor_and_critic() -> None:
+    config = Config(
+        hidden_dim=8,
+        task_feat_dim=24,
+        worker_feat_dim=17,
+        station_feat_dim=15,
+        use_skill_hub=False,
+        graph_encoder_mode="none",
+        policy_action_scope="operation_station",
+        policy_observation_scope="task_station",
+    )
+    config.critic_observation_scope = "match_policy"
+    config.task_feature_scope = "intrinsic"
+    config.station_feature_scope = "no_worker_resource"
+    observation = _strict_observation()
+    altered = observation.clone()
+    # 改变 station 的 worker 宏观特征（列 1: 绑定工人比, 2: 自由工人比, 3: 空闲可用工人比）
+    altered["station"].x[:, 1:4] = 999.0
+    altered["worker"].x = altered["worker"].x - 999.0
+
+    model = HBGATPN(config).eval()
+    with torch.inference_mode():
+        encoded, context = model(observation)
+        altered_encoded, altered_context = model(altered)
+        task_logits = model.task_head(encoded["task"], context)
+        altered_task_logits = model.task_head(altered_encoded["task"], altered_context)
+        station_logits = model.station_head(encoded["task"][:1], encoded["station"].unsqueeze(0))
+        altered_station_logits = model.station_head(altered_encoded["task"][:1], altered_encoded["station"].unsqueeze(0))
+        value = model.get_value(observation, actor_x_dict_encoded=encoded)
+        altered_value = model.get_value(altered, actor_x_dict_encoded=altered_encoded)
+
+    assert set(encoded) == {"task", "station"}
+    torch.testing.assert_close(encoded["station"], altered_encoded["station"])
+    torch.testing.assert_close(context, altered_context)
+    torch.testing.assert_close(task_logits, altered_task_logits)
+    torch.testing.assert_close(station_logits, altered_station_logits)
+    torch.testing.assert_close(value, altered_value)
+
+
+def test_strict_v1_validation_rejects_leakage_and_dynamic_eft() -> None:
+    from runtime.configuration import _validate_strict_ablation_protocol
+
+    # 1. 验证 dynamic_eft 在 strict_v1 中被严厉禁止
+    cfg_eft = Config(
+        ablation_protocol="strict_v1",
+        policy_action_scope="operation",
+        policy_observation_scope="task",
+        task_feature_scope="intrinsic",
+        action_completion_mode="min_wait",
+        task_mask_mode="precedence_release_only",
+        station_mask_mode="structural_only",
+    )
+    cfg_eft.worker_pointer_v2_dynamic_eft_features = True
+    with pytest.raises(ValueError, match="禁止启用 worker_pointer_v2_dynamic_eft_features"):
+        _validate_strict_ablation_protocol(cfg_eft)
+
+    # 2. 验证 operation_station 缺少 station_feature_scope 会被拒绝
+    cfg_station = Config(
+        ablation_protocol="strict_v1",
+        policy_action_scope="operation_station",
+        policy_observation_scope="task_station",
+        task_feature_scope="intrinsic",
+        station_feature_scope="full",  # 未隔离
+        action_completion_mode="min_wait",
+        task_mask_mode="precedence_release_only",
+        station_mask_mode="structural_only",
+    )
+    with pytest.raises(ValueError, match="配置不完整"):
+        _validate_strict_ablation_protocol(cfg_station)
+
+    # 3. 补全后校验通过
+    cfg_station.station_feature_scope = "no_worker_resource"
+    _validate_strict_ablation_protocol(cfg_station)
+
+
 def test_strict_fields_are_recorded_in_checkpoint_metadata() -> None:
     config = Config()
     config.critic_observation_scope = "match_policy"
     config.task_feature_scope = "intrinsic"
+    config.station_feature_scope = "no_worker_resource"
     config.task_mask_mode = "precedence_release_only"
     config.station_mask_mode = "structural_only"
     config.action_completion_mode = "min_wait"
@@ -202,7 +279,9 @@ def test_strict_fields_are_recorded_in_checkpoint_metadata() -> None:
 
     assert spec.action_completion_mode == "min_wait"
     assert spec.task_feature_scope == "intrinsic"
+    assert spec.station_feature_scope == "no_worker_resource"
     assert spec.task_mask_mode == "precedence_release_only"
     assert spec.station_mask_mode == "structural_only"
     assert spec.graph_encoder_mode == "homogeneous_graphsage_strict"
+    assert metadata["model_spec"]["station_feature_scope"] == "no_worker_resource"
     assert metadata["model_spec"]["reschedule_baseline_identity_conditioning"] is False

@@ -1,0 +1,43 @@
+# @package _global_
+defaults:
+  - /experiment/initial_strict_common@_global_
+  - _self_
+
+experiment:
+  experiment_name: initial_homogeneous_graphsage_strict
+
+model:
+  ablation_protocol: strict_v1
+
+  # 核心受控变量：同构图编码器，无显式 type_embedding，保留类型独立投影
+  graph_encoder_mode: homogeneous_graphsage_strict
+  homogeneous_use_type_embedding: false
+  homogeneous_shared_input_projection: false
+
+  # 动作与观测空间与主方法相同
+  policy_action_scope: operation_station_worker
+  policy_observation_scope: full
+  graph_input_scope: full
+  critic_observation_scope: full
+
+  team_selection_mode: autoregressive_pressure_v2_fast_exact
+  worker_pointer_v2_explicit_team_state: true
+  worker_pointer_v2_marginal_scarcity: true
+  worker_pointer_v2_interaction_residual: true
+  worker_pointer_v2_next_frontier_pressure: true
+
+  # 严禁使用 Dynamic EFT
+  worker_pointer_v2_dynamic_eft_features: false
+
+  conditional_head_baseline_mode: factorized
+  reschedule_baseline_identity_conditioning: false
+
+train:
+  max_episodes: 60
+  worker_pointer_v2_fast_replay_batching: logical_batch_v1
+  worker_pointer_v2_fast_replay_encoder_batch_cap: 32
+  worker_pointer_v2_behavior_replay: true
+  worker_pointer_v2_replay_mode: behavior_group_exact_gpu_template_v2
+  worker_pointer_v2_logical_batch_cap: 256
+  worker_pointer_v2_rollout_group_upper_bound: 16
+  worker_pointer_v2_strict_gpu_replay: true
