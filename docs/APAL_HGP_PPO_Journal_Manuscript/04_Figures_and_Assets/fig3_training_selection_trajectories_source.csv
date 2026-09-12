@@ -1,0 +1,91 @@
+epoch,metric_value,feasibility_rate,reward,task,target_instance,metric_name,selected_checkpoint,avg_makespan,eval_count
+2,1244.6998657773213,100.0,-1.0756981592633663,initial_scheduling,real_680,J_dev_makespan_h,False,,
+4,1174.7932097010516,100.0,-0.9897797190114402,initial_scheduling,real_680,J_dev_makespan_h,False,,
+6,1024.7228615952913,100.0,-0.7924258810382778,initial_scheduling,real_680,J_dev_makespan_h,False,,
+8,734.893261677991,100.0,-0.5433392008830813,initial_scheduling,real_680,J_dev_makespan_h,False,,
+10,755.7286116966666,100.0,-0.5804949950360505,initial_scheduling,real_680,J_dev_makespan_h,False,,
+12,921.0241763207956,100.0,-0.7820958067345501,initial_scheduling,real_680,J_dev_makespan_h,False,,
+14,661.4339161366205,100.0,-0.5270300110051288,initial_scheduling,real_680,J_dev_makespan_h,False,,
+16,608.0014611965661,100.0,-0.4543299005160859,initial_scheduling,real_680,J_dev_makespan_h,False,,
+18,736.7322944495227,100.0,-0.6232223465681143,initial_scheduling,real_680,J_dev_makespan_h,False,,
+20,672.3798155835507,100.0,-0.5384083226602195,initial_scheduling,real_680,J_dev_makespan_h,False,,
+22,676.4870317219936,100.0,-0.5822410474439145,initial_scheduling,real_680,J_dev_makespan_h,False,,
+24,577.8629060846001,100.0,-0.4567680961790255,initial_scheduling,real_680,J_dev_makespan_h,False,,
+26,588.1736234500526,100.0,-0.4607130889373692,initial_scheduling,real_680,J_dev_makespan_h,False,,
+28,581.858778986632,100.0,-0.4675740204237408,initial_scheduling,real_680,J_dev_makespan_h,False,,
+30,563.805977477359,100.0,-0.454496214740502,initial_scheduling,real_680,J_dev_makespan_h,False,,
+32,702.8004553289102,100.0,-0.6443060826641714,initial_scheduling,real_680,J_dev_makespan_h,False,,
+34,570.9199183898985,100.0,-0.4921563600569135,initial_scheduling,real_680,J_dev_makespan_h,False,,
+36,568.9949708323782,100.0,-0.4539419951533971,initial_scheduling,real_680,J_dev_makespan_h,False,,
+38,508.6746676520405,100.0,-0.4125095253724825,initial_scheduling,real_680,J_dev_makespan_h,False,,
+40,500.9659600849551,100.0,-0.3937081239061772,initial_scheduling,real_680,J_dev_makespan_h,False,,
+42,523.397230356399,100.0,-0.4385832733681876,initial_scheduling,real_680,J_dev_makespan_h,False,,
+44,493.5286032791882,100.0,-0.3837861429754206,initial_scheduling,real_680,J_dev_makespan_h,True,,
+46,549.4224216200337,100.0,-0.4544483663292746,initial_scheduling,real_680,J_dev_makespan_h,False,,
+48,504.92190381511546,100.0,-0.4005292849708605,initial_scheduling,real_680,J_dev_makespan_h,False,,
+50,520.9675983136068,100.0,-0.4180245996344618,initial_scheduling,real_680,J_dev_makespan_h,False,,
+52,508.292357587814,100.0,-0.4091792661650397,initial_scheduling,real_680,J_dev_makespan_h,False,,
+54,516.5396125528595,100.0,-0.4143097363166216,initial_scheduling,real_680,J_dev_makespan_h,False,,
+56,519.4017885598254,100.0,-0.4176800919154028,initial_scheduling,real_680,J_dev_makespan_h,False,,
+58,491.90602201066616,100.0,-0.3811456843170813,initial_scheduling,real_680,J_dev_makespan_h,False,,
+60,514.8255333005721,100.0,-0.4165631231103681,initial_scheduling,real_680,J_dev_makespan_h,False,,
+2,3.1937239999999996,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,636.7433333333333,3.0
+4,4.075437333333333,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,735.4966666666666,3.0
+6,4.572741333333334,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,765.0333333333334,3.0
+8,2.636995666666667,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,602.2766666666666,3.0
+10,2.176528,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,565.2833333333333,3.0
+12,2.2133373333333335,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,571.1266666666667,3.0
+14,1.7472199999999998,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,508.74333333333334,3.0
+16,1.349233,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,475.01666666666665,3.0
+18,1.3750876666666665,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,476.57,3.0
+20,1.1778033333333333,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,459.57,3.0
+22,1.1803413333333335,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,460.51,3.0
+24,1.1548723333333333,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,460.0133333333333,3.0
+26,1.1624746666666665,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,455.03666666666663,3.0
+28,1.161772,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,460.28999999999996,3.0
+30,1.0837933333333334,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,451.41,3.0
+32,1.1166556666666665,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,455.4866666666667,3.0
+34,1.1191890000000002,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,457.72,3.0
+36,1.0644696666666666,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,450.27,3.0
+38,1.0067066666666669,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,440.88333333333327,3.0
+40,0.9804883333333333,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,434.03666666666663,3.0
+42,0.984533,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,434.7266666666667,3.0
+44,0.9630363333333335,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,432.3333333333333,3.0
+46,0.9902586666666666,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,441.7966666666667,3.0
+48,1.0373133333333333,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,448.3433333333333,3.0
+50,0.9860613333333333,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,440.7266666666667,3.0
+52,0.9486176666666667,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,430.5,3.0
+54,1.004563,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,441.0133333333333,3.0
+56,1.0092566666666667,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,437.05,3.0
+58,1.000248,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,436.8966666666667,3.0
+60,1.012913,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,437.31,3.0
+62,0.9381576666666667,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,True,435.07,3.0
+64,1.0384913333333334,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,438.97333333333336,3.0
+66,1.0342653333333336,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,449.24666666666667,3.0
+68,1.0057686666666668,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,450.2833333333333,3.0
+70,1.0588066666666667,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,452.27333333333337,3.0
+72,1.0326833333333332,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,451.58666666666664,3.0
+74,1.0430343333333332,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,455.0833333333333,3.0
+76,1.0911583333333332,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,460.58,3.0
+78,1.098464,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,459.35999999999996,3.0
+80,1.0308826666666666,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,449.97333333333336,3.0
+82,1.246402,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,472.81,3.0
+84,1.37958,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,490.81,3.0
+86,1.3972753333333336,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,487.4766666666667,3.0
+88,1.6522613333333336,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,510.28,3.0
+90,1.6459733333333333,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,509.7633333333333,3.0
+92,1.6344396666666665,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,507.8166666666666,3.0
+94,1.2502516666666668,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,473.90000000000003,3.0
+96,1.1856643333333332,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,466.33666666666664,3.0
+98,1.0102400000000002,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,444.82,3.0
+100,1.0339476666666667,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,443.01,3.0
+102,1.043849,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,441.45666666666665,3.0
+104,1.0262566666666666,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,447.5166666666667,3.0
+106,1.036307,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,441.05333333333334,3.0
+108,1.0717646666666667,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,445.6466666666667,3.0
+110,0.9945606666666666,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,437.7133333333333,3.0
+112,0.976161,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,435.59999999999997,3.0
+114,0.9608723333333332,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,434.0666666666666,3.0
+116,0.9581873333333334,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,434.1566666666667,3.0
+118,1.0375556666666668,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,445.9633333333333,3.0
+120,1.0169416666666666,100.0,,template_rescheduling,validation_0001 (3 scenarios),dev_mean_composite_score_S,False,445.75666666666666,3.0

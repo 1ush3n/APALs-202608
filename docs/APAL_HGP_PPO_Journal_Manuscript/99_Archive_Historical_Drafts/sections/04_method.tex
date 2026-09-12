@@ -1,0 +1,114 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Overview}
+
+HGP-PPO is a graph reinforcement learning framework for APAL scheduling. Its policy network, HB-GAT-PN, contains three components: a heterogeneous graph constructor, a relation-aware graph attention encoder, and an autoregressive pointer decoder. The actor and critic can use isolated graph encoders to reduce value-gradient interference in long-horizon scheduling.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{overallarchitecture.png}
+  \caption{Overall architecture reused from the previous CAC draft. The journal version will revise this figure to include Skill Hub, rescheduling inputs, and constraint-checking outputs.}
+  \label{fig:architecture}
+\end{figure}
+
+\subsection{APAL heterogeneous graph}
+
+At each decision step, the APAL state is converted into a heterogeneous graph:
+\begin{equation}
+  G_t=(\mathcal{V}_t,\mathcal{E}_t),\quad
+  \mathcal{V}_t=\mathcal{V}_O\cup\mathcal{V}_S\cup\mathcal{V}_L\cup\mathcal{V}_W .
+\end{equation}
+The four node types represent operations, stations, skills, and workers. Operation nodes encode readiness, processing time, required skill, worker demand, scheduled status, predecessor progress, and dynamic release information. Station nodes encode station capacity, current load, slot release time, and feasibility. Skill nodes provide a semantic hub between workers and operations. Worker nodes encode skills, efficiency, availability, station binding, and current busy/free status.
+
+The Skill Hub design decomposes potentially dense worker-operation eligibility into two relation types: worker-skill and skill-operation. This decomposition has two purposes. Semantically, it matches the APAL fact that workers possess skills and operations require skills. Computationally, it reduces the number of direct worker-operation eligibility edges when many workers share the same skill. \need{edge-count, memory, rollout throughput, and quality comparison between direct worker-operation graph and Skill Hub graph}
+
+\subsection{Relation-aware graph attention}
+
+For each edge relation $r$, a relation-specific graph attention layer updates node embeddings. Let $h_i^{(\ell-1)}$ and $h_j^{(\ell-1)}$ be target and source embeddings at layer $\ell-1$. The unnormalized attention score is:
+\begin{equation}
+  e_{ij}^{r}
+  =
+  (a_r)^\top
+  \operatorname{LeakyReLU}
+  \left(
+  W_{r,dst}h_i^{(\ell-1)}
+  +
+  W_{r,src}h_j^{(\ell-1)}
+  \right).
+\end{equation}
+The normalized coefficient is:
+\begin{equation}
+  \alpha_{ij}^{r}
+  =
+  \frac{\exp(e_{ij}^{r})}
+  {\sum_{u\in\mathcal{N}_r(i)}\exp(e_{iu}^{r})}.
+\end{equation}
+The node embedding is updated by aggregating relation-specific messages:
+\begin{equation}
+  h_i^{(\ell)}
+  =
+  \sigma
+  \left(
+  W_0h_i^{(\ell-1)}
+  +
+  \sum_{r\in\mathcal{R}}\sum_{j\in\mathcal{N}_r(i)}
+  \alpha_{ij}^{r}W_rh_j^{(\ell-1)}
+  \right).
+\end{equation}
+This relation-specific attention allows the policy to treat precedence, skill, station compatibility, and binding edges as different scheduling signals rather than mixing them into one homogeneous adjacency matrix.
+
+\subsection{Autoregressive pointer decoding}
+
+The flattened joint action space has approximate size:
+\begin{equation}
+  |\mathcal{A}| \approx |\mathcal{O}_{ready}|\,|\mathcal{S}|\,\binom{|\mathcal{K}|}{q_i}.
+\end{equation}
+This grows combinatorially when many workers are available and an operation requires a multi-worker team. HGP-PPO avoids this flattening by factorizing the policy:
+\begin{equation}
+\begin{split}
+  \pi_\theta(a_t|s_t)
+  ={}& P_\theta(o_t|s_t)
+  P_\theta(m_t|o_t,s_t)\\
+  &\times
+  \prod_{r=1}^{q_{o_t}}
+  P_\theta(w_r|o_t,m_t,w_{<r},s_t).
+\end{split}
+\end{equation}
+First, an operation pointer selects a ready operation under precedence and release masks. Second, a station selector chooses a feasible station under compatibility, capacity, and spatial-flow masks. Third, a worker pointer selects workers sequentially. After each selected worker, the worker mask is refreshed to remove already selected workers, unavailable workers, workers without the required skill, and workers that violate station-binding constraints.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.82\linewidth]{autoregressivedecoder.png}
+  \caption{Autoregressive pointer decoding. The journal version should add mask-refresh equations and variable team-size examples.}
+  \label{fig:pointer}
+\end{figure}
+
+\subsection{Adaptive feasibility masks}
+
+The mask mechanism is not only an implementation detail. It embeds APAL hard constraints into policy inference. The operation mask enforces predecessor completion, frozen-task restrictions, and release availability. The station mask enforces station feasibility, capacity, spatial monotonicity, and station abnormality. The worker mask enforces skill compatibility, availability, station binding, duplicate-selection prevention, and rescheduling freeze rules.
+
+For logits $z$ and binary mask $M$, the masked distribution is:
+\begin{equation}
+  P(i|s_t,M)=
+  \frac{\exp(z_i)\mathbb{I}(M_i=1)}
+  {\sum_j \exp(z_j)\mathbb{I}(M_j=1)}.
+\end{equation}
+If all feasible actions are masked out, the environment reports a deadlock state and the episode is treated as infeasible. In final experiments, such failures must be counted through eligible rate and selection score rather than hidden by makespan-only reporting.
+
+\subsection{PPO optimization}
+
+The policy is trained with the clipped PPO objective:
+\begin{equation}
+  L^{clip}(\theta)
+  =
+  \mathbb{E}_t
+  \left[
+  \min
+  \left(
+  \rho_t(\theta)\hat{A}_t,
+  \operatorname{clip}(\rho_t(\theta),1-\epsilon,1+\epsilon)\hat{A}_t
+  \right)
+  \right],
+\end{equation}
+where $\rho_t(\theta)=\pi_\theta(a_t|s_t)/\pi_{\theta_{old}}(a_t|s_t)$ and $\hat{A}_t$ is the generalized advantage estimate. The final implementation should report AMP status, gradient accumulation, rollout parallelism, DataLoader worker count, replay or rollout storage location, and GPU memory peak because the target hardware has 8 GB VRAM and 16 GB RAM. \need{final training configuration audit under rag\_env on Windows and Linux}

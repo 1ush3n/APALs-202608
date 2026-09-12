@@ -1,0 +1,85 @@
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Evidence policy}
+
+This draft separates completed evidence from planned evidence. A result is reported as completed only when the data source has a fixed file path, metric definition, and consistency check. A result is reported as planned when the experiment is still running, the metric is not final, or the statistical protocol is incomplete. This distinction is necessary because the current project already has strong initial-scheduling evidence, but the dynamic rescheduling evidence still contains one hard-constraint failure on the largest instance.
+
+\subsection{Datasets and baselines}
+
+The current initial-scheduling evaluation uses four APAL instance scales: 283, 680, 2338, and 3182 operations. The main method is HGP-PPO/HB-GAT-PN. Learning baselines include flat PPO and DQN. Rule and search baselines include SPT, LPT, Random, EDD, CPM, MSL, Beam Search, Iterated Greedy, Genetic Algorithm, and Simulated Annealing. The available ablations include w/o GAT, w/o attention pooling, and supplemental w/o pointer validation.
+
+The rescheduling evaluation uses four real instances, three disturbance levels, and 20 fixed scenarios per level, for 240 scenarios in total. Rule repair baselines include NoReschedule, SPTRepair, LPTRepair, EDDRepair, CPMRepair, MSLRepair, RandomRepair, ReleaseAwareRepair, TaktAwareRepair, StabilityAwareRepair, BottleneckSkillRepair, FullRescheduleCPM, and HybridCPMStabilityRepair.
+
+\subsection{Initial scheduling results}
+
+Table~\ref{tab:initial-main} summarizes the current initial-scheduling makespan evidence from the project result documents. Learning-based methods marked with $\pm$ use ten random seeds. Search and dispatching methods are currently single-run or fixed-budget results.
+
+\begin{table*}[t]
+\centering
+\caption{Current initial-scheduling makespan results across APAL scales. Lower is better.}
+\label{tab:initial-main}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccc}
+\toprule
+Method & 283 & 680 & 2338 & 3182\\
+\midrule
+SPT & 178.17 & 498.37 & 1339.75 & 1796.69\\
+LPT & 146.21 & 524.87 & 1214.62 & 1692.17\\
+CPM & 148.11 & 476.68 & 1168.85 & 1691.39\\
+Beam & 147.35 & 454.55 & 1074.00 & 1513.92\\
+IG & 141.42 & 494.70 & 1187.98 & 1557.41\\
+SA & 162.52 & 451.83 & 1070.25 & 1396.80\\
+DQN & 160.64$\pm$11.12 & 543.78$\pm$31.61 & 1289.11$\pm$40.58 & 1739.35$\pm$51.89\\
+PPO & 214.49$\pm$6.74 & 704.80$\pm$30.60 & 1839.50$\pm$29.15 & 2572.75$\pm$21.68\\
+w/o GAT & 151.15$\pm$7.36 & 361.21$\pm$25.19 & 954.78$\pm$77.93 & 1394.09$\pm$87.90\\
+w/o Attn. Pool & 182.22$\pm$8.44 & 567.95$\pm$41.34 & 1617.52$\pm$63.84 & 2149.67$\pm$230.97\\
+\textbf{HGP-PPO} & \textbf{140.51$\pm$7.32} & \textbf{306.33$\pm$18.10} & \textbf{703.44$\pm$33.76} & \textbf{1051.74$\pm$25.27}\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The current evidence supports a bounded claim: HGP-PPO is stronger than flat PPO/DQN and the available graph ablations on all four initial-scheduling scales. It is also competitive against fixed-budget search baselines, especially on larger instances. The claim should remain bounded because several search baselines are single-run, and some ablation results have different statistical status.
+
+\subsection{Runtime evidence}
+
+Current runtime records separate offline training cost, validation wall time, and internal inference time. HGP-PPO has an estimated training cost of 15.587 h for 300 episodes and an aggregate four-instance internal inference time of 0.102 h. Flat PPO/DQN are faster but have much worse makespan. Search methods require no training but become slower on larger APAL instances. \need{final table after confirming identical hardware, CUDA, rag\_env, AMP, and evaluation command settings}
+
+\subsection{Rescheduling results}
+
+The current rule baseline evaluation is complete for 3120 rows: four instances, three disturbance levels, 20 scenarios per level, and 13 repair rules. Under the strict global criterion that all scenarios must be eligible, TaktAwareRepair is the best current robust rule baseline with average selection score 1.260, followed by ReleaseAwareRepair with 1.268.
+
+The current HGP-PPO rescheduling evaluation covers 240 fixed scenarios. It completes all scenarios and has an overall eligible rate of 0.996, but one scenario on real\_3182/low violates a station-slot constraint. Therefore, the strict selection score is dominated by the hard penalty for that instance. Table~\ref{tab:reschedule-current} reports the current by-instance neural rescheduling summary.
+
+\begin{table*}[t]
+\centering
+\caption{Current HGP-PPO rescheduling result on the fixed disturbance manifest. The result is not final because real\_3182 contains one ineligible scenario.}
+\label{tab:reschedule-current}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lcccccc}
+\toprule
+Instance & Scenarios & Avg. makespan & Avg. score & Selection score & Eligible rate & Duration (s)\\
+\midrule
+real\_283 & 60 & 139.58 & 1.346 & 1.346 & 1.000 & 8.085\\
+real\_680 & 60 & 337.15 & 1.301 & 1.301 & 1.000 & 16.424\\
+real\_2338 & 60 & 864.98 & 1.247 & 1.247 & 1.000 & 68.498\\
+real\_3182 & 60 & 1264.51 & 1.203 & 16666667.870 & 0.983 & 126.717\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+At this stage, the rescheduling claim must remain preliminary. The neural method is operational on the full manifest, but it does not yet beat the strongest rule baselines under strict eligible-rate scoring. The next experiments should prioritize fixing the station-slot violation, aligning the training reward with selection score, and reducing excessive station/team changes.
+
+\subsection{Planned experiment matrix}
+
+Before submission, the following experiments are required.
+\begin{itemize}
+  \item \textbf{Skill Hub ablation:} compare direct worker-operation graph, worker-skill-operation graph, and bidirectional Skill Hub using edge count, memory, rollout throughput, makespan, and valid rate.
+  \item \textbf{Mask ablation:} compare full mask, no station mask, no worker binding mask, no duplicate-selection mask, and no rescheduling freeze mask.
+  \item \textbf{Pointer ablation:} report statistically comparable w/o pointer results, not only supplemental single-run validation.
+  \item \textbf{Cross-scale generalization:} train on one or several smaller scales and test on larger APAL instances.
+  \item \textbf{Dynamic robustness:} evaluate material delay, processing-time perturbation, worker unavailability, station abnormality, and mixed disturbances under low, medium, and high intensity.
+  \item \textbf{Engineering efficiency:} report GPU peak memory, CPU utilization, rollout SPS, inference time, validation wall time, and failure cases under the target 8 GB VRAM and 16 GB RAM setting.
+\end{itemize}

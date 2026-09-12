@@ -1,0 +1,62 @@
+\section{Problem Formulation}
+\label{sec:formulation}
+
+\subsection{Initial APAL scheduling}
+
+Let $\mathcal{O}=\{1,\dots,N\}$ be the set of operations, $\mathcal{S}=\{1,\dots,M\}$ the set of physical stations, $\mathcal{K}=\{1,\dots,K\}$ the set of workers, and $\mathcal{L}$ the set of skills. The precedence relation between operations is a directed acyclic graph $\mathcal{E}_{oo}\subseteq \mathcal{O}\times \mathcal{O}$. If $(i,j)\in \mathcal{E}_{oo}$, operation $i$ must finish before operation $j$ starts.
+
+For each operation $i$, $p_i^{std}$ denotes the standard processing time, $q_i$ denotes the required number of workers, and $\ell_i\in\mathcal{L}$ denotes the required skill. The station compatibility parameter $A_{im}\in\{0,1\}$ indicates whether operation $i$ can be processed at station $m$. For each worker $k$, $\eta_k$ denotes the efficiency factor, $B_{k\ell}\in\{0,1\}$ indicates whether worker $k$ has skill $\ell$, and $\operatorname{loc}_k\in\{0,1,\dots,M\}$ denotes station binding, with 0 representing a mobile worker. The physical capacity of station $m$ is $c_m$.
+
+The decision variables are the operation start time $s_i$, completion time $c_i$, station assignment $x_{im}\in\{0,1\}$, and worker assignment $y_{ik}\in\{0,1\}$. The objective is to minimize makespan:
+\begin{equation}
+  \min C_{\max} = \max_{i\in\mathcal{O}} c_i .
+\end{equation}
+
+The core constraints are:
+\begin{align}
+  c_i &= s_i + \frac{p_i^{std}q_i}{\left(\sum_{k\in\mathcal{K}}\eta_k y_{ik}\right)\lambda^{q_i-1}}, && \forall i\in\mathcal{O}, \label{eq:duration}\\
+  s_j &\geq c_i, && \forall (i,j)\in\mathcal{E}_{oo}, \label{eq:precedence}\\
+  \sum_{m\in\mathcal{S}}x_{im} &= 1,\quad x_{im}\leq A_{im}, && \forall i,m, \label{eq:station}\\
+  \sum_{m\in\mathcal{S}}m x_{jm} &\geq \sum_{m\in\mathcal{S}}m x_{im}, && \forall (i,j)\in\mathcal{E}_{oo}, \label{eq:spatial}\\
+  \sum_{k\in\mathcal{K}}y_{ik} &= q_i,\quad y_{ik}\leq B_{k\ell_i}, && \forall i,k, \label{eq:skill}\\
+  x_{im}y_{ik} &\leq \mathbb{I}(\operatorname{loc}_k=m \lor \operatorname{loc}_k=0), && \forall i,m,k. \label{eq:binding}
+\end{align}
+Station-slot capacity and worker exclusivity are enforced over time intervals. If $\mathbb{I}_{[s_i,c_i)}(t)$ indicates whether operation $i$ occupies resources at time $t$, then:
+\begin{align}
+  \sum_{i\in\mathcal{O}} y_{ik}\mathbb{I}_{[s_i,c_i)}(t) &\leq 1, && \forall k,t,\\
+  \sum_{i\in\mathcal{O}} x_{im}\mathbb{I}_{[s_i,c_i)}(t) &\leq c_m, && \forall m,t.
+\end{align}
+
+Equation~\eqref{eq:duration} expresses the physical meaning of team processing time. The numerator $p_i^{std}q_i$ represents the total standard labor requirement of operation $i$. The denominator aggregates the effective labor speed of the selected team. The factor $\lambda^{q_i-1}$, where $0<\lambda\leq1$, models coordination loss: as more workers cooperate on one operation, communication and interference may reduce marginal productivity. Equations~\eqref{eq:precedence}--\eqref{eq:binding} define temporal precedence, station feasibility, pulse-line spatial monotonicity, skill matching, and station-worker binding.
+
+\subsection{Event-driven MDP}
+
+The initial scheduling problem is converted into an event-driven Markov Decision Process. At decision step $t$, the state $s_t$ contains scheduled operations, ready operations, worker release times, station-slot release times, current physical time, station loads, and graph features. The action is a coupled assignment:
+\begin{equation}
+  a_t = (o_t,m_t,\mathcal{W}_t),
+\end{equation}
+where $o_t$ is the selected ready operation, $m_t$ is the selected station, and $\mathcal{W}_t$ is a worker team of size $q_{o_t}$.
+
+The transition simulator schedules $o_t$ at the earliest feasible time that satisfies predecessor completion, worker availability, station-slot availability, station compatibility, spatial monotonicity, skill matching, and binding constraints. The dense reward penalizes incremental growth in estimated makespan:
+\begin{equation}
+  r_t = -(\widehat{C}_{\max}^{(t)}-\widehat{C}_{\max}^{(t-1)}).
+\end{equation}
+The terminal schedule is accepted only if all operations are completed and the APAL feasibility checker reports no hard-constraint violations.
+
+\subsection{Dynamic rescheduling extension}
+
+For rescheduling, the input includes a baseline schedule $\pi^0$, a disturbance manifest $\xi$, and a rescheduling time $\tau_r$. A subset of operations $\mathcal{F}(\tau_r)$ is frozen because these operations have already started, completed, or should not be changed for shop-floor stability. The policy repairs the remaining operations:
+\begin{equation}
+  \mathcal{O}^{repair} = \mathcal{O}\setminus \mathcal{F}(\tau_r).
+\end{equation}
+
+Disturbances modify release times, processing times, worker availability, or station feasibility. The repaired schedule must preserve frozen decisions and satisfy all hard constraints. The rescheduling quality is evaluated by a multi-term score:
+\begin{equation}
+  J = \alpha_1 \widetilde{C}_{\max}
+      + \alpha_2 V_{takt}
+      + \alpha_3 D_{start}
+      + \alpha_4 D_{station}
+      + \alpha_5 D_{team}
+      + \alpha_6 V_{hard},
+\end{equation}
+where $\widetilde{C}_{\max}$ is normalized makespan, $V_{takt}$ is takt violation, $D_{start}$ is start-time deviation from the baseline, $D_{station}$ and $D_{team}$ measure station and team changes, and $V_{hard}$ is a large penalty for ineligible schedules. This formulation reflects the engineering reality that dynamic APAL rescheduling must preserve feasibility and stability, not only reduce makespan.

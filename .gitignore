@@ -52,6 +52,7 @@ wandb/
 !/docs/
 !/docs/使用说明.md
 !/docs/命令使用手册.md
+!/docs/APAL_HGP_PPO_Journal_Manuscript/
 
 # ============================================================
 # IDE & 编辑器
@@ -100,3 +101,11 @@ env/
 .env
 .env.local
 *.secret
+
+# LaTeX
+*.aux
+*.log
+*.out
+*.synctex*
+*.fls
+*.fdb_latexmk
