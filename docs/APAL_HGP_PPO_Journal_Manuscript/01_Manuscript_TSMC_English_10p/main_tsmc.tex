@@ -95,9 +95,9 @@ In dynamic manufacturing, predictive--reactive scheduling provides a structured 
 
 \subsection{System Description, Assumptions, and Notation}
 
-Consider an APAL comprising five fixed physical stations $\mathcal{M}=\{1,\dots,5\}$. The assembly process is represented by a directed acyclic graph (DAG) $G=(\mathcal{O},\mathcal{E})$, where $\mathcal{O}=\mathcal{O}^+\cup\mathcal{O}^0$. Here, $\mathcal{O}^+$ denotes physical operations with positive processing times, while $\mathcal{O}^0$ comprises dummy zero-duration nodes that maintain structural process hierarchies without consuming physical resources. Precedence relations traversing zero-duration nodes are transitively reduced into direct physical precedence edges $\mathcal{E}^+$ over $\mathcal{O}^+$, yielding the physical DAG $G^+=(\mathcal{O}^+,\mathcal{E}^+)$. The immediate physical predecessors of operation $i$ are denoted by $\mathcal{P}(i)$.
+Consider an APAL comprising five fixed physical stations $\mathcal{M}=\{1,\dots,5\}$. The assembly process is represented by a directed acyclic graph (DAG) $G=(\mathcal{O},\mathcal{E})$, where $\mathcal{O}=\mathcal{O}^+\cup\mathcal{O}^0$. Here, $\mathcal{O}^+$ denotes physical operations with positive processing times, and $\mathcal{O}^0$ denotes non-executable process-structure nodes (having zero duration and retaining only process hierarchies, hereafter referred to as structural nodes). Structural nodes consume no physical resources. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations, forming the physical operation DAG $G^+=(\mathcal{O}^+,\mathcal{E}^+)$. The immediate physical predecessors of operation $i$ are denoted by $\mathcal{P}(i)$.
 
-The shop floor provides a pool of multiskilled workers $\mathcal{W}$ and five distinct craft skills $\mathcal{K}$ ($|\mathcal{K}|=5$). Each physical operation $i\in\mathcal{O}^+$ has a standard processing time $p_i^{\mathrm{std}}>0$, requires a single skill $k_i\in\mathcal{K}$, and demands a fixed collaborative team size $q_i\in\mathbb{N}^+$. Each worker $w\in\mathcal{W}$ is characterized by a binary qualification vector $H_{wk}\in\{0,1\}$ and a baseline efficiency $\eta_w>0$. Except for initial positioning tasks, operation stations are not predetermined.
+The system includes a pool of multiskilled workers $\mathcal{W}$ and a set of five skill types $\mathcal{K}$. Each physical operation $i\in\mathcal{O}^+$ has a standard processing time $p_i^{\mathrm{std}}>0$, requires a single skill $k_i\in\mathcal{K}$, and demands a fixed collaborative team size $q_i\in\mathbb{N}^+$. Each worker $w\in\mathcal{W}$ is characterized by a binary qualification vector $H_{wk}\in\{0,1\}$ and a baseline efficiency $\eta_w>0$. Except for initial positioning tasks, operation stations are not predetermined.
 
 The operational assumptions are established as follows:
 \begin{enumerate}
@@ -119,7 +119,7 @@ Table~\ref{tab:notation} outlines the mathematical notation used throughout this
 \toprule
 \textbf{Symbol} & \textbf{Physical Meaning} \\
 \midrule
-$G^+=(\mathcal{O}^+,\mathcal{E}^+)$ & Physical operation DAG with transitive precedence edges \\
+$G^+=(\mathcal{O}^+,\mathcal{E}^+)$ & Physical operation DAG and its precedence edges \\
 $\mathcal{M}, \mathcal{W}, \mathcal{K}$ & Physical stations ($|\mathcal{M}|=5$), worker pool, skill types ($|\mathcal{K}|=5$) \\
 $p_i^{\mathrm{std}}, q_i, k_i$ & Standard duration, required team size, and skill type of operation $i$ \\
 $H_{wk}, \eta_w$ & Binary skill indicator and baseline efficiency of worker $w$ \\
@@ -232,14 +232,14 @@ Fig.~\ref{fig:2} presents the architectural layout of HGP-PPO.
 
 \begin{figure*}[!t]
 \centering
-\includegraphics[width=0.92\textwidth,height=0.28\textheight,keepaspectratio]{figures/fig2.png}
+\includegraphics[width=0.92\textwidth,height=0.25\textheight,keepaspectratio]{figures/fig2.png}
 \caption{Overall HGP-PPO framework. The APAL environment state is first converted into a heterogeneous graph with Operation, Station, Worker, and Skill nodes. The Actor and Critic use independent heterogeneous graph encoders. After attention-based context aggregation, the Actor sequentially selects an Operation, a Station, and a Worker team of the required size to form an executable joint action $(o,m,W)$. The Critic aggregates the graph state and estimates the state value $V(s)$. Executing the joint action produces the next state, reward, and trajectory, which PPO uses to update the policy and value networks.}
 \label{fig:2}
 \end{figure*}
 
 \subsection{Heterogeneous Graph Representation and Global Encoding}
 
-At decision step $t$, the state is represented as $G_t=(\mathcal{V}_t,\mathcal{E}_t)$ with $\mathcal{V}_t=\mathcal{O}\cup\mathcal{M}\cup\mathcal{W}\cup\mathcal{K}$. Table~\ref{tab:node_features} summarizes the input features for the four node types, and Table~\ref{tab:relations} defines the eight edge relations.
+At decision step $t$, the state is represented by a heterogeneous graph $G_t=(\mathcal{V}_t,\mathcal{E}_t)$, where $\mathcal{V}_t=\mathcal{O}\cup\mathcal{M}\cup\mathcal{W}\cup\mathcal{K}$. The Operation node set $\mathcal{O}=\mathcal{O}^+\cup\mathcal{O}^0$ includes physical operations and auxiliary structural nodes retained from the source process graph. Structural nodes have zero duration and no physical resource requirements; they are retained for graph encoding but excluded from scheduling actions. Tables~\ref{tab:node_features} and~\ref{tab:relations} summarize the node features and relation types, respectively.
 
 \begin{table}[!t]
 \centering
@@ -259,6 +259,8 @@ Skill & Category index, headcounts, available capacity, and mean efficiency of q
 \bottomrule
 \end{tabular}
 \end{adjustbox}
+\vspace{2pt}
+\par\noindent{\scriptsize Note: Operation-specific resource requirements apply to physical operations.}\par
 \end{table}
 
 \begin{table}[!t]
@@ -317,7 +319,8 @@ $
 \end{center}
 PPO computes likelihoods on the ordered trajectory $\widetilde a_t$, while environment dynamics execute unordered set $W_t$.
 
-\textbf{Pointers and scoring}:
+\textbf{Operation and station pointers}:
+The operation pointer selects from $\mathcal{F}_t^O\subseteq\mathcal{O}^+$, while the station pointer conditions on $\mathbf{h}_{i_t}$ over $\mathcal{F}_{i_t,t}^M$:
 \begin{center}
 \begin{adjustbox}{max width=\linewidth}
 $\displaystyle
@@ -384,26 +387,28 @@ Experiments investigate five core evaluation questions:
 \item \textbf{Development}: 6 instances and 54 delay scenarios for hyperparameter selection and early stopping;
 \item \textbf{Locked test}: 4 real factory instances (Table~\ref{tab:instances}) and 36 fixed disturbance scenarios evaluated once without post-hoc tuning.
 \end{itemize}
-Completeness ($R_{\mathrm{complete}}=1$) and physical validity ($R_{\mathrm{valid}}=1$) are strict prerequisites for quality ranking.
+Completeness ($R_{\mathrm{complete}}=1$) and physical validity ($R_{\mathrm{valid}}=1$) are strict prerequisites for quality ranking. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations.
 
 \begin{table}[!t]
 \centering
 \caption{Real Factory APAL Locked Evaluation Instances}
 \label{tab:instances}
-\setlength{\tabcolsep}{4pt}
+\setlength{\tabcolsep}{6pt}
 \renewcommand{\arraystretch}{1.05}
 \begin{adjustbox}{max width=\columnwidth}
-\begin{tabular}{@{}lrrrrcc@{}}
+\begin{tabular}{@{}cccc@{}}
 \toprule
-\textbf{Instance} & \textbf{Physical Ops} & \textbf{Dummy Ops} & \textbf{Total Nodes} & \textbf{Stations} & \textbf{Role} \\
+\textbf{Instance} & \textbf{Physical operations} & \textbf{Stations} & \textbf{Role} \\
 \midrule
-283 & 283 & 7 & 290 & 5 & Locked test \\
-680 & 680 & 35 & 715 & 5 & Locked test \\
-2338 & 2,338 & 64 & 2,402 & 5 & Locked test \\
-3182 & 3,182 & 117 & 3,299 & 5 & Locked test \\
+283 & 283 & 5 & Locked test \\
+680 & 680 & 5 & Locked test \\
+2338 & 2,338 & 5 & Locked test \\
+3182 & 3,182 & 5 & Locked test \\
 \bottomrule
 \end{tabular}
 \end{adjustbox}
+\vspace{2pt}
+\par\noindent{\scriptsize Note: Instance sizes count physical operations only. Source process graphs additionally contain 7, 35, 64, and 117 structural nodes (290, 715, 2,402, and 3,299 total nodes).}\par
 \end{table}
 
 \begin{table}[!t]
@@ -671,7 +676,7 @@ $
 Candidate key $\mathbf k_{w,t}^{(r)}=\mathbf W_k[\mathbf h_w\,\|\,\mathbf e_w]+\mathbf W_{\mathrm{eft}}\mathbf f_{w,t}^{\mathrm{eft}}+\mathbf W_{\mathrm{sc}}\mu_{w,t}^{(r)}$. Pointer scoring evaluates $\mathbf v_W^{\top}\tanh(\mathbf q_t^{(r)}+\mathbf k_{w,t}^{(r)})$, masked by $-10^4$ on invalid candidates.
 
 \textbf{Global and near-term skill pressure}:
-With unscheduled positive-duration set $\mathcal U_t$ and ready set $\mathcal R_t\subseteq\mathcal U_t$:
+Let $\mathcal U_t\subseteq\mathcal O^+$ denote the unscheduled physical operations, and let $\mathcal R_t\subseteq\mathcal U_t$ denote the currently ready operations:
 \begin{equation}
 D_{k,t}^{\mathrm{all}} = \sum_{j\in\mathcal U_t} R_{jk}\widetilde p_j q_j, \quad D_{k,t}^{\mathrm{near}} = \sum_{j\in\mathcal R_t} R_{jk}\widetilde p_j q_j;
 \end{equation}

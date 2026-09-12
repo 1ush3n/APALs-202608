@@ -56,7 +56,7 @@ In dynamic manufacturing environments, predictive–reactive scheduling provides
 
 ### 3.1 APAL System Description, Core Assumptions, and Notation
 
-Consider an APAL consisting of five fixed physical stations. The original assembly process topology is represented by a directed acyclic graph $G=(\mathcal{O},\mathcal{E})$, where $\mathcal{O}=\mathcal{O}^{+}\cup\mathcal{O}^{0}$. Here, $\mathcal{O}^{+}$ denotes physical operations with positive processing times, and $\mathcal{O}^{0}$ contains zero-duration nodes that retain only the process hierarchy. Zero-duration nodes consume no resources. Their precedence relationships are propagated through to equivalent precedence edges $\mathcal{E}^{+}$ between physical operations, forming the physical operation graph $G^+=(\mathcal{O}^+,\mathcal{E}^+)$. The immediate physical predecessors of operation $i$ are denoted by $\mathcal{P}(i)$. The system comprises a set of physical stations $\mathcal{M}=\{1,\dots,5\}$, a pool of multiskilled workers $\mathcal{W}$, and a set of skill types $\mathcal{K}$, with $|\mathcal{K}|=5$. Each operation $i\in\mathcal{O}^{+}$ has a baseline standard duration $p_i^{\mathrm{std}}>0$, a single required skill type $k_i\in\mathcal{K}$, and a fixed team size $q_i\in\mathbb{N}^{+}$. Each worker $w\in\mathcal{W}$ has a skill qualification vector $H_{wk}\in\{0,1\}$ and a baseline efficiency coefficient $\eta_w>0$. Except for a small number of initial positioning operations, operation stations are not specified in advance.
+Consider an APAL consisting of five fixed physical stations $\mathcal{M}=\{1,\dots,5\}$. The original assembly process topology is represented by a directed acyclic graph $G=(\mathcal{O},\mathcal{E})$, where $\mathcal{O}=\mathcal{O}^{+}\cup\mathcal{O}^{0}$. Here, $\mathcal{O}^{+}$ denotes physical operations with positive processing times, and $\mathcal{O}^{0}$ denotes non-executable process-structure nodes (having zero duration and retaining only process hierarchies, hereafter referred to as structural nodes). Structural nodes consume no physical resources. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations, forming the physical operation DAG $G^+=(\mathcal{O}^+,\mathcal{E}^+)$. The immediate physical predecessors of operation $i$ are denoted by $\mathcal{P}(i)$. The system includes a pool of multiskilled workers $\mathcal{W}$ and a set of five skill types $\mathcal{K}$. Each physical operation $i\in\mathcal{O}^{+}$ has a baseline standard duration $p_i^{\mathrm{std}}>0$, a single required skill type $k_i\in\mathcal{K}$, and a fixed team size $q_i\in\mathbb{N}^{+}$. Each worker $w\in\mathcal{W}$ has a skill qualification vector $H_{wk}\in\{0,1\}$ and a baseline efficiency coefficient $\eta_w>0$. Except for a small number of initial positioning operations, operation stations are not specified in advance.
 
 The core characteristics and operating assumptions are summarized as follows:
 
@@ -68,7 +68,7 @@ The core characteristics and operating assumptions are summarized as follows:
 
 | Symbol | Physical meaning |
 |---|---|
-| $G^+=(\mathcal{O}^+,\mathcal{E}^{+})$ | Physical operation graph obtained by propagating precedence relationships through zero-duration nodes |
+| $G^+=(\mathcal{O}^+,\mathcal{E}^+)$ | Physical operation DAG and its precedence edges |
 | $\mathcal{M}, \mathcal{W}, \mathcal{K}$ | Physical stations ($\lvert\mathcal{M}\rvert=5$), worker pool, and skill types ($\lvert\mathcal{K}\rvert=5$) |
 | $p_i^{\mathrm{std}}, q_i, k_i$ | Standard duration, fixed team size, and required skill type of operation $i$ |
 | $H_{wk}, \eta_w$ | Binary skill indicator and baseline efficiency coefficient of worker $w$ |
@@ -180,7 +180,7 @@ Fig. 2 presents the overall HGP-PPO architecture and solution process.
 
 #### 4.2 Heterogeneous Graph Representation and Global Encoding
 
-**Four node types and state features.** At decision step $t$, the environment represents the APAL state as a heterogeneous graph $G_t=(\mathcal{V}_t,\mathcal{E}_t)$, where $\mathcal{V}_t=\mathcal{O}\cup\mathcal{M}\cup\mathcal{W}\cup\mathcal{K}$ comprises operation, station, worker, and skill nodes, respectively. The number of skill types is fixed at $|\mathcal{K}|=5$. Workers use five-dimensional multihot skill encodings, whereas physical operations use five-dimensional one-hot encodings. Zero-duration nodes have zero skill requirements and are excluded from the operation candidate set. Table 4-1 summarizes the input features of the four node types.
+**Four node types and state features.** At decision step $t$, the environment represents the APAL state as a heterogeneous graph $G_t=(\mathcal{V}_t,\mathcal{E}_t)$, where $\mathcal{V}_t=\mathcal{O}\cup\mathcal{M}\cup\mathcal{W}\cup\mathcal{K}$. The Operation node set $\mathcal{O}=\mathcal{O}^+\cup\mathcal{O}^0$ includes physical operations and auxiliary structural nodes retained from the source process graph. Structural nodes have zero duration and no physical resource requirements; they are retained for graph encoding but excluded from scheduling actions. Table 4-1 summarizes the input features of the four node types.
 
 **Table 4-1. Input State Information for the Four Node Types**
 
@@ -190,6 +190,8 @@ Fig. 2 presents the overall HGP-PPO architecture and solution process.
 | Station | Accumulated labor-hour load, proportions of bound and unbound workers, earliest slot waiting time, and available slots |
 | Worker | Baseline efficiency, five skills, estimated waiting time, idle status, and station binding $\ell_w$ |
 | Skill | Skill category and the number, current availability, and mean efficiency of workers possessing that skill |
+
+*Note: Operation-specific resource requirements apply to physical operations.*
 
 Continuous features are normalized using scales derived from each instance. Let $\bar p=\frac{1}{|\mathcal{O}^{+}|}\sum_{i\in\mathcal{O}^{+}}p_i^{\mathrm{std}}$; processing durations are normalized as $\widetilde p_i=p_i^{\mathrm{std}}/\bar p$. Worker and station waiting times are logarithmically scaled. Station labor-hour loads are jointly represented relative to the ideal evenly distributed load, the total line load, and the current maximum load. Rescheduling time offsets are normalized by the baseline horizon $T_{\mathrm{ref}}^0$.
 
@@ -231,7 +233,7 @@ $$
 $$
 Here, $\mathbf w_t^{(<r)}=(w_t^{(1)},\dots,w_t^{(r-1)})$ denotes the sequence of members already generated. Different member orders can map to the same unordered team. PPO computes the joint log-likelihood using the ordered trajectory $\widetilde a_t$ actually sampled, whereas physical environment execution and team change evaluation use the unordered set $W_t$.
 
-**Operation and station pointers.** The operation pointer combines the global context $\mathbf g_t$ with operation embedding $\mathbf h_i$ to compute additive attention scores and normalizes them over the feasible operation set $\mathcal F_t^O$. The station selector then uses the selected operation embedding $\mathbf h_{i_t}$ as a query to score the five physical stations within the feasible set $\mathcal F_{i_t,t}^M$:
+**Operation and station pointers.** The operation pointer selects from the feasible physical-operation set $\mathcal F_t^O\subseteq\mathcal O^+$, combining the global context $\mathbf g_t$ with operation embedding $\mathbf h_i$ to compute additive attention scores and normalize them over $\mathcal F_t^O$. The station selector then uses the selected operation embedding $\mathbf h_{i_t}$ as a query to score the five physical stations within the feasible set $\mathcal F_{i_t,t}^M$:
 $$
 u_{i,t}^O = \mathbf a_O^{\top}\tanh(\mathbf W_g\mathbf g_t + \mathbf W_O\mathbf h_i), \qquad \pi_O(i\mid s_t) = \frac{\exp(u_{i,t}^O)}{\sum_{j\in\mathcal F_t^O}\exp(u_{j,t}^O)}, \quad i\in\mathcal F_t^O;
 $$
@@ -296,16 +298,18 @@ The experiments establish a correspondence between claims, experiments, and eval
 
 ### 5.2 Evaluation Instances, Baselines, and Statistical Procedures
 
-**APAL evaluation instances.** Four sets of real APAL operation data supplied by an aircraft manufacturer are used; their physical sizes are listed in Table 5-2. All instances have five fixed physical stations and the same station concurrency capacities. Operation specialty codes are grouped into five scheduling skill categories. Each positive-duration physical operation requires a single skill type and a fixed team size $q_i$. Precedence relationships are propagated through zero-duration nodes to physical immediate-predecessor constraints as described in Section 3.1.
+**APAL evaluation instances.** Four sets of real APAL operation data supplied by an aircraft manufacturer are used; their physical sizes are listed in Table 5-2. All instances have five fixed physical stations and the same station concurrency capacities. Operation specialty codes are grouped into five scheduling skill categories. Each physical operation requires a single skill type and a fixed team size $q_i$. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations.
 
 **Table 5-2. Locked Evaluation Instances From Real Factory APAL Data**
 
-| Instance | Physical operations | Zero-duration nodes | Total nodes | Stations | Experimental role |
-|---|---:|---:|---:|---:|---|
-| 283 | 283 | 7 | 290 | 5 | Locked test |
-| 680 | 680 | 35 | 715 | 5 | Locked test |
-| 2338 | 2338 | 64 | 2402 | 5 | Locked test |
-| 3182 | 3182 | 117 | 3299 | 5 | Locked test |
+| Instance | Physical operations | Stations | Experimental role |
+|:---:|:---:|:---:|:---:|
+| 283 | 283 | 5 | Locked test |
+| 680 | 680 | 5 | Locked test |
+| 2338 | 2,338 | 5 | Locked test |
+| 3182 | 3,182 | 5 | Locked test |
+
+*Note: Instance sizes count physical operations only. The four source process graphs additionally contain 7, 35, 64, and 117 structural nodes, respectively, giving 290, 715, 2,402, and 3,299 process nodes in total.*
 
 **Table 5-4. Comparison Methods, Decision Criteria, and Search Budgets**
 
@@ -491,7 +495,7 @@ $$
 $$
 The query $\mathbf q_t^{(r)}$ is obtained by concatenating and projecting the operation, station, global context, team state, aggregate pressure $\mathbf P_t$, skill consumption ratios, and worker selection progress: $\mathbf q_t^{(r)}=\mathbf W_q[\mathbf h_{i_t}\,\|\,\mathbf h_{m_t}\,\|\,\mathbf g_t\,\|\,\mathbf h_{\mathrm{team},t}^{(r)}\,\|\,\mathbf P_t\,\|\,\mathbf c_t^{(r)}\,\|\,\mathbf{prog}_t^{(r)}]+\mathbf b_q$. The candidate worker key combines the projection of the static embedding and pressure exposure with dynamic terms: $\mathbf k_{w,t}^{(r)}=\mathbf W_k[\mathbf h_w\,\|\,\mathbf e_w]+\mathbf W_{\mathrm{eft}}\mathbf f_{w,t}^{\mathrm{eft}}+\mathbf W_{\mathrm{sc}}\mu_{w,t}^{(r)}$. The scoring layer is $\mathbf v_W^{\top}\tanh(\mathbf q_t^{(r)}+\mathbf k_{w,t}^{(r)})$. Infeasible candidate scores are set to $-10^4$ before Softmax is applied.
 
-**Global and near-term skill pressure.** Let $R_{jk}\in\{0,1\}$ indicate whether operation $j$ requires skill $k$, $H_{wk}\in\{0,1\}$ indicate whether worker $w$ possesses skill $k$, and $\widetilde p_j$ denote normalized standard duration. Let $\mathcal U_t$ be the set of unscheduled positive-duration operations, and let $\mathcal R_t\subseteq\mathcal U_t$ contain operations that are currently ready and eligible for action. Then
+**Global and near-term skill pressure.** Let $R_{jk}\in\{0,1\}$ indicate whether operation $j$ requires skill $k$, $H_{wk}\in\{0,1\}$ indicate whether worker $w$ possesses skill $k$, and $\widetilde p_j$ denote normalized standard duration. Let $\mathcal U_t\subseteq\mathcal O^+$ denote the unscheduled physical operations, and let $\mathcal R_t\subseteq\mathcal U_t$ denote the currently ready operations. Then
 
 $$
 D_{k,t}^{\mathrm{all}}=
