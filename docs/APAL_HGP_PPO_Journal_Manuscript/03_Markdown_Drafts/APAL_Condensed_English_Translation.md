@@ -491,12 +491,23 @@ This appendix details the network layers, partial-team state representation, and
 
 **Network architecture and partial-team representation.** For the selected member sequence $\mathbf w_t^{(<r)}$, each selected worker is first projected through a linear layer as $\mathbf m_v=\mathbf W_{\mathrm{mem}}\mathbf h_v$. To ensure permutation invariance, the partial-team state concatenates Sum, Mean, and Max pooling features and fuses them through a fully connected layer:
 $$
-\mathbf h_{\mathrm{team},t}^{(r)} = \operatorname{LeakyReLU}\left(\mathbf W_{\mathrm{team}} \left[\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \,\|\, \frac{1}{\max(1, r-1)}\sum_{v} \mathbf m_v \,\|\, \max_{v\in \mathbf w_t^{(<r)}} \mathbf m_v\right]\right).
+\mathbf h_{\mathrm{team},t}^{(r)} = \operatorname{LeakyReLU}\left(\mathbf W_{\mathrm{team}} \left[\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \,\|\, \frac{1}{\max(1, r-1)}\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \,\|\, \max_{v\in \mathbf w_t^{(<r)}} \mathbf m_v\right]\right).
 $$
-The query $\mathbf q_t^{(r)}$ is obtained by concatenating and projecting the operation, station, global context, team state, aggregate pressure $\mathbf P_t$, skill consumption ratios, and worker selection progress: $\mathbf q_t^{(r)}=\mathbf W_q[\mathbf h_{i_t}\,\|\,\mathbf h_{m_t}\,\|\,\mathbf g_t\,\|\,\mathbf h_{\mathrm{team},t}^{(r)}\,\|\,\mathbf P_t\,\|\,\mathbf c_t^{(r)}\,\|\,\mathbf{prog}_t^{(r)}]+\mathbf b_q$. The candidate worker key combines the projection of the static embedding and pressure exposure with dynamic terms: $\mathbf k_{w,t}^{(r)}=\mathbf W_k[\mathbf h_w\,\|\,\mathbf e_w]+\mathbf W_{\mathrm{eft}}\mathbf f_{w,t}^{\mathrm{eft}}+\mathbf W_{\mathrm{sc}}\mu_{w,t}^{(r)}$. The scoring layer is $\mathbf v_W^{\top}\tanh(\mathbf q_t^{(r)}+\mathbf k_{w,t}^{(r)})$. Infeasible candidate scores are set to $-10^4$ before Softmax is applied.
+For the initial member selection sub-step ($r=1$ where $\mathbf w_t^{(<1)}=\emptyset$), Sum, Mean, and Max pooling outputs are defined as zero vectors $\mathbf 0\in\mathbb R^d$, reducing the partial-team state to $\mathbf h_{\mathrm{team},t}^{(1)}=\mathbf 0$.
 
-**Global and near-term skill pressure.** Let $R_{jk}\in\{0,1\}$ indicate whether operation $j$ requires skill $k$, $H_{wk}\in\{0,1\}$ indicate whether worker $w$ possesses skill $k$, and $\widetilde p_j$ denote normalized standard duration. Let $\mathcal U_t\subseteq\mathcal O^+$ denote the unscheduled physical operations, and let $\mathcal R_t\subseteq\mathcal U_t$ denote the currently ready operations. Then
+The query $\mathbf q_t^{(r)}$ is obtained by concatenating and projecting the operation, station, global context, team state, macro pressure, skill consumption ratio, and selection progress:
+$$
+\mathbf q_t^{(r)}=\mathbf W_q[\mathbf h_{i_t}\,\|\,\mathbf h_{m_t}\,\|\,\mathbf g_t\,\|\,\mathbf h_{\mathrm{team},t}^{(r)}\,\|\,\mathbf P_t\,\|\,\mathbf c_t^{(r)}\,\|\,\mathbf{prog}_t^{(r)}]+\mathbf b_q,
+$$
+where global context $\mathbf g_t = [\mathbf g_M \,\|\, \mathbf g_O \,\|\, \mathbf g_W] \in \mathbb R^{3d}$ strictly maintains the concatenation order of Section 4.2; macro skill pressure is $\mathbf P_t = [\mathbf P_t^{\mathrm{all}} \,\|\, \mathbf P_t^{\mathrm{near}}] \in \mathbb R^{10}$; skill consumption ratio is $\mathbf c_t^{(r)} = \mathbf C_t^{(r)} / \max(\mathbf S_t^{\mathrm{all}}, \varepsilon_s) \in [0,1]^5$ with cumulative committed headcount $\mathbf C_t^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} \mathbf H_v$; and selection progress is $\mathbf{prog}_t^{(r)} = \left[\frac{r-1}{q_{i_t}},\, \frac{q_{i_t}-(r-1)}{q_{i_t}}\right]^\top \in [0,1]^2$.
 
+The candidate key combines candidate embedding, skill pressure exposure, and dynamic features:
+$$
+\mathbf k_{w,t}^{(r)}=\mathbf W_k[\mathbf h_w\,\|\,\mathbf e_{w,t}]+\mathbf W_{\mathrm{eft}}\mathbf f_{w,t}^{\mathrm{eft},(r)}+\mathbf W_{\mathrm{sc}}\mu_{w,t}^{(r)},
+$$
+where skill pressure exposure $\mathbf e_{w,t} = [\mathbf H_w \odot \mathbf P_t^{\mathrm{all}} \,\|\, \mathbf H_w \odot \mathbf P_t^{\mathrm{near}}] \in \mathbb R^{10}$ remains fixed across selection sub-steps $r=1,\dots,q_{i_t}$ for operation $i_t$. Pointer scoring evaluates $\mathbf v_W^{\top}\tanh(\mathbf q_t^{(r)}+\mathbf k_{w,t}^{(r)})$, masked by $-10^4$ on invalid candidates.
+
+**Global and near-term skill pressure.** Let $R_{jk}\in\{0,1\}$ indicate whether operation $j$ requires skill $k$, $H_{wk}\in\{0,1\}$ indicate whether worker $w$ possesses skill $k$, and $\widetilde p_j$ denote normalized baseline duration. Let $\mathcal U_t\subseteq\mathcal O^+$ denote the unscheduled physical operations, and let $\mathcal R_t\subseteq\mathcal U_t$ denote the currently ready operations:
 $$
 D_{k,t}^{\mathrm{all}}=
 \sum_{j\in\mathcal U_t}R_{jk}\widetilde p_jq_j,
@@ -504,9 +515,7 @@ D_{k,t}^{\mathrm{all}}=
 D_{k,t}^{\mathrm{near}}=
 \sum_{j\in\mathcal R_t}R_{jk}\widetilde p_jq_j.
 $$
-
-Let $\widetilde a_{w,t}\ge0$ be the normalized waiting time of worker $w$ relative to the current time, and let $\mathcal W_t^q$ contain workers not excluded by the optional queuing rule. Then
-
+Let $\widetilde a_{w,t} = \exp(x_{w,t}^{\mathrm{log\_wait}}) - 1 \ge 0$ denote worker normalized wait time, and let $\mathcal W_t^q$ denote available workers not excluded by station queueing or binding restrictions:
 $$
 S_{k,t}^{\mathrm{all}}=
 \sum_{w\in\mathcal W}H_{wk},
@@ -515,19 +524,16 @@ S_{k,t}^{\mathrm{near}}=
 \sum_{w\in\mathcal W_t^q}
 H_{wk}\exp\!\left(-\frac{\widetilde a_{w,t}}{\tau_p}\right),
 $$
-
 $$
 P_{k,t}^{h}=
 \log\!\left(
 1+\frac{D_{k,t}^{h}}{\max(S_{k,t}^{h},\varepsilon_s)}
 \right),
-\qquad h\in\{\mathrm{all},\mathrm{near}\},
+\qquad h\in\{\mathrm{all},\mathrm{near}\}.
 $$
+Wait discounting temperature is set to $\tau_p=1.0$, and smoothing constant $\varepsilon_s=10^{-6}$ prevents division by zero.
 
-where $\tau_p>0$ is the waiting-time discount temperature and $\varepsilon_s>0$ prevents division by zero when supply is absent. Candidate worker pressure exposure is obtained by multiplying the worker's five-dimensional skill vector elementwise by $\mathbf P_t^{\mathrm{all}}$ and $\mathbf P_t^{\mathrm{near}}$, respectively.
-
-**Dynamic EFT.** Let $A_t^{(r-1)}$ and $E_t^{(r-1)}$ denote the maximum waiting time and total efficiency of the partial team, respectively. Let $\widetilde a_{m_t,t}$ be the slot waiting time at the selected station and $\eta_w$ the baseline efficiency of candidate worker $w$. After adding candidate $w$, the normalized tentative completion quantity is
-
+**Dynamic EFT.** Let $A_t^{(r-1)}$ and $E_t^{(r-1)}$ denote the maximum waiting time and total efficiency of the partial team, respectively. Let $\widetilde a_{m_t,t}$ be the slot waiting time at the selected station and $\eta_w$ the baseline efficiency of candidate worker $w$. After adding candidate $w$, the normalized tentative completion time is
 $$
 \widehat C_{w,t}^{(r)}=
 \max\!\left(
@@ -537,11 +543,17 @@ A_t^{(r-1)},\widetilde a_{w,t},\widetilde a_{m_t,t}
 {\rho^{r-1}\left(E_t^{(r-1)}+\eta_w\right)},
 \qquad \rho=0.95.
 $$
+Across feasible candidate set $\mathcal F_{W,t}^{(r)}$, compute minimum completion $C_{\min,t}^{(r)}=\min_{u\in\mathcal F_{W,t}^{(r)}}\widehat C_{u,t}^{(r)}$, mean $\mu_{C,t}^{(r)}=\frac{1}{|\mathcal F_{W,t}^{(r)}|}\sum_{u\in\mathcal F_{W,t}^{(r)}}\widehat C_{u,t}^{(r)}$, and population standard deviation:
+$$
+\sigma_{C,t}^{(r)} = \sqrt{ \frac{1}{|\mathcal F_{W,t}^{(r)}|} \sum_{u\in\mathcal F_{W,t}^{(r)}} \left(\widehat C_{u,t}^{(r)}-\mu_{C,t}^{(r)}\right)^2 }.
+$$
+The dynamic EFT feature consists of relative gap and clipped z-score:
+$$
+\mathbf f_{w,t}^{\mathrm{eft},(r)} = \left[ \operatorname{clip}\left(\frac{\widehat C_{w,t}^{(r)}-C_{\min,t}^{(r)}}{\widetilde p_{i_t}}, 0, 10\right),\, \operatorname{clip}\left(\frac{\widehat C_{w,t}^{(r)}-\mu_{C,t}^{(r)}}{\max(\sigma_{C,t}^{(r)}, 10^{-6})}, -10, 10\right) \right]^\top.
+$$
+When $|\mathcal F_{W,t}^{(r)}|=1$, the standard deviation is zero, and denominator clamp $10^{-6}$ ensures numerical safety.
 
-The implementation further transforms this quantity into its difference from the current best feasible candidate and its standardized score within the feasible candidate set, which are used as ranking features by the Worker Pointer.
-
-**Marginal scarcity of additional skills.** Let $C_{k,t}^{(r)}$ denote the cumulative consumption of skill $k$ by previously selected members. The marginal scarcity of candidate worker $w$'s additional skills is defined as
-
+**Marginal scarcity of additional skills.** Candidate worker $w$'s marginal skill scarcity is:
 $$
 \begin{aligned}
 \mu_{w,t}^{(r)}=
@@ -555,11 +567,10 @@ $$
 1+\frac{D_{k,t}^{\mathrm{all}}}
 {\max(S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)},\varepsilon_s)}
 \right)
-\Bigg]_{+}.
+\Bigg]_{+},
 \end{aligned}
 $$
-
-The factor $1-R_{i_tk}$ excludes the skill required by the current operation and measures only the incremental pressure on the reserves of the worker's additional skills caused by selecting that worker. Next-frontier pressure is derived from the five-dimensional near-term skill demand of operations that may become immediately available after the current action and is combined elementwise with the candidate worker's skill vector. It indicates near-term resource opportunity costs without changing any hard constraints or actual processing durations.
+where $C_{k,t}^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} H_{vk}$ is the cumulative committed skill $k$ headcount across the prior $r-1$ sub-steps. The factor $(1-R_{i_tk})$ excludes skills required by operation $i_t$, penalizing only the incidental depletion of unrequired skill capacity and mitigating misallocation of multi-skilled workers on simple operations.
 
 ## Appendix B. Experimental Reproducibility and Statistical Audit Configuration
 
