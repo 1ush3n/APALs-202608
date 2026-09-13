@@ -22,14 +22,17 @@
 
 \title{Joint Scheduling and Workforce Allocation for Aircraft Pulsating Assembly Lines via Heterogeneous Graph Reinforcement Learning}
 
-\author{Shuiliang~Fang,~\IEEEmembership{Member,~IEEE,}
-        Firstname~Author,~\IEEEmembership{Member,~IEEE,}
-        and~Secondname~Author,~\IEEEmembership{Senior~Member,~IEEE}%
-\thanks{This work was supported in part by the National Natural Science Foundation of China under Grant XXXXXXXX.}%
-\thanks{The authors are with the School of Mechanical Engineering, Northwestern Polytechnical University, Xi'an 710072, China (e-mail: author@nwpu.edu.cn).}%
+\author{Xiao~Lu,
+        Jiakang~Ai,
+        Fei~Qiao,
+        Juan~Liu$^*$,
+        Lingtao~Chen,
+        and~Yumin~Ma%
+\thanks{This work was supported by the National Natural Science Foundation of China (Nos. 62133011, 62373288, 62403365, 62273260), and the Open Research Project of the State Key Laboratory of Industrial Control Technology of China (No. ICT2025B28). *Corresponding author}%
+\thanks{The authors are with the College of Electronics and Information Engineering, Tongji University, Shanghai, China (e-mail: luxiao@tongji.edu.cn; aijiakang@tongji.edu.cn; fqiao@tongji.edu.cn; juanliu0720@tongji.edu.cn; chenlingtao@tongji.edu.cn; ymma@tongji.edu.cn).}%
 }
 
-\markboth{IEEE Transactions on Systems, Man, and Cybernetics: Systems,~Vol.~XX, No.~XX,~2026}{Fang \MakeLowercase{\textit{et al.}}: Joint Scheduling and Workforce Allocation for Aircraft Pulsating Assembly Lines}
+\markboth{IEEE Transactions on Systems, Man, and Cybernetics: Systems,~Vol.~XX, No.~XX,~2026}{Lu \MakeLowercase{\textit{et al.}}: Joint Scheduling and Workforce Allocation for Aircraft Pulsating Assembly Lines}
 
 \maketitle
 
@@ -237,7 +240,7 @@ Fig.~\ref{fig:2} presents the architectural layout of HGP-PPO.
 \label{fig:2}
 \end{figure*}
 
-\subsection{Heterogeneous Graph Representation and Global Encoding}
+\subsection{Heterogeneous Graph Representation and Global Encoding}\label{sec:encoder}
 
 At decision step $t$, the state is represented by a heterogeneous graph $G_t=(\mathcal{V}_t,\mathcal{E}_t)$, where $\mathcal{V}_t=\mathcal{O}\cup\mathcal{M}\cup\mathcal{W}\cup\mathcal{K}$. The Operation node set $\mathcal{O}=\mathcal{O}^+\cup\mathcal{O}^0$ includes physical operations and auxiliary structural nodes retained from the source process graph. Structural nodes have zero duration and no physical resource requirements; they are retained for graph encoding but excluded from scheduling actions. Tables~\ref{tab:node_features} and~\ref{tab:relations} summarize the node features and relation types, respectively.
 
@@ -649,7 +652,7 @@ SimulatedAnnealingRepair & 292.42 & 676.78 & 3445.39 & 4296.64 \\
 
 This paper has presented HGP-PPO, a heterogeneous graph reinforcement learning framework for joint scheduling and workforce allocation on aircraft pulsating assembly lines. The hierarchical operation--station--worker autoregressive pointer decoder and dynamic masks resolve the combinatorial team explosion, while endogenous worker--station binding coordinates workforce deployment with station workloads. For initial scheduling, a single locked policy is directly evaluated across 283 to 3,182 physical operations without instance-specific fine-tuning, achieving strong scale extrapolation and the lowest average makespan of 902.40~h. For rescheduling, the policy trained under the disturbance environment is evaluated across 36 locked material delay scenarios. All generated schedules in the designated test instances and scenarios pass model constraint validation, achieve a lower average composite recovery score with observable trade-offs among individual stability components, and require an average end-to-end plan repair runtime of approximately 2 minutes (123.60~s) per scenario on the largest 3,182-operation instance.
 
-\textbf{Limitations and future work}: The present work investigates cyclic operation templates and plan-level cyclic template rescheduling under material readiness delays. While Proposition~\ref{prop:cyclic_unfolding} establishes the physical feasibility of steady-state cyclic unfolding for a fixed template, the model does not explicitly simulate the physical transient dynamics and work-in-progress (WIP) buffer congestion that occur when shop-floor operations transition from an existing template to a newly rescheduled template with in-process aircraft at disparate completion stages. Furthermore, standard operation durations are assumed deterministic. Future investigations will incorporate continuous transient line simulations, stochastic operation durations, as well as worker fatigue and time-varying productivity.
+\textbf{Limitations and future work}: The present work investigates cyclic operation templates and plan-level cyclic template rescheduling under material readiness delays. While Proposition~1 establishes the physical feasibility of steady-state cyclic unfolding for a fixed template, the model does not explicitly simulate the physical transient dynamics and work-in-progress (WIP) buffer congestion that occur when shop-floor operations transition from an existing template to a newly rescheduled template with in-process aircraft at disparate completion stages. Furthermore, standard operation durations are assumed deterministic. Future investigations will incorporate continuous transient line simulations, stochastic operation durations, as well as worker fatigue and time-varying productivity.
 
 \appendices
 
