@@ -97,7 +97,7 @@ In dynamic manufacturing, predictive--reactive scheduling provides a structured 
 
 Consider an APAL comprising five fixed physical stations $\mathcal{M}=\{1,\dots,5\}$. The assembly process is represented by a directed acyclic graph (DAG) $G=(\mathcal{O},\mathcal{E})$, where $\mathcal{O}=\mathcal{O}^+\cup\mathcal{O}^0$. Here, $\mathcal{O}^+$ denotes physical operations with positive processing times, and $\mathcal{O}^0$ denotes non-executable process-structure nodes (having zero duration and retaining only process hierarchies, hereafter referred to as structural nodes). Structural nodes consume no physical resources. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations, forming the physical operation DAG $G^+=(\mathcal{O}^+,\mathcal{E}^+)$. The immediate physical predecessors of operation $i$ are denoted by $\mathcal{P}(i)$.
 
-The system includes a pool of multiskilled workers $\mathcal{W}$ and a set of five skill types $\mathcal{K}$. Each physical operation $i\in\mathcal{O}^+$ has a standard processing time $p_i^{\mathrm{std}}>0$, requires a single skill $k_i\in\mathcal{K}$, and demands a fixed collaborative team size $q_i\in\mathbb{N}^+$. Each worker $w\in\mathcal{W}$ is characterized by a binary qualification vector $H_{wk}\in\{0,1\}$ and a baseline efficiency $\eta_w>0$. Except for initial positioning tasks, operation stations are not predetermined.
+The system includes a pool of multiskilled workers $\mathcal{W}$ and a set of five skill types $\mathcal{K}$. Each physical operation $i\in\mathcal{O}^+$ has a standard processing time $p_i^{\mathrm{std}}>0$, requires a single skill $k_i\in\mathcal{K}$, and demands a fixed collaborative team size $q_i\in\mathbb{N}^+$. Each worker $w\in\mathcal{W}$ has a binary skill qualification vector $\mathbf{H}_w=(H_{wk})_{k\in\mathcal{K}}$, where $H_{wk}\in\{0,1\}$, and a baseline efficiency coefficient $\eta_w>0$. Except for initial positioning tasks, operation stations are not predetermined.
 
 The operational assumptions are established as follows:
 \begin{enumerate}
@@ -139,7 +139,7 @@ $H, C_{\max}, S$ & Cyclic template span, template makespan, and composite recove
 
 \subsection{Initial APAL Cyclic Scheduling Model}
 
-The actual processing duration of operation $i$ executed by team $W_i$ accounts for individual efficiencies and synergistic collaboration discount factor $\rho=0.95$:
+The processing duration of operation $i$ depends on the efficiencies of its assigned workers and a team coordination discount factor $\rho=0.95$:
 \begin{equation}\label{eq:duration}
 D_i(W_i) = \frac{p_i^{\mathrm{std}} q_i}{\rho^{q_i-1} \sum_{w\in W_i} \eta_w}.
 \end{equation}
@@ -148,9 +148,9 @@ The optimization objective minimizes the template cycle span $H(\pi):=C_{\max}(\
 \begin{equation}\label{eq:cmax}
 \min_{\pi}\; C_{\max}(\pi) = \max_{m\in\mathcal{M}} C_m^{\mathrm{end}}(\pi) = \max_{i\in\mathcal{O}^+} C_i,
 \end{equation}
-where $C_m^{\mathrm{end}}(\pi)=\max_{\{i\in\mathcal{O}^+\mid m_i=m\}} C_i$ represents the latest completion time at station $m$. Once fixed, the baseline makespan defines the immutable reference horizon $T_{\mathrm{ref}}^0:=H^0=C_{\max}(\pi^0)$ for subsequent rescheduling. Station labor load $L_m=\sum_{m_i=m} q_i D_i(W_i)$ serves as an intermediate diagnostic and reward-shaping signal.
+where $C_m^{\mathrm{end}}(\pi)=\max_{\{i\in\mathcal{O}^+\mid m_i=m\}} C_i$ represents the latest completion time at station $m$. Once the baseline schedule is fixed, its makespan defines the reference horizon $T_{\mathrm{ref}}^0:=H^0=C_{\max}(\pi^0)$, which remains unchanged during rescheduling. Station labor load $L_m=\sum_{m_i=m} q_i D_i(W_i)$ serves as an intermediate diagnostic and reward-shaping signal.
 
-The schedule must strictly satisfy the following physical constraints:
+The schedule must satisfy the following assignment, precedence, resource, and temporal constraints:
 \begin{enumerate}
 \item \textbf{Unique assignment and station monotonicity}:
 \begin{equation}
@@ -184,13 +184,13 @@ where $c_t$ is the current environment time clock and $a_w$ is the earliest avai
 \subsection{Steady-State Cyclic Unfolding Across Aircraft}
 
 \textbf{Proposition 1 (Physical feasibility of cyclic unfolding)}:
-Given a cyclic template $\pi=(m,W,B,C)$ with span $H=C_{\max}$, let aircraft index be $k=0,1,2,\dots$. For aircraft $k$, the execution interval of operation $i$ on the shop-floor timeline is
+Given a feasible cyclic template $\pi = (m, W, B, C)$ satisfying all constraints in Section~\ref{sec:formulation}-B with span $H = C_{\max}$, let aircraft index be $k = 0, 1, 2, \dots$. For aircraft $k$, the execution interval of operation $i$ on the shop-floor timeline is
 \begin{equation}
 B_{i,k}^{\mathrm{phys}} = (k+m_i-1)H + B_i, \quad C_{i,k}^{\mathrm{phys}} = (k+m_i-1)H + C_i.
 \end{equation}
-Under station monotonicity ($m_j\ge m_i$) and intra-template precedence ($B_j\ge C_i$), this unfolded production schedule strictly satisfies aircraft spatial exclusivity, precedence feasibility, worker exclusivity, and station slot capacities across advancing pulsation cycles.
+Under these assumptions, the unfolded schedule preserves aircraft occupancy exclusivity, precedence feasibility, worker exclusivity, and station concurrency limits.
 
-\textit{Proof}: The operations of aircraft $k$ at station $m$ occupy the time window $[(k+m-1)H,(k+m)H)$. Consecutive aircraft at the same station occupy non-overlapping intervals, ensuring spatial exclusivity. For any $(i,j)\in\mathcal{E}^+$, the physical time difference satisfies:
+\textit{Proof}: Aircraft $k$ resides at station $m$ during $[(k+m-1)H, (k+m)H)$, and all its operations assigned to that station are contained within this window. Consecutive aircraft at the same station occupy non-overlapping intervals, ensuring spatial exclusivity. For any $(i,j)\in\mathcal{E}^+$, the physical time difference satisfies:
 \begin{equation}
 B_{j,k}^{\mathrm{phys}} - C_{i,k}^{\mathrm{phys}} = (m_j - m_i)H + (B_j - C_i) \ge 0.
 \end{equation}
@@ -222,10 +222,10 @@ $}
 
 Initial scheduling and stability rescheduling are unified into a sequential MDP $\mathcal{M}^z=(\mathcal{S}^z,\mathcal{A},\mathcal{P},\mathcal{R}^z,\gamma), z\in\{\mathrm{init},\mathrm{res}\}$:
 \begin{enumerate}
-\item \textbf{State representation}: State $s_t$ is encoded as a four-entity heterogeneous graph $G_t$ capturing process dependencies, station loads, and worker availability calendars.
+\item \textbf{State representation}: State $s_t$ at decision step $t$ is encoded as a four-entity heterogeneous graph $G_t$ capturing process dependencies, station loads, and worker availability calendars. The index $t$ denotes a scheduling decision step, whereas $c_t$ denotes the current environment time.
 \item \textbf{Hierarchical action decomposition}: The discrete joint action $a_t=(i_t,m_t,W_t)$ ($|W_t|=q_{i_t}$) is autoregressively decomposed into an ordered trajectory $\widetilde a_t=(i_t,m_t,\mathbf w_t)$, mapped to unordered set $W_t$ upon team completion.
 \item \textbf{Dynamic masking}: Hard constraints are enforced at each decision tier by masking invalid candidates with $-\infty$.
-\item \textbf{Stage-specific rewards}: Initial scheduling uses differential makespan and workload variance rewards: $\widetilde r_t^{\mathrm{init}} = -(\widehat C_{t+1}-\widehat C_t)/C_{\mathrm{ref}} - 0.5(\sigma_{L,t+1}-\sigma_{L,t})/L_{\mathrm{ref}}$; rescheduling directly adopts the negative composite score difference: $\widetilde r_t^{\mathrm{res}} = -[\widehat S(s_{t+1})-\widehat S(s_t)]$.
+\item \textbf{Stage-specific rewards}: Initial scheduling uses differential makespan rewards and changes in the standard deviation of station labor loads: $\widetilde r_t^{\mathrm{init}} = -(\widehat C_{t+1}-\widehat C_t)/C_{\mathrm{ref}} - 0.5(\sigma_{L,t+1}-\sigma_{L,t})/L_{\mathrm{ref}}$; rescheduling directly adopts the negative composite score difference: $\widetilde r_t^{\mathrm{res}} = -[\widehat S(s_{t+1})-\widehat S(s_t)]$.
 \end{enumerate}
 
 Fig.~\ref{fig:2} presents the architectural layout of HGP-PPO.
@@ -301,7 +301,7 @@ Aggregating multi-head messages $\mathbf m_v^{(r,\ell)} = \frac{1}{H}\sum_{h=1}^
 \mathbf h_v^{(\ell)} = \mathbf h_v^{(\ell-1)} + \operatorname{LeakyReLU}\left(\sum_{r\in\mathcal R_{\mathrm{in}}(v)}\mathbf m_v^{(r,\ell)}\right).
 \end{equation}
 
-Node-type attention pooling produces invariant global context $\mathbf g_t=[\mathbf g_M \,\|\, \mathbf g_O \,\|\, \mathbf g_W]\in\mathbb R^{3d}$:
+Node-type attention pooling produces a fixed-dimensional, permutation-invariant global context $\mathbf g_t=[\mathbf g_M \,\|\, \mathbf g_O \,\|\, \mathbf g_W]\in\mathbb R^{3d}$:
 \begin{equation}
 \beta_v^X = \frac{\exp(a_X(\mathbf h_v))}{\sum_{u\in\mathcal V^X}\exp(a_X(\mathbf h_u))}, \quad \mathbf g_X = \sum_{v\in\mathcal V^X}\beta_v^X\mathbf h_v.
 \end{equation}
@@ -366,7 +366,7 @@ $}
 \begin{equation}
 \mathcal L = \mathcal L_{\mathrm{policy}}(\theta) + c_V \mathbb E_t[(V_\phi(s_t)-R_t)^2] - c_H \overline H.
 \end{equation}
-The HB-GAT-PN backbone decouples parameters from problem scale, enabling direct zero-shot transfer and warm-start rescheduling fine-tuning.
+Shared graph-encoding and pointer parameters accommodate varying numbers of operations and workers without size-specific output heads, with scale-extrapolated schedule quality verified experimentally in Section~\ref{sec:experiments}. For rescheduling, operation node features expand from 18 to 24 dimensions to incorporate baseline schedules and disturbance signals, widening the first-layer operation projection matrix. Compatible parameters across the graph encoder, pooling layers, and pointer decoders are directly initialized from the trained initial-scheduling model; for the operation projection layer, weights corresponding to existing channels are preserved while new input channels are initialized under standard initialization. The policy is then further trained in the disturbance environment under the composite stability objective $S(\pi^r)$ with inherited worker--station bindings, enabling effective knowledge transfer from baseline scheduling to disturbance recovery.
 
 \section{Experiments and Results}\label{sec:experiments}
 
@@ -474,7 +474,7 @@ Dispatching rules & CPM & 387.28 & 1597.92 & 2522.96 & 3430.06 & 1984.55 \\
 
 \subsection{Initial Scheduling Results Across Scales}
 
-Table~\ref{tab:initial_results} reports initial makespans. Across the four scales, HGP-PPO achieves the lowest equal-weight average makespan of 902.40~h, outperforming L2D-PPO-APAL (922.94~h) by 2.22\% and Graph-DDQN-APAL (1053.11~h) by 14.31\%. On the largest 3,182-operation instance, HGP-PPO achieves 1,623.69~h, reducing makespan by 181.02~h (10.03\%) compared to L2D-PPO-APAL. Metaheuristics (1464.18--1805.77~h) and dispatching rules (1116.76--2179.63~h) degrade noticeably at larger scales under equivalent computation budgets. Supplementary stochastic evaluations yield $274.97\pm3.77$, $517.50\pm12.89$, $1070.71\pm101.12$, and $1678.47\pm55.94$~h, averaging 885.41~h.
+Table~\ref{tab:initial_results} reports initial makespans. Across the four scales, HGP-PPO achieves the lowest equal-weight average makespan of 902.40~h, outperforming L2D-PPO-APAL (922.94~h) by 2.22\% and Graph-DDQN-APAL (1053.11~h) by 14.31\%. On the largest 3,182-operation instance, HGP-PPO achieves 1,623.69~h, reducing makespan by 181.02~h (10.03\%) compared to L2D-PPO-APAL. Metaheuristics (1464.18--1805.77~h) and dispatching rules (1116.76--2179.63~h) degrade noticeably at larger scales under the prespecified search budgets. Supplementary stochastic evaluations yield $274.97\pm3.77$, $517.50\pm12.89$, $1070.71\pm101.12$, and $1678.47\pm55.94$~h, averaging 885.41~h.
 
 \begin{figure}[!t]
 \centering
@@ -509,7 +509,7 @@ Op-Only Decisions & Heuristic station and worker dispatching & 269.66 & 779.13 &
 
 Table~\ref{tab:ablation} and Fig.~\ref{fig:3} analyze structural ablations:
 \begin{enumerate}
-\item \textbf{Worker--Station preassignment}: Pre-fixing worker affiliations inflates average makespan to 1,382.73~h (+53.2\%), proving that static allocation bottlenecks task execution.
+\item \textbf{Worker--Station preassignment}: Pre-fixing worker affiliations inflates average makespan to 1,382.73~h (+53.2\%), indicating that static allocation bottlenecks task execution.
 \item \textbf{Homogeneous GraphSAGE}: Collapsing heterogeneous relations increases mean makespan to 1,037.64~h (+15.0\%).
 \item \textbf{Op--Station decisions}: Bypassing worker pointers yields low initial makespans on smaller instances but leads to a 0\% feasibility rate during rescheduling due to team allocation deadlocks.
 \item \textbf{Op-only decisions}: Omitting station pointers results in infeasibility on instances with 2,338 and 3,182 operations.
@@ -647,9 +647,9 @@ SimulatedAnnealingRepair & 292.42 & 676.78 & 3445.39 & 4296.64 \\
 
 \section{Conclusions and Limitations}\label{sec:conclusions}
 
-This paper has presented HGP-PPO, a heterogeneous graph reinforcement learning framework for joint scheduling and workforce allocation on aircraft pulsating assembly lines. The hierarchical operation--station--worker autoregressive pointer decoder and dynamic masks resolve the combinatorial team explosion, while endogenous worker--station binding coordinates workforce deployment with station workloads. Zero-shot evaluations across 283 to 3,182 physical operations and 36 material delay scenarios confirm strong scale generalization, 100\% physical validity, superior plan stability, and 2-minute online responsiveness.
+This paper has presented HGP-PPO, a heterogeneous graph reinforcement learning framework for joint scheduling and workforce allocation on aircraft pulsating assembly lines. The hierarchical operation--station--worker autoregressive pointer decoder and dynamic masks resolve the combinatorial team explosion, while endogenous worker--station binding coordinates workforce deployment with station workloads. For initial scheduling, a single locked policy is directly evaluated across 283 to 3,182 physical operations without instance-specific fine-tuning, achieving strong scale extrapolation and the lowest average makespan of 902.40~h. For rescheduling, the policy trained under the disturbance environment is evaluated across 36 locked material delay scenarios. All generated schedules in the designated test instances and scenarios pass model constraint validation, achieve a lower average composite recovery score with observable trade-offs among individual stability components, and require an average end-to-end plan repair runtime of approximately 2 minutes (123.60~s) per scenario on the largest 3,182-operation instance.
 
-\textbf{Limitations and future work}: The present model focuses on static cyclic templates and discrete-horizon rescheduling without explicitly simulating transient WIP buffer congestion during station advancement. Furthermore, standard operation durations are assumed deterministic. Future investigations will incorporate continuous transient line simulations, stochastic operation durations, and dynamic worker fatigue dynamics.
+\textbf{Limitations and future work}: The present work investigates cyclic operation templates and plan-level cyclic template rescheduling under material readiness delays. While Proposition~\ref{prop:cyclic_unfolding} establishes the physical feasibility of steady-state cyclic unfolding for a fixed template, the model does not explicitly simulate the physical transient dynamics and work-in-progress (WIP) buffer congestion that occur when shop-floor operations transition from an existing template to a newly rescheduled template with in-process aircraft at disparate completion stages. Furthermore, standard operation durations are assumed deterministic. Future investigations will incorporate continuous transient line simulations, stochastic operation durations, as well as worker fatigue and time-varying productivity.
 
 \appendices
 

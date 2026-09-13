@@ -56,7 +56,7 @@ In dynamic manufacturing environments, predictive–reactive scheduling provides
 
 ### 3.1 APAL System Description, Core Assumptions, and Notation
 
-Consider an APAL consisting of five fixed physical stations $\mathcal{M}=\{1,\dots,5\}$. The original assembly process topology is represented by a directed acyclic graph $G=(\mathcal{O},\mathcal{E})$, where $\mathcal{O}=\mathcal{O}^{+}\cup\mathcal{O}^{0}$. Here, $\mathcal{O}^{+}$ denotes physical operations with positive processing times, and $\mathcal{O}^{0}$ denotes non-executable process-structure nodes (having zero duration and retaining only process hierarchies, hereafter referred to as structural nodes). Structural nodes consume no physical resources. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations, forming the physical operation DAG $G^+=(\mathcal{O}^+,\mathcal{E}^+)$. The immediate physical predecessors of operation $i$ are denoted by $\mathcal{P}(i)$. The system includes a pool of multiskilled workers $\mathcal{W}$ and a set of five skill types $\mathcal{K}$. Each physical operation $i\in\mathcal{O}^{+}$ has a baseline standard duration $p_i^{\mathrm{std}}>0$, a single required skill type $k_i\in\mathcal{K}$, and a fixed team size $q_i\in\mathbb{N}^{+}$. Each worker $w\in\mathcal{W}$ has a skill qualification vector $H_{wk}\in\{0,1\}$ and a baseline efficiency coefficient $\eta_w>0$. Except for a small number of initial positioning operations, operation stations are not specified in advance.
+Consider an APAL consisting of five fixed physical stations $\mathcal{M}=\{1,\dots,5\}$. The original assembly process topology is represented by a directed acyclic graph $G=(\mathcal{O},\mathcal{E})$, where $\mathcal{O}=\mathcal{O}^{+}\cup\mathcal{O}^{0}$. Here, $\mathcal{O}^{+}$ denotes physical operations with positive processing times, and $\mathcal{O}^{0}$ denotes non-executable process-structure nodes (having zero duration and retaining only process hierarchies, hereafter referred to as structural nodes). Structural nodes consume no physical resources. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations, forming the physical operation DAG $G^+=(\mathcal{O}^+,\mathcal{E}^+)$. The immediate physical predecessors of operation $i$ are denoted by $\mathcal{P}(i)$. The system includes a pool of multiskilled workers $\mathcal{W}$ and a set of five skill types $\mathcal{K}$. Each physical operation $i\in\mathcal{O}^{+}$ has a baseline standard duration $p_i^{\mathrm{std}}>0$, a single required skill type $k_i\in\mathcal{K}$, and a fixed team size $q_i\in\mathbb{N}^{+}$. Each worker $w\in\mathcal{W}$ has a binary skill qualification vector $\mathbf{H}_w=(H_{wk})_{k\in\mathcal{K}}$, where $H_{wk}\in\{0,1\}$, and a baseline efficiency coefficient $\eta_w>0$. Except for a small number of initial positioning operations, operation stations are not specified in advance.
 
 The core characteristics and operating assumptions are summarized as follows:
 
@@ -64,7 +64,7 @@ The core characteristics and operating assumptions are summarized as follows:
 2. **Worker binding upon first selection**: All workers are globally unbound at the start of an instance. When worker $w$ is first assigned to an operation at station $m$, the worker is endogenously bound to that station and cannot serve other stations during that scheduling instance or any subsequent rescheduling triggered from it. Unbound workers remain available to any station satisfying the relevant conditions.
 3. **Deterministic mapping from discrete actions to forward time allocation**: Scheduling decisions produce only discrete joint resource actions $(i,m_i,W_i)$, where $|W_i|=q_i$. Based on predecessor completion, worker availability, material readiness, and station concurrency slot capacity $c_m$, the Forward Allocation Engine deterministically maps each action to the earliest feasible start time $B_i$ and completion time $C_i$ on the template timeline.
 
-**Table 2. Main Notation Used in Section III**
+**Table I. Main Mathematical Notation**
 
 | Symbol | Physical meaning |
 |---|---|
@@ -86,23 +86,23 @@ The core characteristics and operating assumptions are summarized as follows:
 
 #### 3.2.1 Actual Processing Duration and Optimization Objective
 
-The actual processing duration of an operation executed by a specific collaborative team depends on individual worker efficiencies and team collaboration effects. For a feasible team $W_i$ assigned to operation $i$ with $|W_i|=q_i$, the actual processing duration is defined as
+The processing duration of operation $i$ depends on the efficiencies of its assigned workers and a team coordination discount factor $\rho=0.95$:
 
 $$
 D_i(W_i) = \frac{p_i^{\mathrm{std}} q_i}{\rho^{q_i-1} \sum_{w\in W_i} \eta_w}, \qquad \rho = 0.95. \tag{1}
 $$
 
-Here, $\rho$ is the team collaboration discount factor. Initial scheduling constructs a steady-state cyclic operation template $\pi$ for repetitive production of a single aircraft model. Its formal objective is to minimize the cyclic operation template span, or cycle span, $H(\pi):=C_{\max}(\pi)$:
+Here, $\rho$ is the team coordination discount factor. Initial scheduling constructs a steady-state cyclic operation template $\pi$ for repetitive production of a single aircraft model. Its formal objective is to minimize the cyclic operation template span, or cycle span, $H(\pi):=C_{\max}(\pi)$:
 
 $$
 \min_{\pi}\; C_{\max}(\pi) = \max_{m\in\mathcal{M}} C_m^{\mathrm{end}}(\pi) = \max_{i\in\mathcal{O}^{+}} C_i. \tag{2}
 $$
 
-The latest completion time at station $m$ is defined as $C_m^{\mathrm{end}}(\pi)=\max_{\{i\in\mathcal{O}^{+}\mid m_i=m\}}C_i$, or zero if no operations are assigned to that station. Once the baseline schedule $\pi^0$ has been generated and fixed, its completion span defines the reference horizon for subsequent rescheduling, $T_{\mathrm{ref}}^0:=H^0=C_{\max}(\pi^0)$, which is not redefined during rescheduling. The total labor-hour load at station $m$, $L_m=\sum_{m_i=m}q_iD_i(W_i)$, is used only for reward shaping within the algorithm and for workload balance diagnostics, rather than as a separate optimization objective.
+The latest completion time at station $m$ is defined as $C_m^{\mathrm{end}}(\pi)=\max_{\{i\in\mathcal{O}^{+}\mid m_i=m\}}C_i$, or zero if no operations are assigned to that station. Once the baseline schedule is fixed, its makespan defines the reference horizon $T_{\mathrm{ref}}^0:=H^0=C_{\max}(\pi^0)$, which remains unchanged during rescheduling. The total labor-hour load at station $m$, $L_m=\sum_{m_i=m}q_iD_i(W_i)$, is used only for reward shaping within the algorithm and for workload balance diagnostics, rather than as a separate optimization objective.
 
 #### 3.2.2 System Feasibility Constraints
 
-An initial schedule must strictly satisfy the following physical constraints across multiple dimensions:
+The schedule must satisfy the following assignment, precedence, resource, and temporal constraints:
 
 1. **Unique operation assignment and station monotonicity**:
    $$\sum_{m\in\mathcal{M}} x_{im} = 1, \quad m_i = \sum_{m\in\mathcal{M}} m x_{im}, \quad \forall i\in\mathcal{O}^{+}; \qquad m_j \ge m_i, \quad \forall (i,j)\in\mathcal{E}^{+}.$$
@@ -117,17 +117,17 @@ An initial schedule must strictly satisfy the following physical constraints acr
 ### 3.3 Steady-State Cyclic Unfolding Across Aircraft and Physical Feasibility
 
 **Proposition 1 (Physical feasibility of steady-state cyclic unfolding)**:
-Given a cyclic operation template $\pi=(m,W,B,C)$ and cycle span $H=C_{\max}$, let aircraft be indexed by $k=0,1,2,\dots$. For aircraft $k$, the physical execution interval of operation $i$ on the absolute shop-floor timeline is defined by
+Given a feasible cyclic template $\pi = (m, W, B, C)$ satisfying all constraints in Section 3.2 with span $H = C_{\max}$, let aircraft index be $k = 0, 1, 2, \dots$. For aircraft $k$, the physical execution interval of operation $i$ on the absolute shop-floor timeline is defined by
 
 $$
 B_{i,k}^{\mathrm{phys}} = (k+m_i-1)H + B_i, \qquad C_{i,k}^{\mathrm{phys}} = (k+m_i-1)H + C_i.
 $$
 
-Under station monotonicity ($m_j\ge m_i$) and within-template temporal precedence ($B_j\ge C_i$), this unfolded production schedule strictly satisfies exclusive aircraft occupancy, technological precedence, worker mutual exclusion, and station capacity limits as the line advances.
+Under these assumptions, the unfolded schedule preserves aircraft occupancy exclusivity, precedence feasibility, worker exclusivity, and station concurrency limits.
 
 **Proof and physical interpretation**:
 
-1. **Exclusive aircraft occupancy and advancement rhythm**: The operations of aircraft $k$ at station $m$ are confined to the absolute time window $[(k+m-1)H,(k+m)H)$. The residence windows of consecutive aircraft at the same physical station do not overlap, ensuring exclusive spatial occupancy by the aircraft.
+1. **Exclusive aircraft occupancy and advancement rhythm**: Aircraft $k$ resides at station $m$ during $[(k+m-1)H,(k+m)H)$, and all its operations assigned to that station are contained within this window. The residence windows of consecutive aircraft at the same physical station do not overlap, ensuring exclusive spatial occupancy by the aircraft.
 2. **Precedence feasibility**: For any physical precedence edge $(i,j)\in\mathcal{E}^{+}$, the execution time difference after unfolding satisfies
    $$B_{j,k}^{\mathrm{phys}} - C_{i,k}^{\mathrm{phys}} = (m_j - m_i)H + (B_j - C_i) \ge 0.$$
    This inequality holds because $m_j\ge m_i$ and $B_j\ge C_i$. In particular, for operations at different stations with $m_j>m_i$, $(m_j-m_i)H\ge H$. The predecessor operations of the same aircraft at upstream stations have therefore been completed in earlier pulsation cycles, and physical assembly precedence is naturally satisfied by station advancement. Uniformly imposing $B_j\ge C_i$ within a single template provides a **structured sufficient condition** for physically executable unfolding across aircraft.
@@ -164,11 +164,11 @@ In this composite objective, $0.20C_{\max}^r/T_{\mathrm{ref}}^0$ maintains basic
 
 The initial scheduling and stability-aware rescheduling problems formulated in Section III are represented within a unified sequential Markov decision process (MDP), $\mathcal{M}^z=(\mathcal{S}^z,\mathcal{A},\mathcal{P},\mathcal{R}^z,\gamma)$, where $z\in\{\mathrm{init},\mathrm{res}\}$:
 
-1. **State space and graph representation**: At decision step $t$, the environment state $s_t$ is represented by a heterogeneous graph $G_t$ with four node types. Operation nodes contain precedence, assignment status, and material release information; station nodes contain labor-hour loads and slot calendars; and worker nodes contain skills, efficiencies, and station bindings $\ell_w$. Rescheduling states additionally include baseline template start times and frozen-operation indicators.
+1. **State space and graph representation**: At decision step $t$, the environment state $s_t$ is represented by a heterogeneous graph $G_t$ with four node types. The index $t$ denotes a scheduling decision step, whereas $c_t$ denotes the current environment time. Operation nodes contain precedence, assignment status, and material release information; station nodes contain labor-hour loads and slot calendars; and worker nodes contain skills, efficiencies, and station bindings $\ell_w$. Rescheduling states additionally include baseline template start times and frozen-operation indicators.
 2. **Hierarchical joint action decomposition**: Each resource decision produces a joint action $a_t=(i_t,m_t,W_t)$ specifying an operation, a physical station, and a specific worker team, with $|W_t|=q_{i_t}$. Internally, the policy autoregressively generates an ordered trajectory $\widetilde a_t=(i_t,m_t,\mathbf w_t)$, which the environment maps to the unordered set $W_t$ once team construction is complete.
 3. **Dynamic feasibility masks and deterministic transitions**: At the operation level, the environment excludes operations whose predecessors are incomplete or whose materials are not ready. At the station level, it excludes choices that violate station monotonicity. At the worker level, it excludes workers lacking the required skill or already bound to other stations. After an action is selected, the forward allocation engine deterministically advances the state and updates the graph topology and availability calendars.
 4. **Stage-specific rewards and parameter transfer**:
-   - *Initial scheduling* uses a difference reward based on consecutive increments in the estimated makespan and the standard deviation of station labor-hour loads: $\widetilde r_t^{\mathrm{init}}=-(\widehat C_{t+1}-\widehat C_t)/C_{\mathrm{ref}}-0.5(\sigma_{L,t+1}-\sigma_{L,t})/L_{\mathrm{ref}}$, followed by scaling and the incorporation of a deadlock penalty;
+   - *Initial scheduling* uses differential rewards based on estimated makespan increments and changes in the standard deviation of station labor loads: $\widetilde r_t^{\mathrm{init}}=-(\widehat C_{t+1}-\widehat C_t)/C_{\mathrm{ref}}-0.5(\sigma_{L,t+1}-\sigma_{L,t})/L_{\mathrm{ref}}$, followed by scaling and the incorporation of a deadlock penalty;
    - *Rescheduling* directly uses the composite-objective difference reward $\widetilde r_t^{\mathrm{res}}=-[\widehat S(s_{t+1})-\widehat S(s_t)]$;
    - The framework first trains and fixes the initial scheduling policy, then initializes the rescheduling model with its parameters and fine-tunes it in the disturbance environment to transfer knowledge.
 
@@ -180,9 +180,9 @@ Fig. 2 presents the overall HGP-PPO architecture and solution process.
 
 #### 4.2 Heterogeneous Graph Representation and Global Encoding
 
-**Four node types and state features.** At decision step $t$, the environment represents the APAL state as a heterogeneous graph $G_t=(\mathcal{V}_t,\mathcal{E}_t)$, where $\mathcal{V}_t=\mathcal{O}\cup\mathcal{M}\cup\mathcal{W}\cup\mathcal{K}$. The Operation node set $\mathcal{O}=\mathcal{O}^+\cup\mathcal{O}^0$ includes physical operations and auxiliary structural nodes retained from the source process graph. Structural nodes have zero duration and no physical resource requirements; they are retained for graph encoding but excluded from scheduling actions. Table 4-1 summarizes the input features of the four node types.
+**Four node types and state features.** At decision step $t$, the environment represents the APAL state as a heterogeneous graph $G_t=(\mathcal{V}_t,\mathcal{E}_t)$, where $\mathcal{V}_t=\mathcal{O}\cup\mathcal{M}\cup\mathcal{W}\cup\mathcal{K}$. The Operation node set $\mathcal{O}=\mathcal{O}^+\cup\mathcal{O}^0$ includes physical operations and auxiliary structural nodes retained from the source process graph. Structural nodes have zero duration and no physical resource requirements; they are retained for graph encoding but excluded from scheduling actions. Table II summarizes the input features of the four node types.
 
-**Table 4-1. Input State Information for the Four Node Types**
+**Table II. Input State Features for the Four Node Types**
 
 | Node type | Main state information |
 |---|---|
@@ -195,9 +195,9 @@ Fig. 2 presents the overall HGP-PPO architecture and solution process.
 
 Continuous features are normalized using scales derived from each instance. Let $\bar p=\frac{1}{|\mathcal{O}^{+}|}\sum_{i\in\mathcal{O}^{+}}p_i^{\mathrm{std}}$; processing durations are normalized as $\widetilde p_i=p_i^{\mathrm{std}}/\bar p$. Worker and station waiting times are logarithmically scaled. Station labor-hour loads are jointly represented relative to the ideal evenly distributed load, the total line load, and the current maximum load. Rescheduling time offsets are normalized by the baseline horizon $T_{\mathrm{ref}}^0$.
 
-**Relation types and dynamic graph updates.** The heterogeneous graph defines the eight directed relations listed in Table 4-2. Technological precedence and skill supply–demand relations remain static within an instance, whereas operation–station and operation–worker relations are dynamically added as joint decisions are executed.
+**Relation types and dynamic graph updates.** The heterogeneous graph defines the eight directed relations listed in Table III. Technological precedence and skill supply–demand relations remain static within an instance, whereas operation–station and operation–worker relations are dynamically added as joint decisions are executed.
 
-**Table 4-2. Heterogeneous Graph Relations and Update Rules**
+**Table III. Heterogeneous Graph Relations and Dynamics**
 
 | Relation | Direction | Update rule | Meaning |
 |---|---|---|---|
@@ -219,7 +219,7 @@ $$
 \mathbf h_v^{(\ell)} = \mathbf h_v^{(\ell-1)} + \operatorname{LeakyReLU}\left(\sum_{r\in\mathcal R_{\mathrm{in}}(v)}\mathbf m_v^{(r,\ell)}\right).
 $$
 
-**Global attention pooling by node type.** To obtain a global context of fixed dimensionality across varying graph sizes, the Actor applies learned attention pooling separately to Operation, Station, and Worker nodes:
+**Global attention pooling by node type.** To obtain a fixed-dimensional, permutation-invariant global context across varying graph sizes, the Actor applies learned attention pooling separately to Operation, Station, and Worker nodes:
 $$
 \beta_v^X = \frac{\exp(a_X(\mathbf h_v))}{\sum_{u\in\mathcal V^X}\exp(a_X(\mathbf h_u))}, \quad \mathbf g_X = \sum_{v\in\mathcal V^X}\beta_v^X\mathbf h_v, \quad \mathbf g_t = [\mathbf g_M \,\|\, \mathbf g_O \,\|\, \mathbf g_W] \in \mathbb R^{3d}.
 $$
@@ -277,7 +277,7 @@ $$
 $$
 where $\overline H$ is a weighted sum of the conditional entropies of the three distribution levels, used to maintain effective exploration.
 
-**Compatibility across scales and parameter transfer for rescheduling.** In HGP-PPO's heterogeneous graph attention and pointer network backbone, denoted HB-GAT-PN with the corresponding training algorithm HB-GAT-PPO, the network parameters are independent of the numbers of operations and workers. Continuous features are nondimensionalized using instance-specific scales, making the architecture inherently compatible with APAL inputs of different sizes. Rescheduling retains this backbone and augments Operation node states with baseline start times, baseline stations, and frozen indicators. It inherits the worker–station bindings of the initial schedule and uses the initial model weights as a warm start for fine-tuning in the disturbance environment under the composite stability objective $S(\pi^r)$, enabling effective knowledge transfer between tasks.
+**Compatibility across scales and parameter transfer for rescheduling.** In HGP-PPO, the heterogeneous graph encoder and autoregressive pointer decoder use shared parameters and dynamic candidate masking, decoupling network weights from specific numbers of operations and workers. Continuous features are nondimensionalized using instance scales, allowing the architecture to structurally accommodate varying numbers of operations and workers without size-specific output heads (with solution quality on larger instances substantiated experimentally in Section V). For rescheduling, operation node features expand from 18 to 24 dimensions to incorporate baseline schedule features and disturbance signals, widening the first-layer operation projection matrix. Compatible parameters across the graph encoder, pooling layers, and pointer decoders are directly initialized from the trained initial-scheduling model; for the operation projection layer, weights corresponding to existing channels are preserved while new input channels are initialized under standard initialization. The policy is then further trained in the disturbance environment under the composite stability objective $S(\pi^r)$ with inherited worker–station bindings, enabling effective knowledge transfer from baseline scheduling to disturbance recovery.
 
 
 ## V. Experiments and Results
@@ -292,15 +292,15 @@ The experiments establish a correspondence between claims, experiments, and eval
 4. **EQ4 (Online runtime scaling)**: How do end-to-end rescheduling runtimes of neural forward inference and conventional search performed separately for each instance scale with the number of operations?
 5. **EQ5 (Recovery under material delays)**: Can the proposed architecture balance physical schedule feasibility, cycle completion performance, and stability relative to the baseline plan under material readiness delays?
 
-**Data partitioning and information isolation.** The experiments assign mutually exclusive Training, Development, and Locked test roles. The Training set contains 24 synthetic structural variants with 400–800 physical operations and is used for gradient-based policy updates. The Development set contains six independent instances and 54 disturbance scenarios and is used only for hyperparameter tuning, early stopping, and checkpoint selection. The Locked test set contains the four original factory instances in Table 5-2 and 36 fixed delay scenarios. It is evaluated once after network hyperparameters, training budgets, and model states have been fixed, and does not inform any subsequent adjustments.
+**Data partitioning and information isolation.** The experiments assign mutually exclusive Training, Development, and Locked test roles. The Training set contains 24 synthetic structural variants with 400–800 physical operations and is used for gradient-based policy updates. The Development set contains six independent instances and 54 disturbance scenarios and is used only for hyperparameter tuning, early stopping, and checkpoint selection. The Locked test set contains the four original factory instances in Table IV and 36 fixed delay scenarios. It is evaluated once after network hyperparameters, training budgets, and model states have been fixed, and does not inform any subsequent adjustments.
 
 **Hard feasibility requirements and single-run evaluation.** Every schedule must satisfy all constraints on technological precedence, station monotonicity, the capacities of the five physical stations, required team sizes $q_i$, skill compatibility, worker temporal mutual exclusion, and worker–station binding. Rescheduling must additionally satisfy inheritance at the freeze boundary $\tau^r$, delayed material arrivals, and inheritance of existing worker bindings. All schedules are audited by both a common constraint engine and an independent schedule validator. Completeness ($R_{\mathrm{complete}}=1$) and feasibility ($R_{\mathrm{valid}}=1$) are mandatory prerequisites for quality ranking; penalized makespans are not used to produce misleading rankings.
 
 ### 5.2 Evaluation Instances, Baselines, and Statistical Procedures
 
-**APAL evaluation instances.** Four sets of real APAL operation data supplied by an aircraft manufacturer are used; their physical sizes are listed in Table 5-2. All instances have five fixed physical stations and the same station concurrency capacities. Operation specialty codes are grouped into five scheduling skill categories. Each physical operation requires a single skill type and a fixed team size $q_i$. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations.
+**APAL evaluation instances.** Four sets of real APAL operation data supplied by an aircraft manufacturer are used; their physical sizes are listed in Table IV. All instances have five fixed physical stations and the same station concurrency capacities. Operation specialty codes are grouped into five scheduling skill categories. Each physical operation requires a single skill type and a fixed team size $q_i$. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations.
 
-**Table 5-2. Locked Evaluation Instances From Real Factory APAL Data**
+**Table IV. Real Factory APAL Locked Evaluation Instances**
 
 | Instance | Physical operations | Stations | Experimental role |
 |:---:|:---:|:---:|:---:|
@@ -311,7 +311,7 @@ The experiments establish a correspondence between claims, experiments, and eval
 
 *Note: Instance sizes count physical operations only. The four source process graphs additionally contain 7, 35, 64, and 117 structural nodes, respectively, giving 290, 715, 2,402, and 3,299 process nodes in total.*
 
-**Table 5-4. Comparison Methods, Decision Criteria, and Search Budgets**
+**Table V. Comparison Methods, Decision Criteria, and Search Budgets**
 
 | Category | Method | Decision criteria / search representation and budget |
 |---|---|---|
@@ -326,15 +326,15 @@ The experiments establish a correspondence between claims, experiments, and eval
 | Rescheduling reference | NoReschedule | Negative control: retain the baseline schedule without active repair |
 | Heuristic repair | StabilityAware / CPM hybrid | Hybrid rules balancing start-time deviations and the critical-path horizon |
 
-**Comparison methods and search budgets.** The comparison methods span three paradigms: dispatching rules, metaheuristic search, and deep reinforcement learning. Table 5-4 summarizes their main decision criteria and search budgets fixed in advance. All methods share the same physical parameter ($\rho=0.95$) and forward allocation engine. Detailed network hyperparameters for the proposed model—a hidden dimension of 128, five GATv2 layers with four heads, and 11.2M parameters—and the PPO training configuration are provided in Appendix Table B-1.
+**Comparison methods and search budgets.** The comparison methods span three paradigms: dispatching rules, metaheuristic search, and deep reinforcement learning. Table V summarizes their main decision criteria and search budgets fixed in advance. All methods share the same physical parameter ($\rho=0.95$) and forward allocation engine. Detailed network hyperparameters for the proposed model—a hidden dimension of 128, five GATv2 layers with four heads, and 11.2M parameters—and the PPO training configuration are provided in Table XII (Appendix).
 
 **Evaluation metrics and statistical inference.** For initial scheduling, cycle span $H=C_{\max}$ in (2) is the sole primary quality metric. Deterministic masked argmax decoding at zero temperature is used for the main comparison, supplemented by means and standard deviations over five random seeds. For rescheduling, subject to strict physical feasibility, the weighted composite objective $S$ defined in Section 3.4 and (4) is the primary ranking criterion. Its components—cycle span $C_{\max}^r$, baseline overrun $\Delta_{\mathrm{ref}}^r$, start-time deviation $\bar D_{\mathrm{start}}^r$, station change rate $R_{\mathrm{sta}}^r$, and team change rate $R_{\mathrm{team}}^r$—are also examined individually. Rescheduling experiments cover 36 paired disturbance scenarios: four instances $\times$ three delay levels $\times$ three freeze timings. A scenario-paired Friedman test evaluates overall ranking differences among 19 feasible methods. Two-sided Wilcoxon signed-rank tests with Holm–Bonferroni correction control the familywise error rate, and 10,000 stratified bootstrap resamples are used to estimate 95% confidence intervals, ensuring rigorous statistical inference.
 
 ### 5.3 Initial Scheduling Results and Performance Across Scales
 
-Table 5-6 summarizes deterministic decoding results for the four real factory APAL instances. All results in this table correspond to complete schedules that pass the common feasibility checks, so their makespans can be compared directly under the same constraints. The proposed method uses a single fixed policy to process instances with 283 to 3182 physical operations, without gradient updates or instance-specific tuning during testing.
+Table VI summarizes deterministic decoding results for the four real factory APAL instances. All results in this table correspond to complete schedules that pass the common feasibility checks, so their makespans can be compared directly under the same constraints. The proposed method uses a single fixed policy to process instances with 283 to 3182 physical operations, without gradient updates or instance-specific tuning during testing.
 
-**Table 5-6. Initial Scheduling Makespan of Comparison Methods and the Workforce Preassignment Ablation on Four APAL Instances (h; Lower Is Better)**
+**Table VI. Initial Scheduling Makespan Across Four APAL Instances (h; Lower Is Better)**
 
 | Category | Method | 283 | 680 | 2338 | 3182 | Equal-weight mean across four scales |
 |---|---|---:|---:|---:|---:|---:|
@@ -362,9 +362,9 @@ Overall, a single fixed policy generates feasible schedules for four substantial
 
 ### 5.4 Decision Architecture and Network Configuration Comparisons and Feasibility Boundaries
 
-To distinguish the roles of workforce allocation, graph representation, and joint decision depth, the Worker–Station preassignment comparison is included alongside all initial scheduling methods in Table 5-6, while Table 5-7 compares the proposed method with three structural variants. All methods share the same environment constraints and feasibility evaluation criteria. The two action-level variants simultaneously reduce observation scope, graph inputs, and masks, and use a minimum-waiting rule to fill in resources that are not explicitly selected. They therefore compare complete decision architectures rather than identify the independent causal effect of an individual Pointer module.
+To distinguish the roles of workforce allocation, graph representation, and joint decision depth, the Worker–Station preassignment comparison is included alongside all initial scheduling methods in Table VI, while Table VII compares the proposed method with three structural variants. All methods share the same environment constraints and feasibility evaluation criteria. The two action-level variants simultaneously reduce observation scope, graph inputs, and masks, and use a minimum-waiting rule to fill in resources that are not explicitly selected. They therefore compare complete decision architectures rather than identify the independent causal effect of an individual Pointer module.
 
-**Table 5-7. Initial Scheduling Results and Rescheduling Feasibility Rates for Different Decision Architectures and Network Configurations**
+**Table VII. Initial Makespans and Rescheduling Feasibility for Structural Variants**
 
 | Method | Main change | 283 | 680 | 2338 | 3182 | Mean across four scales | Feasible initial scheduling instances | Rescheduling feasibility rate |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -387,9 +387,9 @@ Overall, the full joint representation and decoder exhibit more consistent feasi
 
 ### 5.5 Rescheduling Results Under Material Delays
 
-Table 5-8 compares rescheduling results across 36 paired scenarios formed by four instance sizes, three delay intensities, and three trigger stages. The table includes all 19 feasible methods entering the Friedman analysis and retains NoReschedule as a negative control. The operation–Station variant, whose rescheduling feasibility rate is 0% in Table 5-7, is excluded from quality statistics. Lower composite scores $S$ are better.
+Table VIII compares rescheduling results across 36 paired scenarios formed by four instance sizes, three delay intensities, and three trigger stages. The table includes all 19 feasible methods entering the Friedman analysis and retains NoReschedule as a negative control. The operation–Station variant, whose rescheduling feasibility rate is 0% in Table VII, is excluded from quality statistics. Lower composite scores $S$ are better.
 
-**Table 5-8. Composite Scores and Mean Makespans for Rescheduling Under Material Delays**
+**Table VIII. Composite Scores and Mean Makespans for Rescheduling Across 36 Material Delay Scenarios**
 
 | Category | Method | 283 | 680 | 2338 | 3182 | Mean $S$ | Mean makespan (h) | Feasibility rate |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
@@ -422,9 +422,9 @@ The proposed method maintains a 100% feasibility rate across all 36 scenarios an
 
 The proposed method does not achieve the lowest score at every individual scale; its mean composite scores for the four scales range from 0.7621 to 0.9572. Its advantage lies primarily in the equal-weight mean across scales and in limiting poor outcomes, rather than in absolute superiority at a single scale. StabilityAwareRepair, the second-best method, has a mean composite score of 0.8776, followed by L2D-PPO-APAL and Graph-DDQN-APAL at 0.9152 and 0.9810, respectively.
 
-Table 5-9 further decomposes the physical components directly relevant to these findings to identify the benefits and costs associated with a lower composite score.
+Table IX further decomposes the physical components directly relevant to these findings to identify the benefits and costs associated with a lower composite score.
 
-**Table 5-9. Raw Rescheduling Components for Representative Methods**
+**Table IX. Raw Rescheduling Physical Component Decomposition**
 
 | Method | $C_{\max}$ (h) | $\Delta_{\mathrm{ref}}$ (h) | $\bar D_{\mathrm{start}}$ (h) | $R_{\mathrm{sta}}$ (%) | $R_{\mathrm{team}}$ (%) | $S$ |
 |---|---:|---:|---:|---:|---:|---:|
@@ -441,7 +441,7 @@ Relative to StabilityAwareRepair, the proposed method reduces mean makespan by 1
 
 Relative to L2D-PPO-APAL, the proposed method reduces mean makespan, baseline-horizon overrun, and start-time deviation by 11.84, 12.60, and 14.70 h, respectively, including a 32.3% reduction in mean start-time deviation. However, none of these component differences is significant after correction for multiple comparisons. HybridCPMStabilityRepair achieves the lowest mean makespan and overrun, but its start-time deviation reaches 61.76 h. BeamSearchRepair maintains low station and team change rates at the cost of longer makespans, greater overruns, and larger start-time deviations. Thus, the composite-score ranking reflects weighted trade-offs among multiple recovery objectives and cannot be replaced by any single component.
 
-**Table 5-10. Paired Rescheduling Statistics Against the Two Closest Baselines**
+**Table X. Paired Rescheduling Statistics Against the Two Closest Baselines**
 
 | Baseline | Mean $S$ difference (proposed − baseline) | Relative reduction | Wins / ties / losses | $p_{\mathrm{Holm}}$ | $r_{\mathrm{rb}}$ | Stratified bootstrap 95% CI |
 |---|---:|---:|---:|---:|---:|---:|
@@ -456,7 +456,7 @@ Relative to L2D-PPO-APAL, the proposed method reduces the mean composite score b
 
 **Fig. 4. Paired-difference heatmaps for 36 template rescheduling scenarios under dynamic material delays and instance-level mean recovery scores.** (a) Composite recovery scores $S$ for the four physical instance sizes and their equal-weight mean; lower is better. (b) Symmetric diverging heatmaps of paired score differences $d=S_{\mathrm{HGP}}-S_{\mathrm{Baseline}}$ between the proposed method and L2D-PPO-APAL or StabilityAwareRepair across 36 disturbance scenarios (four instances $\times$ three delay levels $\times$ three freeze timings). Blue indicates an advantage for the proposed method, and red indicates an advantage for the baseline. Win / Tie / Loss badges at the top summarize the pairwise comparisons.
 
-**Table 5-11. End-to-End Rescheduling Time per Scenario Across Four Scales (s)**
+**Table XI. End-to-End Online Rescheduling Runtime per Scenario (s)**
 
 | Method | 283 | 680 | 2338 | 3182 |
 |---|---:|---:|---:|---:|
@@ -481,9 +481,9 @@ Overall, the results support the proposed method's ability to balance schedule f
 To address tightly coupled physical resources and constraints in APALs, including technological precedence, station concurrency, multiskilled collaborative teams, and worker–station binding, this paper proposes HGP-PPO, a deep reinforcement learning scheduling framework combining heterogeneous graph attention over four node types with a three-level autoregressive pointer decoder. The main findings and engineering implications are as follows:
 
 1. **Joint decisions over multiple resources**: Scheduling is formulated as a hierarchical operation–station–worker autoregressive MDP. Dynamic action masks and a forward time allocation engine avoid the combinatorial explosion caused by team selection and enable endogenous worker–station binding and global coordination during schedule construction.
-2. **Extrapolation across scales and rapid rescheduling**: On real factory instances containing 283 to 3182 operations, the model demonstrates strong generalization across scales without fine-tuning. Its mean cycle span across the four scales is 902.40 h, and it reduces cycle span by 10.03% relative to the baseline on the largest 3182-operation instance. Across 36 material-delay scenarios, it maintains a 100% physical feasibility rate and significantly outperforms alternatives on the composite recovery objective. Online repair of a single scenario at the largest scale takes approximately 2 minutes, indicating substantial value for real-time industrial response.
+2. **Extrapolation across scales and rapid rescheduling**: For initial scheduling, a single locked policy is directly evaluated across 283 to 3182 physical operations without instance-specific fine-tuning, achieving strong scale extrapolation, an equal-weight mean cycle span of 902.40 h, and a 10.03% makespan reduction relative to the baseline on the largest 3182-operation instance. For rescheduling, the policy trained under the disturbance environment is evaluated across 36 locked material delay scenarios. All generated schedules in the designated test instances and scenarios pass model constraint validation, achieve a lower average composite recovery score with observable trade-offs among individual stability components, and require an average end-to-end plan repair runtime of approximately 2 minutes (123.60 s) per scenario on the largest 3182-operation instance.
 
-**Limitations and future work.** The method has several scope restrictions and limitations. First, the current model focuses on static construction of a single pulsation-cycle template and rescheduling on a discrete time horizon. It does not explicitly model transient physical transfers of WIP across aircraft or transient interstation congestion during synchronous station advancement. Second, the experiments assume deterministic standard operation durations and do not consider duration variability or random rework. Third, worker skills are simplified as binary coverage with fixed efficiencies, without detailed modeling of fatigue accumulation or learning effects. Future work will extend the approach to continuous transient simulation of the complete assembly process across multiple aircraft and investigate robust adaptive scheduling under uncertainty.
+**Limitations and future work.** The method has several scope restrictions and limitations. First, the present work investigates cyclic operation templates and plan-level cyclic template rescheduling under material readiness delays. While Proposition 1 establishes the physical feasibility of steady-state cyclic unfolding for a fixed template, the model does not explicitly simulate the physical transient dynamics and work-in-progress (WIP) buffer congestion that occur when shop-floor operations transition from an existing template to a newly rescheduled template with in-process aircraft at disparate completion stages. Second, the experiments assume deterministic standard operation durations and do not consider duration variability or random rework. Third, worker skills are simplified as binary coverage with fixed efficiencies, without detailed modeling of worker fatigue and time-varying productivity. Future investigations will incorporate continuous transient line simulations, stochastic operation durations, and explore robust adaptive scheduling mechanisms under uncertainty.
 
 ## Appendix A. Worker Pointer Architecture, Team State, and Dynamic Candidate Features
 
@@ -565,7 +565,7 @@ The factor $1-R_{i_tk}$ excludes the skill required by the current operation and
 
 This appendix consolidates the key reproducibility information underlying the reported results. Implementation details concerning run directories and configuration management are omitted from the main method description.
 
-**Table B-1. Key Reproducibility Settings of the Proposed Method**
+**Table XII. Key Reproducibility Hyperparameters**
 
 | Category | Configuration item | Final setting |
 |---|---|---|

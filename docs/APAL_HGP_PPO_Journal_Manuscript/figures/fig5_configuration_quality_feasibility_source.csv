@@ -1,6 +1,6 @@
 ﻿Configuration,Diff_283_pct,Diff_680_pct,Diff_2338_pct,Diff_3182_pct,Initial_Feasible,Reschedule_Legality
 HGP-PPO (Full Model),0.0,0.0,0.0,0.0,4 / 4,100% (36/36)
-FULL-X (Pre-BIC Baseline),4.6,39.6,2.4,10.0,4 / 4,100% (36/36)
+w/o Baseline Conditioning,4.6,39.6,2.4,10.0,4 / 4,100% (36/36)
 Worker–Station Preassignment,11.6,96.2,32.7,63.0,4 / 4,N / R*
 Homogeneous GraphSAGE,1.8,21.5,9.4,19.6,4 / 4,100% (36/36)
 Operation–Station Joint,-6.8,15.6,-4.6,27.7,4 / 4,0% (0/36) [Collapse]

@@ -18,10 +18,10 @@ if [ ! -f "${PYTHON}" ]; then
 fi
 
 echo "========================================================================"
-echo "Starting APAL Initial FULL-X Training (60 ep, batch=256, accum=16, BF16)"
+echo "Starting APAL Initial FULL-X Training (60 ep, batch=128, accum=8, BF16)"
 echo "Working directory: ${PROJECT_ROOT}"
 echo "========================================================================"
 
 mkdir -p logs
 
-${PYTHON} train.py   experiment=initial_worker_pointer_v2_full_x   train.batch_size=256   train.max_episodes=60   seed=42   2>&1 | tee logs/train_initial_full_x.log
+${PYTHON} train.py   experiment=initial_worker_pointer_v2_full_x   train.batch_size=128   train.accumulation_steps=8   train.num_envs=4   hardware.num_envs=4   hardware.worker_pointer_v2_fast_default_num_envs=4   train.max_episodes=60   seed=42   > logs/train_initial_full_x.log 2>&1
