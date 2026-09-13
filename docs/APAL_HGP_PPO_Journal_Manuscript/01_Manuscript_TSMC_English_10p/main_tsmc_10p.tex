@@ -1,15 +1,14 @@
 \documentclass[journal,10pt]{IEEEtran}
-\usepackage{fontspec}
-\setmainfont{Times New Roman}
-\setmonofont{Consolas}
 \usepackage{amsmath,amssymb,amsfonts}
+\interdisplaylinepenalty=2500
 \usepackage{graphicx}
-\graphicspath{{../}{../04_Figures_and_Assets/}{D:/APAL-Dynamic-v4/docs/APAL_HGP_PPO_Journal_Manuscript/}}
+\graphicspath{{../}{../04_Figures_and_Assets/}{../figures/}}
 \usepackage{booktabs,array,multirow,calc,adjustbox}
 \usepackage{xcolor}
 \usepackage[hidelinks]{hyperref}
 \usepackage{xurl}
 \usepackage{cite}
+\newtheorem{proposition}{Proposition}
 
 \setlength{\emergencystretch}{2.5em}
 \setlength{\textfloatsep}{5pt plus 1pt minus 1pt}
@@ -27,10 +26,10 @@
 \author{Xiao~Lu,
         Jiakang~Ai,
         Fei~Qiao,
-        Juan~Liu$^*$,
+        Juan~Liu,
         Lingtao~Chen,
         and~Yumin~Ma%
-\thanks{This work was supported by the National Natural Science Foundation of China (Nos. 62133011, 62373288, 62403365, 62273260), and the Open Research Project of the State Key Laboratory of Industrial Control Technology of China (No. ICT2025B28). *Corresponding author}%
+\thanks{This work was supported by the National Natural Science Foundation of China (Nos. 62133011, 62373288, 62403365, 62273260), and the Open Research Project of the State Key Laboratory of Industrial Control Technology of China (No. ICT2025B28). (Corresponding author: Juan Liu.)}%
 \thanks{The authors are with the College of Electronics and Information Engineering, Tongji University, Shanghai, China (e-mail: luxiao@tongji.edu.cn; aijiakang@tongji.edu.cn; fqiao@tongji.edu.cn; juanliu0720@tongji.edu.cn; chenlingtao@tongji.edu.cn; ymma@tongji.edu.cn).}%
 }
 
@@ -48,7 +47,7 @@ Aircraft pulsating assembly line, joint scheduling, workforce allocation, hetero
 
 \section{Introduction}\label{sec:intro}
 
-Aircraft final assembly is a critical final stage of aircraft manufacturing, encompassing operations such as major component mating, piping installation, engine installation, avionics integration, and functional testing. Unlike conventional shop scheduling or automated mass-production lines, aircraft final assembly deals with large, highly customized products characterized by extensive process chains, dense precedence dependencies, long operation durations, restricted working space, and collaboration among multiple trades~\cite{fang2021,bao2023,wang2024}. To improve production flow and establish a regular production rhythm, aircraft manufacturers widely adopt aircraft pulsating assembly lines (APALs). An APAL partitions the final assembly shop floor into several dedicated physical stations, through which aircraft under assembly advance synchronously in a pulsating cadence. Within each pulsation cycle, each aircraft remains stationary at its assigned station while a designated set of operations is executed. Upon cycle completion, all aircraft along the line advance synchronously to their respective downstream stations until final roll-out~\cite{lu2019}.
+\IEEEPARstart{A}{ircraft} final assembly is a critical final stage of aircraft manufacturing, encompassing operations such as major component mating, piping installation, engine installation, avionics integration, and functional testing. Unlike conventional shop scheduling or automated mass-production lines, aircraft final assembly deals with large, highly customized products characterized by extensive process chains, dense precedence dependencies, long operation durations, restricted working space, and collaboration among multiple trades~\cite{fang2021,bao2023,wang2024}. To improve production flow and establish a regular production rhythm, aircraft manufacturers widely adopt aircraft pulsating assembly lines (APALs). An APAL partitions the final assembly shop floor into several dedicated physical stations, through which aircraft under assembly advance synchronously in a pulsating cadence. Within each pulsation cycle, each aircraft remains stationary at its assigned station while a designated set of operations is executed. Upon cycle completion, all aircraft along the line advance synchronously to their respective downstream stations until final roll-out~\cite{lu2019}.
 
 This synchronous advancement mechanism allows local operation delays to affect the timing of line-wide station transfers. Line advancement is strictly dictated by the bottleneck station with the latest completion time. Delays caused by uneven task distribution, shortages of qualified workers, or station concurrency limits can postpone synchronous advancement when they extend the latest station completion time, requiring aircraft at stations that have already finished to wait. Consequently, jointly coordinating operation-to-station assignment, within-station sequencing, and resource allocation is essential to efficient and stable APAL operation~\cite{becker2006,boysen2007,bao2023}.
 
@@ -188,18 +187,20 @@ where $c_t$ is the current environment time clock and $a_w$ is the earliest avai
 
 \subsection{Steady-State Cyclic Unfolding Across Aircraft}
 
-\textbf{Proposition 1 (Physical feasibility of cyclic unfolding)}:
+\begin{proposition}[Physical Feasibility of Cyclic Unfolding]
 Given a feasible cyclic template $\pi = (m, W, B, C)$ satisfying all constraints in Section~\ref{sec:formulation}-B with span $H = C_{\max}$, let aircraft index be $k = 0, 1, 2, \dots$. For aircraft $k$, the execution interval of operation $i$ on the shop-floor timeline is
 \begin{equation}
 B_{i,k}^{\mathrm{phys}} = (k+m_i-1)H + B_i, \quad C_{i,k}^{\mathrm{phys}} = (k+m_i-1)H + C_i.
 \end{equation}
 Under these assumptions, the unfolded schedule preserves aircraft occupancy exclusivity, precedence feasibility, worker exclusivity, and station concurrency limits.
-
-\textit{Proof}: Aircraft $k$ resides at station $m$ during $[(k+m-1)H, (k+m)H)$, and all its operations assigned to that station are contained within this window. Consecutive aircraft at the same station occupy non-overlapping intervals, ensuring spatial exclusivity. For any $(i,j)\in\mathcal{E}^+$, the physical time difference satisfies:
+\end{proposition}
+\begin{IEEEproof}
+Aircraft $k$ resides at station $m$ during $[(k+m-1)H, (k+m)H)$, and all its operations assigned to that station are contained within this window. Consecutive aircraft at the same station occupy non-overlapping intervals, ensuring spatial exclusivity. For any $(i,j)\in\mathcal{E}^+$, the physical time difference satisfies:
 \begin{equation}
 B_{j,k}^{\mathrm{phys}} - C_{i,k}^{\mathrm{phys}} = (m_j - m_i)H + (B_j - C_i) \ge 0.
 \end{equation}
-Since $m_j\ge m_i$ and $B_j\ge C_i$, physical precedence is naturally preserved. For cross-station dependencies where $m_j>m_i$, $(m_j-m_i)H\ge H$, meaning predecessor tasks were completed in earlier cycles. Imposing $B_j\ge C_i$ within a single template thus serves as a structured sufficient condition for physically executable multi-aircraft unfolding. \hfill $\blacksquare$
+Since $m_j\ge m_i$ and $B_j\ge C_i$, physical precedence is naturally preserved. For cross-station dependencies where $m_j>m_i$, $(m_j-m_i)H\ge H$, meaning predecessor tasks were completed in earlier cycles. Imposing $B_j\ge C_i$ within a single template thus serves as a structured sufficient condition for physically executable multi-aircraft unfolding.
+\end{IEEEproof}
 
 \subsection{Stability-Aware Template Rescheduling Under Material Delays}
 
@@ -216,9 +217,10 @@ When material for operation $i$ is delayed by $\Delta_i>0$, its release time upd
 
 Defining $N_{\mathrm{mov}}=|\mathcal{O}^{\mathrm{mov}}|$, baseline overrun $\Delta_{\mathrm{ref}}^r=\max\{0, C_{\max}^r-T_{\mathrm{ref}}^0\}$, start-time deviation $\bar D_{\mathrm{start}}^r=\frac{1}{N_{\mathrm{mov}}}\sum |B_i^r-B_i^0|$, station change rate $R_{\mathrm{sta}}^r=\frac{1}{N_{\mathrm{mov}}}\sum \mathbb{I}(m_i^r\ne m_i^0)$, and team change rate $R_{\mathrm{team}}^r=\frac{1}{N_{\mathrm{mov}}}\sum \mathbb{I}(W_i^r\ne W_i^0)$, the composite stability objective is formulated as:
 \begin{equation}\label{eq:reschedule_obj}
-\resizebox{0.88\linewidth}{!}{$\displaystyle
-\min_{\pi^r\in\Pi_{\mathrm{feas}}^r}\; S(\pi^r) = 0.20\frac{C_{\max}^r}{T_{\mathrm{ref}}^0} + 3\frac{\Delta_{\mathrm{ref}}^r}{T_{\mathrm{ref}}^0} + 4\frac{\bar D_{\mathrm{start}}^r}{T_{\mathrm{ref}}^0} + 4 R_{\mathrm{sta}}^r + 0.3 R_{\mathrm{team}}^r.
-$}
+\begin{aligned}
+\min_{\pi^r\in\Pi_{\mathrm{feas}}^r}\; S(\pi^r) = &\; 0.20\frac{C_{\max}^r}{T_{\mathrm{ref}}^0} + 3\frac{\Delta_{\mathrm{ref}}^r}{T_{\mathrm{ref}}^0} + 4\frac{\bar D_{\mathrm{start}}^r}{T_{\mathrm{ref}}^0} \\
+&+ 4 R_{\mathrm{sta}}^r + 0.3 R_{\mathrm{team}}^r.
+\end{aligned}
 \end{equation}
 
 \section{HGP-PPO Method}\label{sec:method}
@@ -293,14 +295,11 @@ required-by & Skill $\rightarrow$ Operation & Static & Operations requiring skil
 \end{table}
 
 Skill nodes bridge operation skill requirements with worker skill competencies, enabling operations sharing identical skill demands and workers possessing multiple qualifications to engage in message passing through explicit relational edges. In conjunction with process precedence and dynamic assignment relations, this representation establishes a unified graph context for the policy to evaluate immediate task demands and concurrent labor competition. Raw features are projected into a $d$-dimensional space $\mathbf h_v^{(0)}=f_X(\mathbf x_v)$. Message passing is executed across $L=5$ relation-specific GATv2 layers~\cite{brody2022}. For edge $u\rightarrow v$ under relation $r$, head $h$:
-\begin{center}
-\begin{adjustbox}{max width=\linewidth}
-$\displaystyle
-e_{uv}^{(r,\ell,h)} = \mathbf a_{r,h}^{(\ell)\top}\operatorname{LeakyReLU}\left(\mathbf W_{s,r,h}^{(\ell)}\mathbf h_u^{(\ell-1)} + \mathbf W_{t,r,h}^{(\ell)}\mathbf h_v^{(\ell-1)}\right), \quad
-\alpha_{uv}^{(r,\ell,h)} = \frac{\exp\left(e_{uv}^{(r,\ell,h)}\right)}{\sum_{z\in\mathcal N_r(v)}\exp\left(e_{zv}^{(r,\ell,h)}\right)}.
-$
-\end{adjustbox}
-\end{center}
+\begin{align}
+e_{uv}^{(r,\ell,h)} &= \mathbf a_{r,h}^{(\ell)\top}\operatorname{LeakyReLU}\Big(\mathbf W_{s,r,h}^{(\ell)}\mathbf h_u^{(\ell-1)} \nonumber \\
+&\qquad\qquad\qquad\quad + \mathbf W_{t,r,h}^{(\ell)}\mathbf h_v^{(\ell-1)}\Big), \\
+\alpha_{uv}^{(r,\ell,h)} &= \frac{\exp(e_{uv}^{(r,\ell,h)})}{\sum_{z\in\mathcal N_r(v)}\exp(e_{zv}^{(r,\ell,h)})}.
+\end{align}
 Aggregating multi-head messages $\mathbf m_v^{(r,\ell)} = \frac{1}{H}\sum_{h=1}^H\sum_{u\in\mathcal N_r(v)}\alpha_{uv}^{(r,\ell,h)}\mathbf W_{s,r,h}^{(\ell)}\mathbf h_u^{(\ell-1)}$:
 \begin{equation}
 \mathbf h_v^{(\ell)} = \mathbf h_v^{(\ell-1)} + \operatorname{LeakyReLU}\left(\sum_{r\in\mathcal R_{\mathrm{in}}(v)}\mathbf m_v^{(r,\ell)}\right).
@@ -334,7 +333,7 @@ u_{m,t}^M &= \mathbf a_M^{\top}\tanh(\mathbf W_{OM}\mathbf h_{i_t} + \mathbf W_M
 For worker selection, Worker Pointer scores candidates at substep $r\in\{1,\dots,q_{i_t}\}$:
 \begin{align}
 u_{w,t}^{(r)} &= \mathbf v_W^{\top}\tanh\left(\mathbf q_t^{(r)} + \mathbf k_{w,t}^{(r)}\right), \\
-\pi_W\left(w\mid s_t,i_t,m_t,\mathbf w_t^{(<r)}\right) &= \exp(u_{w,t}^{(r)})\Big/\textstyle\sum_{v\in\mathcal F_{W,t}^{(r)}}\exp(u_{v,t}^{(r)}).
+\pi_W(w\mid s_t,i_t,m_t,\mathbf w_t^{(<r)}) &= \exp(u_{w,t}^{(r)})\Big/\textstyle\sum_{v\in\mathcal F_{W,t}^{(r)}}\exp(u_{v,t}^{(r)}).
 \end{align}
 Infeasible candidates receive zero probability. Query $\mathbf q_t^{(r)}$ and key $\mathbf k_{w,t}^{(r)}$ incorporate skill pressures, dynamic EFT, and marginal scarcity (detailed in Appendix~\ref{app:worker_pointer}).
 
@@ -345,15 +344,16 @@ Infeasible candidates receive zero probability. Query $\mathbf q_t^{(r)}$ and ke
 
 \subsection{PPO Learning and Transfer}
 
-With continuation indicator $b_t=(1-d_t)(1-u_t)$, temporal-difference error $\delta_t$ and GAE $\widehat A_t$ are:
+With continuation indicator $b_t=(1-d_t)(1-u_t)$, temporal-difference error $\delta_t$ and generalized advantage estimator (GAE) $\widehat A_t$~\cite{schulman2016} are:
 \begin{equation}
 \delta_t = r_t + \gamma b_t V_{\phi^-}(s_{t+1}) - V_{\phi^-}(s_t), \quad \widehat A_t = \delta_t + \gamma\lambda b_t \widehat A_{t+1}.
 \end{equation}
-Clipped PPO loss with ratio $r_t^{\mathrm{PPO}}(\theta)=\exp(\ell_{t,\theta}-\ell_{t,\theta^-})$ is:
+Clipped PPO~\cite{schulman2017} loss with ratio $r_t^{\mathrm{PPO}}(\theta)=\exp(\ell_{t,\theta}-\ell_{t,\theta^-})$ is:
 \begin{equation}
-\resizebox{0.95\linewidth}{!}{$\displaystyle
-\mathcal L_{\mathrm{policy}}(\theta) = -\mathbb E_t\left[\min\left(r_t^{\mathrm{PPO}}(\theta)\widetilde A_t,\, \operatorname{clip}(r_t^{\mathrm{PPO}}(\theta), 1-\epsilon, 1+\epsilon)\widetilde A_t\right)\right],
-$}
+\begin{aligned}
+\mathcal L_{\mathrm{policy}}(\theta) = -\mathbb E_t\Big[ \min\Big( &r_t^{\mathrm{PPO}}(\theta)\widetilde A_t, \\
+&\operatorname{clip}(r_t^{\mathrm{PPO}}(\theta), 1-\epsilon, 1+\epsilon)\widetilde A_t \Big) \Big],
+\end{aligned}
 \end{equation}
 \begin{equation}
 \mathcal L = \mathcal L_{\mathrm{policy}}(\theta) + c_V \mathbb E_t[(V_\phi(s_t)-R_t)^2] - c_H \overline H.
@@ -651,7 +651,8 @@ This paper has presented HGP-PPO, a heterogeneous graph reinforcement learning f
 For the selected member sequence $\mathbf w_t^{(<r)}$, each member is projected via $\mathbf m_v = \mathbf W_{\mathrm{mem}}\mathbf h_v$. To achieve strict permutation invariance, partial-team state $\mathbf h_{\mathrm{team},t}^{(r)}$ is formed by symmetric Sum, Mean, and Max pooling:
 \begin{equation}
 \begin{aligned}
-\mathbf h_{\mathrm{team},t}^{(r)} = \operatorname{LeakyReLU}\Big(\mathbf W_{\mathrm{team}} \Big[ &\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \,\Big\|\, \frac{1}{\max(1, r-1)}\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \\
+\mathbf h_{\mathrm{team},t}^{(r)} = \operatorname{LeakyReLU}\Big(\mathbf W_{\mathrm{team}} \Big[ &\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \\
+&\Big\|\, \frac{1}{\max(1, r{-}1)}\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \\
 &\Big\|\, \max_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \Big]\Big).
 \end{aligned}
 \end{equation}
@@ -659,7 +660,10 @@ For the initial member selection sub-step ($r=1$ where $\mathbf w_t^{(<1)}=\empt
 
 Query $\mathbf q_t^{(r)}$ projects the concatenation of operation embedding, station embedding, global context, team state, macro pressure, skill consumption ratio, and selection progress:
 \begin{equation}
-\mathbf q_t^{(r)}=\mathbf W_q\left[\mathbf h_{i_t}\,\|\,\mathbf h_{m_t}\,\|\,\mathbf g_t\,\|\,\mathbf h_{\mathrm{team},t}^{(r)}\,\|\,\mathbf P_t\,\|\,\mathbf c_t^{(r)}\,\|\,\mathbf{prog}_t^{(r)}\right]+\mathbf b_q,
+\begin{aligned}
+\mathbf q_t^{(r)} = \mathbf W_q\Big[ &\mathbf h_{i_t}\,\|\,\mathbf h_{m_t}\,\|\,\mathbf g_t\,\|\,\mathbf h_{\mathrm{team},t}^{(r)} \\
+&\|\,\mathbf P_t\,\|\,\mathbf c_t^{(r)}\,\|\,\mathbf{prog}_t^{(r)}\Big]+\mathbf b_q,
+\end{aligned}
 \end{equation}
 where global context $\mathbf g_t = [\mathbf g_M \,\|\, \mathbf g_O \,\|\, \mathbf g_W] \in \mathbb R^{3d}$ strictly maintains the concatenation order of Section~\ref{sec:encoder}; macro skill pressure is $\mathbf P_t = [\mathbf P_t^{\mathrm{all}} \,\|\, \mathbf P_t^{\mathrm{near}}] \in \mathbb R^{10}$; skill consumption ratio is $\mathbf c_t^{(r)} = \mathbf C_t^{(r)} / \max(\mathbf S_t^{\mathrm{all}}, \varepsilon_s) \in [0,1]^5$ with cumulative committed headcount $\mathbf C_t^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} \mathbf H_v$; and selection progress is $\mathbf{prog}_t^{(r)} = \left[\frac{r-1}{q_{i_t}},\, \frac{q_{i_t}-(r-1)}{q_{i_t}}\right]^\top \in [0,1]^2$.
 
@@ -697,7 +701,7 @@ When $|\mathcal F_{W,t}^{(r)}|=1$, the standard deviation is zero, and denominat
 Candidate worker $w$'s marginal skill scarcity is:
 \begin{equation}
 \begin{aligned}
-\mu_{w,t}^{(r)} = \sum_{k\in\mathcal K} H_{wk}(1-R_{i_tk}) \Bigg[
+\mu_{w,t}^{(r)} = \sum_{k\in\mathcal K} H_{wk}&(1-R_{i_tk}) \Bigg[ \\
 &\log\!\left(1 + \frac{D_{k,t}^{\mathrm{all}}}{\max(S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)}-H_{wk},\varepsilon_s)}\right) \\
 &- \log\!\left(1 + \frac{D_{k,t}^{\mathrm{all}}}{\max(S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)},\varepsilon_s)}\right) \Bigg]_+,
 \end{aligned}
@@ -744,7 +748,7 @@ Budget & Initial / rescheduling epochs & 60 epochs / 120 epochs (two stages) \\
 \setlength{\parskip}{0pt}
 \setlength{\parsep}{0pt}
 \bibitem{ai2025}
-J.~Ai, F.~Qiao, J.~Liu, \textit{et~al.}, ``A graph-enhanced deep-reinforcement learning approach for the aircraft pulse assembly line balancing problem,'' in \textit{Proc. 2025 China Autom. Congr. (CAC)}, 2025, pp. 6623--6628.
+J.~Ai, F.~Qiao, J.~Liu, et~al., ``A graph-enhanced deep-reinforcement learning approach for the aircraft pulse assembly line balancing problem,'' in \textit{Proc. 2025 China Autom. Congr. (CAC)}, 2025, pp. 6623--6628.
 
 \bibitem{bao2023}
 Z.~Bao, L.~Chen, and K.~Qiu, ``An aircraft final assembly line balancing problem considering resource constraints and parallel task scheduling,'' \textit{Comput. Ind. Eng.}, vol. 182, p. 109436, 2023.
@@ -765,19 +769,19 @@ N.~Boysen, M.~Fliedner, and A.~Scholl, ``A classification of assembly line balan
 S.~Brody, U.~Alon, and E.~Yahav, ``How attentive are graph attention networks?'' in \textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2022.
 
 \bibitem{cappart2023}
-Q.~Cappart, D.~Ch\'etelat, E.~B.~Khalil, \textit{et~al.}, ``Combinatorial optimization and reasoning with graph neural networks,'' \textit{J. Mach. Learn. Res.}, vol. 24, no. 130, pp. 1--61, 2023.
+Q.~Cappart, D.~Ch\'etelat, E.~B.~Khalil, et~al., ``Combinatorial optimization and reasoning with graph neural networks,'' \textit{J. Mach. Learn. Res.}, vol. 24, no. 130, pp. 1--61, 2023.
 
 \bibitem{chen2026}
-B.~Chen, J.~Zhang, X.~Luo, \textit{et~al.}, ``A multi-agent graph attention deep reinforcement learning method for aircraft assembly dynamic scheduling,'' \textit{Adv. Eng. Inform.}, vol. 68, p. 104565, 2026.
+B.~Chen, J.~Zhang, X.~Luo, et~al., ``A multi-agent graph attention deep reinforcement learning method for aircraft assembly dynamic scheduling,'' \textit{Adv. Eng. Inform.}, vol. 68, p. 104565, 2026.
 
 \bibitem{fang2021flexible}
-P.~Fang, J.-J.~Yang, Y.~Jiang, \textit{et~al.}, ``Flexible worker allocation in aircraft final assembly line using multiobjective evolutionary algorithms,'' \textit{IEEE Trans. Ind. Informat.}, vol. 17, no. 11, pp. 7468--7478, 2021.
+P.~Fang, J.-J.~Yang, Y.~Jiang, et~al., ``Flexible worker allocation in aircraft final assembly line using multiobjective evolutionary algorithms,'' \textit{IEEE Trans. Ind. Informat.}, vol. 17, no. 11, pp. 7468--7478, 2021.
 
 \bibitem{fang2021}
-S.~Fang, M.~Liu, G.~Xian, \textit{et~al.}, ``Aircraft moving assembly line: Pulsating and continuous,'' \textit{Aeronaut. Manuf. Technol.}, vol. 64, no. 16, pp. 40--50, 2021.
+S.~Fang, M.~Liu, G.~Xian, et~al., ``Aircraft moving assembly line: Pulsating and continuous,'' \textit{Aeronaut. Manuf. Technol.}, vol. 64, no. 16, pp. 40--50, 2021.
 
 \bibitem{hu2024}
-J.-H.~Hu, J.-Y.~Zhu, Y.-N.~Sun, \textit{et~al.}, ``Network-based two-stage robust scheduling strategy for the aircraft assembly system with uncertain duration,'' \textit{Comput. Ind. Eng.}, vol. 188, p. 109911, 2024.
+J.-H.~Hu, J.-Y.~Zhu, Y.-N.~Sun, et~al., ``Network-based two-stage robust scheduling strategy for the aircraft assembly system with uncertain duration,'' \textit{Comput. Ind. Eng.}, vol. 188, p. 109911, 2024.
 
 \bibitem{kelley1961}
 J.~E.~Kelley, Jr., ``Critical-path planning and scheduling: Mathematical basis,'' \textit{Oper. Res.}, vol. 9, no. 3, pp. 296--320, 1961.
@@ -786,25 +790,25 @@ J.~E.~Kelley, Jr., ``Critical-path planning and scheduling: Mathematical basis,'
 S.~Kirkpatrick, C.~D.~Gelatt, and M.~P.~Vecchi, ``Optimization by simulated annealing,'' \textit{Science}, vol. 220, no. 4598, pp. 671--680, 1983.
 
 \bibitem{liu2025}
-M.~Liu, L.~Li, X.~Liu, \textit{et~al.}, ``A multi-pass heuristic for multi-skilled worker scheduling in aircraft final assembly line with variable duration,'' \textit{J. Syst. Eng. Electron.}, vol. 36, no. 6, pp. 1532--1547, 2025.
+M.~Liu, L.~Li, X.~Liu, et~al., ``A multi-pass heuristic for multi-skilled worker scheduling in aircraft final assembly line with variable duration,'' \textit{J. Syst. Eng. Electron.}, vol. 36, no. 6, pp. 1532--1547, 2025.
 
 \bibitem{lu2019}
-Z.~Lu, Y.~Ren, L.~Wang, \textit{et~al.}, ``A resource investment problem based on project splitting with time windows for aircraft moving assembly line,'' \textit{Comput. Ind. Eng.}, vol. 135, pp. 568--581, 2019.
+Z.~Lu, Y.~Ren, L.~Wang, et~al., ``A resource investment problem based on project splitting with time windows for aircraft moving assembly line,'' \textit{Comput. Ind. Eng.}, vol. 135, pp. 568--581, 2019.
 
 \bibitem{ow1988}
 P.~S.~Ow and T.~E.~Morton, ``Filtered beam search in scheduling,'' \textit{Int. J. Prod. Res.}, vol. 26, no. 1, pp. 35--62, 1988.
 
 \bibitem{park2021}
-J.~Park, J.~Chun, S.~H.~Kim, \textit{et~al.}, ``Learning to schedule job-shop problems: Representation and policy learning using graph neural network and reinforcement learning,'' \textit{Int. J. Prod. Res.}, vol. 59, no. 11, pp. 3342--3359, 2021.
+J.~Park, J.~Chun, S.~H.~Kim, et~al., ``Learning to schedule job-shop problems: Representation and policy learning using graph neural network and reinforcement learning,'' \textit{Int. J. Prod. Res.}, vol. 59, no. 11, pp. 3342--3359, 2021.
 
 \bibitem{ruiz2007}
 R.~Ruiz and T.~St\"utzle, ``A simple and effective iterated greedy algorithm for the permutation flowshop scheduling problem,'' \textit{Eur. J. Oper. Res.}, vol. 177, no. 3, pp. 2033--2049, 2007.
 
 \bibitem{schulman2016}
-J.~Schulman, P.~Moritz, S.~Levine, \textit{et~al.}, ``High-dimensional continuous control using generalized advantage estimation,'' in \textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2016.
+J.~Schulman, P.~Moritz, S.~Levine, et~al., ``High-dimensional continuous control using generalized advantage estimation,'' in \textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2016.
 
 \bibitem{schulman2017}
-J.~Schulman, F.~Wolski, P.~Dhariwal, \textit{et~al.}, ``Proximal policy optimization algorithms,'' \textit{arXiv preprint arXiv:1707.06347}, 2017.
+J.~Schulman, F.~Wolski, P.~Dhariwal, et~al., ``Proximal policy optimization algorithms,'' \textit{arXiv preprint arXiv:1707.06347}, 2017.
 
 \bibitem{smith1956}
 W.~E.~Smith, ``Various optimizers for single-stage production,'' \textit{Nav. Res. Logist. Q.}, vol. 3, no. 1--2, pp. 59--66, 1956.
@@ -816,19 +820,19 @@ S.~Van~de~Vonder, E.~Demeulemeester, and W.~Herroelen, ``A classification of pre
 G.~E.~Vieira, J.~W.~Herrmann, and E.~Lin, ``Rescheduling manufacturing systems: A framework of strategies, policies, and methods,'' \textit{J. Sched.}, vol. 6, no. 1, pp. 39--62, 2003.
 
 \bibitem{wang2024}
-D.~Wang, F.~Qiao, L.~Guan, \textit{et~al.}, ``Human--machine collaborative optimization method for dynamic worker allocation in aircraft final assembly lines,'' \textit{Comput. Ind. Eng.}, vol. 194, p. 110370, 2024.
+D.~Wang, F.~Qiao, L.~Guan, et~al., ``Human--machine collaborative optimization method for dynamic worker allocation in aircraft final assembly lines,'' \textit{Comput. Ind. Eng.}, vol. 194, p. 110370, 2024.
 
 \bibitem{wang2024flexible}
 R.~Wang, G.~Wang, J.~Sun, F.~Deng, and J.~Chen, ``Flexible job shop scheduling via dual attention network-based reinforcement learning,'' \textit{IEEE Trans. Neural Netw. Learn. Syst.}, vol. 35, no. 3, pp. 3091--3102, 2024.
 
 \bibitem{wen2026}
-X.~Wen, H.~Liu, X.~Zhang, \textit{et~al.}, ``A Q-learning improved particle swarm optimization for aircraft pulsating assembly line scheduling problem considering skilled operator allocation,'' \textit{Comput. Mater. Contin.}, vol. 86, no. 1, pp. 1--27, 2026.
+X.~Wen, H.~Liu, X.~Zhang, et~al., ``A Q-learning improved particle swarm optimization for aircraft pulsating assembly line scheduling problem considering skilled operator allocation,'' \textit{Comput. Mater. Contin.}, vol. 86, no. 1, pp. 1--27, 2026.
 
 \bibitem{wen2026b}
-X.~Wen, H.~Zhang, W.~Yang, \textit{et~al.}, ``Research on a worker skill level-aware pulsating assembly scheduling method for aircraft based on the GIN-PPO algorithm,'' \textit{Comput. Ind. Eng.}, vol. 218, p. 112135, 2026.
+X.~Wen, H.~Zhang, W.~Yang, et~al., ``Research on a worker skill level-aware pulsating assembly scheduling method for aircraft based on the GIN-PPO algorithm,'' \textit{Comput. Ind. Eng.}, vol. 218, p. 112135, 2026.
 
 \bibitem{zhang2020}
-C.~Zhang, W.~Song, Z.~Cao, \textit{et~al.}, ``Learning to dispatch for job shop scheduling via deep reinforcement learning,'' in \textit{Adv. Neural Inf. Process. Syst. (NeurIPS)}, vol. 33, 2020, pp. 1621--1632.
+C.~Zhang, W.~Song, Z.~Cao, et~al., ``Learning to dispatch for job shop scheduling via deep reinforcement learning,'' in \textit{Adv. Neural Inf. Process. Syst. (NeurIPS)}, vol. 33, 2020, pp. 1621--1632.
 
 \bibitem{zhu2021}
 H.~Zhu, Z.~Lu, C.~Lu, and Y.~Ren, ``A reactive scheduling method for disturbances in aircraft moving assembly line,'' \textit{Int. J. Prod. Res.}, vol. 59, no. 15, pp. 4756--4772, 2021.
