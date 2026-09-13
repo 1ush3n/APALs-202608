@@ -11,12 +11,12 @@
 \newtheorem{proposition}{Proposition}
 
 \setlength{\emergencystretch}{2.5em}
-\setlength{\textfloatsep}{5pt plus 1pt minus 1pt}
-\setlength{\floatsep}{4pt plus 1pt minus 1pt}
-\setlength{\intextsep}{4pt plus 1pt minus 1pt}
-\setlength{\dbltextfloatsep}{5pt plus 1pt minus 1pt}
-\setlength{\dblfloatsep}{4pt plus 1pt minus 1pt}
-\renewcommand{\arraystretch}{0.98}
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\floatsep}{6pt plus 2pt minus 2pt}
+\setlength{\intextsep}{6pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\dblfloatsep}{6pt plus 2pt minus 2pt}
+\renewcommand{\arraystretch}{1.04}
 \hyphenation{APAL HGP PPO GraphSAGE}
 
 \begin{document}
@@ -55,7 +55,7 @@ In practical shop-floor settings, APAL scheduling involves three interdependent 
 
 \begin{figure*}[!t]
 \centering
-\includegraphics[width=0.90\textwidth,height=0.17\textheight,keepaspectratio]{figures/fig1.png}
+\includegraphics[width=0.92\textwidth,height=0.28\textheight,keepaspectratio]{figures/fig1.png}
 \caption{Illustration of cyclic operation scheduling and stability-aware rescheduling for an aircraft pulsating assembly line. Aircraft advance through five physical stations in a pulsating rhythm. The cyclic operation template jointly determines the precedence-related execution relationships among operations, their assigned stations, and specific worker teams satisfying skill and headcount requirements. Following a material delay, the system locks committed entries at the schedule freeze boundary $\tau^r$, inherits worker bindings, and performs stability-aware rescheduling of the remaining operations.}
 \label{fig:1}
 \end{figure*}
@@ -239,7 +239,7 @@ Fig.~\ref{fig:2} presents the architectural layout of HGP-PPO.
 
 \begin{figure*}[!t]
 \centering
-\includegraphics[width=0.90\textwidth,height=0.18\textheight,keepaspectratio]{figures/fig2.png}
+\includegraphics[width=0.92\textwidth,height=0.25\textheight,keepaspectratio]{figures/fig2.png}
 \caption{Overall HGP-PPO framework. The APAL environment state is first converted into a heterogeneous graph with Operation, Station, Worker, and Skill nodes. The Actor and Critic use independent heterogeneous graph encoders. After attention-based context aggregation, the Actor sequentially selects an Operation, a Station, and a Worker team of the required size to form an executable joint action $(o,m,W)$. The Critic aggregates the graph state and estimates the state value $V(s)$. Executing the joint action produces the next state, reward, and trajectory, which PPO uses to update the policy and value networks.}
 \label{fig:2}
 \end{figure*}
@@ -470,7 +470,7 @@ Table~\ref{tab:initial_results} reports initial makespans. Across the four scale
 
 \begin{figure}[!t]
 \centering
-\includegraphics[width=0.88\columnwidth,height=0.15\textheight,keepaspectratio]{figures/fig3_initial_and_ablation.png}
+\includegraphics[width=\columnwidth]{figures/fig3_initial_and_ablation.png}
 \caption{Initial scheduling performance across physical scales and architectural ablations. (a) Cycle spans $H$ on logarithmic axis across scales. (b) Relative degradation matrix $\Delta J(\%)$ against the full HGP-PPO architecture.}
 \label{fig:3}
 \end{figure}
@@ -569,13 +569,13 @@ StabilityAware & 993.85 & 45.22 & 33.88 & 1.73 & 94.76 & 0.877564 \\
 {\footnotesize Note: $R_{\mathrm{team}}$ is evaluated on reschedulable tasks: replacing any member counts as a team modification without implying cross-station mobility.}
 \end{table}
 
-\begin{table}[!t]
+\begin{table*}[!t]
 \centering
 \caption{Paired Rescheduling Statistics Against the Two Closest Baselines}
 \label{tab:paired_stats}
-\setlength{\tabcolsep}{2.5pt}
-\renewcommand{\arraystretch}{0.98}
-\begin{adjustbox}{max width=\columnwidth}
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.06}
+\begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{@{}lcccccc@{}}
 \toprule
 \textbf{Baseline Method} & \textbf{Mean $S$ Diff} & \textbf{Reduction} & \textbf{Wins / Ties / Losses} & $p_{\mathrm{Holm}}$ & $r_{\mathrm{rb}}$ & \textbf{Stratified Bootstrap 95\% CI} \\
@@ -587,7 +587,7 @@ StabilityAwareRepair & $-0.0265$ & 3.01\% & 22 / 0 / 14 & 0.5498 & $-0.210$ & $[
 \end{adjustbox}
 \par\smallskip
 {\footnotesize Note: Negative differences indicate proposed method superiority. $p_{\mathrm{Holm}}$ denotes two-sided Wilcoxon corrected across 18 baselines; CI based on 10,000 resamples.}
-\end{table}
+\end{table*}
 
 \subsection{Rescheduling Results Under Material Delays}
 
@@ -599,7 +599,7 @@ Table~\ref{tab:paired_stats} reports paired statistics against the two closest b
 
 \begin{figure*}[!t]
 \centering
-\includegraphics[width=0.90\textwidth,height=0.175\textheight,keepaspectratio]{figures/fig4_reschedule_scenarios_heatmap.png}
+\includegraphics[width=0.92\textwidth,height=0.35\textheight,keepaspectratio]{figures/fig4_reschedule_scenarios_heatmap.png}
 \caption{Paired-difference heatmaps for 36 template rescheduling scenarios under dynamic material delays and instance-level mean recovery scores. (a) Composite recovery scores $S$ for the four physical instance sizes and their equal-weight mean; lower is better. (b) Symmetric diverging heatmaps of paired score differences $d=S_{\mathrm{HGP}}-S_{\mathrm{Baseline}}$ between the proposed method and L2D-PPO-APAL or StabilityAwareRepair across 36 disturbance scenarios (four instances $\times$ three delay levels $\times$ three freeze timings). Blue indicates an advantage for the proposed method, and red indicates an advantage for the baseline. Win / Tie / Loss badges at the top summarize the pairwise comparisons.}
 \label{fig:4}
 \end{figure*}
@@ -632,7 +632,7 @@ SimulatedAnnealingRepair & 292.42 & 676.78 & 3445.39 & 4296.64 \\
 
 \begin{figure}[!t]
 \centering
-\includegraphics[width=0.88\columnwidth,height=0.14\textheight,keepaspectratio]{figures/fig5_runtime_scalability.png}
+\includegraphics[width=\columnwidth]{figures/fig5_runtime_scalability.png}
 \caption{End-to-end online rescheduling runtime and computational scalability across physical scales on a logarithmic axis.}
 \label{fig:5}
 \end{figure}
