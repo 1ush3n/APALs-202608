@@ -55,7 +55,7 @@
 
 这种脉动生产组织使局部工序延误具有整线约束效应。全线移站受各站位中耗时最长的``瓶颈站位''严格制约；任一站位因任务分配失衡、技能人员匮乏或站内空间冲突而滞后，都将导致整条装配线停滞等待。因此，合理协调工序分站、站内并行次序与多类关键资源，是实现 APAL 高效平稳运行的核心\cite{becker2006, boysen2007, bao2023afal}。
 
-在工程实际中，APAL 排程面临多维资源的强耦合联合决策：调度器需要为每道工序同步确定执行顺序、物理站位以及满足技能与人数要求的具体工人团队。若在排程前预先将人员固定到各站位，极易在任务负荷未明前导致人员能力与站位需求严重失衡。因此，工人的站位归属应当在排程构造过程中，随首次入选某站位任务而内生形成。这一机制使团队选择具有持续影响：当前指派不仅决定工序的加工时间与资源占用，还会确定未绑定工人的站位归属，从而影响后续工序的人员可选范围。因此，当前工序的执行效率与后续站位的技能资源需求需要在同一决策过程中协调。这一联合决策面临显著难题：首先，工序、站位、工人和技能具有异质拓扑关系，排程状态高度动态；其次，每道工序需从多名多技能候选人中指派多人团队，使得动作空间面临严重的组合数爆炸 \(\binom{n_i}{q_i}\)；再次，每次子决策均会实时改变后续可选资源与可行域。更进一步，在遭遇物料到货延误等制造现场扰动时，生产系统需在计划冻结边界处严格继承既定计划与工人---站位绑定，对后续周期作业模板进行重新平衡与稳定性修复，以在恢复物理可行性的同时兼顾完工节拍与计划扰动惩罚\cite{vieira2003, hu2024}。
+在工程实际中，APAL 排程面临多维资源的强耦合联合决策：调度器需要为每道工序同步确定执行顺序、物理站位以及满足技能与人数要求的具体工人团队。若在排程前预先将人员固定到各站位，极易在任务负荷未明前导致人员能力与站位需求严重失衡。因此，工人的站位归属应当在排程构造过程中，随首次入选某站位任务而内生形成。这一机制使团队选择具有持续影响：当前指派不仅决定工序的加工时间与资源占用，还会确定未绑定工人的站位归属，从而影响后续工序的人员可选范围。因此，当前工序的执行效率与后续站位的技能资源需求需要在同一决策过程中协调。这一联合决策面临显著难题：首先，工序、站位、工人和技能具有异质拓扑关系，排程状态高度动态；其次，使得每道工序需从多名多技能候选人中指派多人团队，形成规模为 \(\binom{n_i}{q_i}\) 的组合选人空间；再次，每次子决策均会实时改变后续可选资源与可行域。更进一步，在遭遇物料到货延误等制造现场扰动时，生产系统需在计划冻结边界处严格继承既定计划与工人---站位绑定，对后续周期作业模板进行重新平衡与稳定性修复，以在恢复物理可行性的同时兼顾完工节拍与计划扰动惩罚\cite{vieira2003, hu2024}。
 
 \begin{figure*}[!t]
 \centering
@@ -83,7 +83,7 @@
 
 \subsection{生产调度中的图强化学习与结构化动作}\label{ux751fux4ea7ux8c03ux5ea6ux4e2dux7684ux56feux5f3aux5316ux5b66ux4e60ux4e0eux7ed3ux6784ux5316ux52a8ux4f5c}
 
-图神经网络通过共享的消息传递机制学习组合优化问题中的结构化表征，已成为车间智能调度的重要工具\cite{cappart2023}。在 JSSP 与 FJSP 领域，基于图的强化学习方法通过编码工序工艺依赖与机器约束来学习派工策略\cite{zhang2020, park2021, wangr2024}。在飞机装配领域，课题组前序工作\cite{ai2025}初步验证了图增强策略在 APAL 平衡中的有效性；Wen 等\cite{wen2026ginppo}结合 GIN 与 PPO 求解了包含技能等级与空间容量的装配调度。然而，主流调度强化学习的动作空间大多局限于选择下一道工序或工序---单机器配对。面对多人协作团队的组合爆炸与动态人员站位归属，所提框架通过包含工序、站位、工人和技能的异构图联合表示工艺依赖与技能供需关系，并采用工序---站位---工人自回归解码器构建团队。部分团队状态与技能稀缺度特征指导逐成员选择，并通过动态掩码执行工人技能资质与站位绑定约束。
+图神经网络通过共享的消息传递机制学习组合优化问题中的结构化表征，已成为车间智能调度的重要工具\cite{cappart2023}。在 JSSP 与 FJSP 领域，基于图的强化学习方法通过编码工序工艺依赖与机器约束来学习派工策略\cite{zhang2020, park2021, wangr2024}。在飞机装配领域，课题组前序工作\cite{ai2025}初步验证了图增强策略在 APAL 平衡中的有效性；Wen 等\cite{wen2026ginppo}结合 GIN 与 PPO 求解了包含技能等级与空间容量的装配调度。然而，主流调度强化学习的动作空间大多局限于选择下一道工序或工序---单机器配对。面对多人协作团队的组合选择空间与动态人员站位归属，所提框架通过包含工序、站位、工人和技能的异构图联合表示工艺依赖与技能供需关系，并采用工序---站位---工人自回归解码器构建团队。部分团队状态与技能稀缺度特征指导逐成员选择，并通过动态掩码执行工人技能资质与站位绑定约束。
 
 \subsection{装配线扰动重调度与计划稳定性}\label{ux88c5ux914dux7ebfux6270ux52a8ux91cdux8c03ux5ea6ux4e0eux8ba1ux5212ux7a33ux5b9aux6027}
 
@@ -124,7 +124,7 @@ $x_{im}, y_{iw}$ & 工序---站位分配二元变量与工序---工人指派二�
 $m_i, W_i$ & 工序 $i$ 所属物理站位及指派的具体协作工人团队（$|W_i|=q_i$） \\
 $B_i, C_i$ & 工序 $i$ 在周期作业模板时间轴上的开始时刻与完成时刻 \\
 $\ell_w$ & 工人 $w$ 的站位绑定状态；$\ell_w=\varnothing$ 表示全局未绑定 \\
-$\pi^0, T_{\mathrm{ref}}^0$ & 初始基准周期作业模板及其实际周期跨度基准时域 $T_{\mathrm{ref}}^0 := H^0 = C_{\max}(\pi^0)$ \\
+$\pi^0, T_{\mathrm{ref}}^0$ & 初始基准周期作业模板及参考周期跨度 $T_{\mathrm{ref}}^0 := H^0 = C_{\max}(\pi^0)$ \\
 $\tau^r, r_i$ & 重调度触发冻结时刻与工序 $i$ 更新后的物料释放时刻 \\
 $\mathcal{O}^{\mathrm{frz}}, \mathcal{O}^{\mathrm{mov}}$ & 冻结工序集合（$B_i^0 \le \tau^r$）与可重排工序集合（$B_i^0 > \tau^r$） \\
 $H, C_{\max}, S$ & 周期作业模板跨度、模板最大完工时间与重调度多目标综合分 \\
@@ -145,7 +145,7 @@ D_i(W_i) = \frac{p_i^{\mathrm{std}} q_i}{\rho^{q_i-1} \sum_{w\in W_i} \eta_w}, \
 \begin{equation}\label{eq:cmax}
 \min_{\pi}\; C_{\max}(\pi) = \max_{m\in\mathcal{M}} C_m^{\mathrm{end}}(\pi) = \max_{i\in\mathcal{O}^{+}} C_i.
 \end{equation}
-其中，站位最晚完成时刻定义为 $C_m^{\mathrm{end}}(\pi) = \max_{\{i\in\mathcal{O}^{+} \mid m_i=m\}} C_i$（若该站位无工序则为 0）。基准排程 $\pi^0$ 一旦确定，其最大完工时间即确定基准时域 $T_{\mathrm{ref}}^0:=H^0=C_{\max}(\pi^0)$，且在后续重调度过程中保持不变。站位总人时负荷 $L_m = \sum_{m_i=m} q_i D_i(W_i)$ 仅用于算法内部奖励塑形与均衡性诊断，不作为独立优化目标。
+其中，站位最晚完成时刻定义为 $C_m^{\mathrm{end}}(\pi) = \max_{\{i\in\mathcal{O}^{+} \mid m_i=m\}} C_i$（若该站位无工序则为 0）。基准排程 $\pi^0$ 一旦确定，其最大完工时间即确定参考周期跨度 $T_{\mathrm{ref}}^0:=H^0=C_{\max}(\pi^0)$，且在后续重调度过程中保持不变。站位总人时负荷 $L_m = \sum_{m_i=m} q_i D_i(W_i)$ 仅用于算法内部奖励塑形与均衡性诊断，不作为独立优化目标。
 
 \subsubsection{系统可行性约束体系}
 
@@ -345,7 +345,7 @@ Critic 采用独立参数的同构池化层估计状态价值 $V(s_t)$。
 
 \subsection{自回归约束联合解码}\label{ux81eaux56deux5f52ux7ea6ux675fux8054ux5408ux89e3ux7801}
 
-\textbf{联合动作概率分解。} 为规避直接在动作空间 $\mathcal A(s_t)$ 上的组合爆炸，策略将联合动作分解为工序、条件站位与 $q_{i_t}$ 个条件工人选择步骤。令 $\mathbf w_t=(w_t^{(1)},\dots,w_t^{(q_{i_t})})$ 表示有序工人生成序列，$W_t=\{w_t^{(1)},\dots,w_t^{(q_{i_t})}\}$ 为对应无序团队集合，定义有序轨迹动作 $\widetilde a_t=(i_t,m_t,\mathbf w_t)$ 与无序执行动作 $a_t=(i_t,m_t,W_t)$。策略分解为：
+\textbf{联合动作概率分解。} 为规避对完整团队组合的显式枚举，策略将联合动作分解为工序、条件站位与 $q_{i_t}$ 个条件工人选择步骤。令 $\mathbf w_t=(w_t^{(1)},\dots,w_t^{(q_{i_t})})$ 表示有序工人生成序列，$W_t=\{w_t^{(1)},\dots,w_t^{(q_{i_t})}\}$ 为对应无序团队集合，定义有序轨迹动作 $\widetilde a_t=(i_t,m_t,\mathbf w_t)$ 与无序执行动作 $a_t=(i_t,m_t,W_t)$。策略分解为：
 \begin{center}
 \begin{adjustbox}{max width=\linewidth}
 $\displaystyle
@@ -841,7 +841,7 @@ Simulated\allowbreak{}Annealing\allowbreak{}Repair & 292.42 & 676.78 & 3445.39 &
 
 针对飞机脉动装配线（APAL）中工艺前序、站位并发、多技能多人团队协作与人员站位绑定等多物理资源的强耦合难题，本文提出了一种融合四元异构图注意力与三层自回归指针的深度强化学习调度框架 HGP-PPO。主要研究结论与工程启示如下：
 \begin{enumerate}
-\item \textbf{多资源联合决策机制}：将排程形式化为工序---站位---工人的分层自回归马尔可夫决策过程，配合动态动作掩码与前向时间分配引擎，成功规避了组合团队选择引起的动作空间爆炸，实现了工人站位归属在排程过程中的内生绑定与全局协调。
+\item \textbf{多资源联合决策机制}：将排程形式化为工序---站位---工人的分层自回归马尔可夫决策过程，配合动态动作掩码与前向时间分配引擎，成功规避了对完整团队组合的显式枚举，实现了工人站位归属在排程过程中的内生绑定与全局协调。
 \item \textbf{跨规模外推与快速重调度}：在初始排程中，同一锁定策略直接在 283 至 3182 道工序的多尺度实例上完成评价，无需针对特定实例进行微调，四规模平均周期跨度达到 902.40~h，并在最大 3182 工序实例上较基线降低 10.03\%；在重调度中，经扰动环境训练的模型在 36 个锁定物料延误场景上进行评价，所有测试实例与场景生成的排程方案均通过模型约束校验，取得较低的平均综合目标得分，并体现出不同稳定性分项之间的权衡关系；在最大 3182 工序实例上，平均单场景端到端方案修复仅需约 2 分钟（123.60~s），具备极强的工程实时响应价值。
 \end{enumerate}
 
@@ -1023,7 +1023,7 @@ PPO & 更新轮数／裁剪范围 & 2／0.20 线性衰减至 0.10 \\
 \small
 \bibitem{ai2025} J. Ai, F. Qiao, J. Liu, \emph{et al.}, ``A graph-enhanced deep-reinforcement learning approach for the aircraft pulse assembly line balancing problem,'' in \emph{Proc. 2025 China Automation Congress (CAC)}, 2025, pp. 6623--6628.
 \bibitem{bao2023afal} Z. Bao, L. Chen, and K. Qiu, ``An aircraft final assembly line balancing problem considering resource constraints and parallel task scheduling,'' \emph{Computers \& Industrial Engineering}, vol. 182, Art. no. 109436, 2023.
-\bibitem{bao2023jms} Z. Bao, L. Chen, and K. Qiu, ``A surrogate-assisted heuristic approach for the joint optimization of resource allocation and scheduling of an aircraft final assembly line,'' \emph{Journal of Manufacturing Systems}, vol. 70, pp. 102--116, 2023.
+\bibitem{bao2023jms} Z. Bao, L. Chen, and K. Qiu, ``A surrogate-assisted heuristic approach for the joint optimization of resource allocation and scheduling of an aircraft final assembly line,'' \emph{Journal of Manufacturing Systems}, vol. 70, pp. 99--112, 2023.
 \bibitem{battaia2013} O. Battaïa and A. Dolgui, ``A taxonomy of line balancing problems and their solution approaches,'' \emph{International Journal of Production Economics}, vol. 142, no. 2, pp. 259--277, 2013.
 \bibitem{becker2006} C. Becker and A. Scholl, ``A survey on problems and methods in generalized assembly line balancing,'' \emph{European Journal of Operational Research}, vol. 168, no. 3, pp. 694--715, 2006.
 \bibitem{boysen2007} N. Boysen, M. Fliedner, and A. Scholl, ``A classification of assembly line balancing problems,'' \emph{European Journal of Operational Research}, vol. 183, no. 2, pp. 674--693, 2007.
@@ -1046,11 +1046,11 @@ PPO & 更新轮数／裁剪范围 & 2／0.20 线性衰减至 0.10 \\
 \bibitem{vandeVonder2007} S. Van de Vonder, E. Demeulemeester, and W. Herroelen, ``A classification of predictive-reactive project scheduling procedures,'' \emph{Journal of Scheduling}, vol. 10, no. 3, pp. 195--207, 2007.
 \bibitem{vieira2003} G. E. Vieira, J. W. Herrmann, and E. Lin, ``Rescheduling manufacturing systems: A framework of strategies, policies, and methods,'' \emph{Journal of Scheduling}, vol. 6, no. 1, pp. 39--62, 2003.
 \bibitem{wangd2024} D. Wang, F. Qiao, L. Guan, J. Liu, C. Ding, and J. Shi, ``Human--machine collaborative optimization method for dynamic worker allocation in aircraft final assembly lines,'' \emph{Computers \& Industrial Engineering}, vol. 194, Art. no. 110370, 2024.
-\bibitem{wangr2024} R. Wang, G. Zhang, H. Sun, L. Sun, and L. Gao, ``Flexible job shop scheduling via dual attention network-based reinforcement learning,'' \emph{IEEE Transactions on Neural Networks and Learning Systems}, vol. 35, no. 9, pp. 12513--12527, 2024.
-\bibitem{wen2026qlpso} X. Wen, X. Li, Q. Zhang, \emph{et al.}, ``A Q-learning improved particle swarm optimization for aircraft pulsating assembly line scheduling problem considering skilled operator allocation,'' \emph{Computers, Materials \& Continua}, vol. 86, no. 1, pp. 1--27, 2026.
+\bibitem{wangr2024} R. Wang, G. Wang, J. Sun, F. Deng, and J. Chen, ``Flexible job shop scheduling via dual attention network-based reinforcement learning,'' \emph{IEEE Transactions on Neural Networks and Learning Systems}, vol. 35, no. 3, pp. 3091--3102, 2024.
+\bibitem{wen2026qlpso} X. Wen, H. Liu, X. Zhang, \emph{et al.}, ``A Q-learning improved particle swarm optimization for aircraft pulsating assembly line scheduling problem considering skilled operator allocation,'' \emph{Computers, Materials \& Continua}, vol. 86, no. 1, pp. 1--27, 2026.
 \bibitem{wen2026ginppo} X. Wen, H. Zhang, W. Yang, H. Li, H. Wang, H. Xing, and S. Liu, ``Research on a worker skill level-aware pulsating assembly scheduling method for aircraft based on the GIN-PPO algorithm,'' \emph{Computers \& Industrial Engineering}, vol. 218, Art. no. 112135, 2026.
 \bibitem{zhang2020} C. Zhang, W. Song, Z. Cao, J. Zhang, P. S. Tan, and X. Chi, ``Learning to dispatch for job shop scheduling via deep reinforcement learning,'' in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, vol. 33, 2020, pp. 1621--1632.
-\bibitem{zhu2021} H. Zhu, L. Gao, and X. Li, ``Reactive scheduling for aircraft moving assembly line with material delivery disturbance,'' \emph{International Journal of Production Research}, vol. 59, no. 8, pp. 2439--2456, 2021.
+\bibitem{zhu2021} H. Zhu, Z. Lu, C. Lu, and Y. Ren, ``A reactive scheduling method for disturbances in aircraft moving assembly line,'' \emph{International Journal of Production Research}, vol. 59, no. 15, pp. 4756--4772, 2021.
 \end{thebibliography}
 
 \end{document}

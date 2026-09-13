@@ -37,16 +37,16 @@
 \maketitle
 
 \begin{abstract}
-Operation planning in an aircraft pulsating assembly line (APAL) involves tightly coupled constraints, including technological precedence, station concurrency capacities, multi-skilled workers, and collaborative teamwork. Operation-station balancing and worker allocation interact intricately, while the combinatorial selection of concrete worker teams drastically expands the joint action space. To address these challenges, this paper proposes HGP-PPO, a reinforcement learning scheduling framework integrating heterogeneous graph neural networks with an autoregressive pointer decoder. First, the construction of a cyclic operation template is formulated as a sequential Markov decision process, utilizing four types of nodes---operations, stations, workers, and skills---along with their relations to capture complex topological structures and dynamic resource states. Second, a hierarchical operation--station--worker conditional autoregressive decoding mechanism is devised to sequentially select the operation, the physical station, and the concrete worker team of required size, strictly enforcing physical feasibility through dynamic action masking and a forward temporal allocation engine. Worker--station affiliations are endogenously established during the scheduling process to naturally harmonize personnel allocation with station workload demands. Furthermore, by augmenting state representations with baseline schedule and disturbance features followed by continued training, the framework is adapted to plan-level stability rescheduling under material delivery delays. Extensive experiments conducted on four real factory-derived instances ranging from 283 to 3,182 physical operations demonstrate that a single locked policy generates fully valid schedules without fine-tuning, achieving a 2.22\% reduction in average cycle span compared to the adapted L2D-PPO-APAL baseline and exhibiting strong extrapolation to instances nearly four times the training scale. Across 36 paired material delay scenarios, the rescheduling model maintains a 100\% feasibility rate, reducing the average composite objective by 7.00\% and 3.01\% against L2D-PPO-APAL and StabilityAwareRepair, respectively. Moreover, the model delivers repaired solutions within two minutes on the largest scale, showing orders-of-magnitude computational scalability over metaheuristic search methods. These results demonstrate that the proposed framework effectively coordinates multi-resource allocation in APALs, achieving a superior trade-off among cycle completion efficiency, plan stability, and real-time responsiveness under the investigated problem scope.
+Operation planning in an aircraft pulsating assembly line (APAL) involves tightly coupled constraints, including technological precedence, station concurrency capacities, multi-skilled workers, and team-based execution. Operation-to-station assignment and worker allocation interact intricately, while the combinatorial selection of specific worker teams drastically expands the joint action space. To address these challenges, this paper proposes HGP-PPO, a reinforcement learning scheduling framework integrating heterogeneous graph neural networks with an autoregressive pointer decoder. First, the construction of a cyclic operation template is formulated as a sequential Markov decision process, utilizing four types of nodes---operations, stations, workers, and skills---along with their relations to capture complex topological structures and dynamic resource states. Second, a hierarchical operation--station--worker conditional autoregressive decoding mechanism is devised to sequentially select the operation, the physical station, and the specific worker team of required size, strictly enforcing physical feasibility through dynamic action masking and a forward time allocation engine. Worker--station assignments are endogenously established during the scheduling process to naturally harmonize personnel allocation with station workload demands. Furthermore, by augmenting state representations with baseline schedule and disturbance features followed by continued training, the framework is adapted to plan-level stability-aware rescheduling under material delivery delays. Extensive experiments conducted on four real factory-derived instances ranging from 283 to 3,182 physical operations demonstrate that a single locked policy generates fully valid schedules without fine-tuning, achieving a 2.22\% reduction in average cycle span compared to the adapted L2D-PPO-APAL baseline and exhibiting strong extrapolation to instances nearly four times the training scale. Across 36 paired material delay scenarios, the rescheduling model maintains a 100\% feasibility rate, reducing the average composite objective by 7.00\% and 3.01\% against L2D-PPO-APAL and StabilityAwareRepair, respectively. Moreover, the model delivers repaired solutions within two minutes on the largest scale, showing orders-of-magnitude computational scalability over metaheuristic search methods. These results demonstrate that the proposed framework effectively coordinates multi-resource allocation in APALs, achieving a superior trade-off among cycle completion efficiency, plan stability, and real-time responsiveness under the investigated problem scope.
 \end{abstract}
 
 \begin{IEEEkeywords}
-Aircraft pulsating assembly line, joint scheduling, workforce allocation, heterogeneous graph neural network, proximal policy optimization, stability rescheduling.
+Aircraft pulsating assembly line, joint scheduling, workforce allocation, heterogeneous graph neural network, proximal policy optimization, stability-aware rescheduling.
 \end{IEEEkeywords}
 
 \section{Introduction}\label{sec:intro}
 
-Aircraft final assembly is a critical final stage of aircraft manufacturing, encompassing operations such as major component mating, piping installation, engine installation, avionics integration, and functional testing. Unlike conventional shop scheduling or automated mass-production lines, aircraft final assembly deals with large, highly customized products characterized by extensive process chains, dense precedence dependencies, long operation durations, restricted working space, and collaboration among multiple trades~\cite{fang2021,bao2023,wang2024}. To improve production flow and establish a regular production rhythm, aircraft manufacturers widely adopt aircraft pulsating assembly lines (APALs). An APAL partitions the final assembly shop floor into several dedicated physical stations, through which aircraft in progress advance synchronously in a pulsating cadence. Within each pulsation cycle, each aircraft remains stationary at its assigned station while a designated set of operations is executed. Upon cycle completion, all aircraft along the line advance synchronously to their respective downstream stations until final roll-out~\cite{lu2019}.
+Aircraft final assembly is a critical final stage of aircraft manufacturing, encompassing operations such as major component mating, piping installation, engine installation, avionics integration, and functional testing. Unlike conventional shop scheduling or automated mass-production lines, aircraft final assembly deals with large, highly customized products characterized by extensive process chains, dense precedence dependencies, long operation durations, restricted working space, and collaboration among multiple trades~\cite{fang2021,bao2023,wang2024}. To improve production flow and establish a regular production rhythm, aircraft manufacturers widely adopt aircraft pulsating assembly lines (APALs). An APAL partitions the final assembly shop floor into several dedicated physical stations, through which aircraft under assembly advance synchronously in a pulsating cadence. Within each pulsation cycle, each aircraft remains stationary at its assigned station while a designated set of operations is executed. Upon cycle completion, all aircraft along the line advance synchronously to their respective downstream stations until final roll-out~\cite{lu2019}.
 
 This synchronous advancement mechanism allows local operation delays to affect the timing of line-wide station transfers. Line advancement is strictly dictated by the bottleneck station with the latest completion time. Delays caused by uneven task distribution, shortages of qualified workers, or station concurrency limits can postpone synchronous advancement when they extend the latest station completion time, requiring aircraft at stations that have already finished to wait. Consequently, jointly coordinating operation-to-station assignment, within-station sequencing, and resource allocation is essential to efficient and stable APAL operation~\cite{becker2006,boysen2007,bao2023}.
 
@@ -62,7 +62,7 @@ In practical shop-floor settings, APAL scheduling involves three interdependent 
 This joint decision problem presents several challenges:
 \begin{enumerate}
 \item Operations, stations, workers, and skills exhibit heterogeneous multi-relational topologies, operating within an environment characterized by rapid state transitions and dynamic resource calendars;
-\item Selecting an optimal team from a multiskilled labor pool results in an exponential combinatorial action space of size $\binom{n_i}{q_i}$ for each operation;
+\item Selecting an optimal team from a multiskilled labor pool results in a combinatorial team-selection space of size $\binom{n_i}{q_i}$ for each operation;
 \item Each intermediate decision changes the feasible choices available to subsequent decisions;
 \item When shop-floor disturbances such as material arrival delays occur, rescheduling must preserve frozen schedule entries and existing worker--station bindings while repairing subsequent cyclic templates to restore feasibility and balance completion span against deviations from the baseline schedule~\cite{vieira2003,hu2024}.
 \end{enumerate}
@@ -106,7 +106,7 @@ The operational assumptions are established as follows:
 \begin{enumerate}
 \item \textbf{Non-preemptive execution}: Operations cannot be interrupted once initiated, and their allocated station and team cannot be altered.
 \item \textbf{Worker binding upon first selection}: All workers are initially unbound ($\ell_w=\varnothing$). When worker $w$ is first assigned to an operation at station $m$, the worker is endogenously bound to station $m$ ($\ell_w=m$) for the entire scheduling episode and any subsequent rescheduling, preventing cross-station movement. Unbound workers remain globally available.
-\item \textbf{Deterministic forward temporal allocation}: The policy generates discrete resource actions $(i, m_i, W_i)$ with $|W_i|=q_i$. The Forward Allocation Engine deterministically assigns the earliest feasible start time $B_i$ and finish time $C_i$ on the template timeline based on predecessor completions, worker calendars, material readiness, and station concurrency limits $c_m$.
+\item \textbf{Deterministic forward time allocation}: The policy generates discrete resource actions $(i, m_i, W_i)$ with $|W_i|=q_i$. The forward time allocation engine deterministically assigns the earliest feasible start time $B_i$ and finish time $C_i$ on the template timeline based on predecessor completions, worker calendars, material readiness, and station concurrency limits $c_m$.
 \end{enumerate}
 
 Table~\ref{tab:notation} outlines the mathematical notation used throughout this paper.
@@ -151,7 +151,7 @@ The optimization objective minimizes the template cycle span $H(\pi):=C_{\max}(\
 \begin{equation}\label{eq:cmax}
 \min_{\pi}\; C_{\max}(\pi) = \max_{m\in\mathcal{M}} C_m^{\mathrm{end}}(\pi) = \max_{i\in\mathcal{O}^+} C_i,
 \end{equation}
-where $C_m^{\mathrm{end}}(\pi)=\max_{\{i\in\mathcal{O}^+\mid m_i=m\}} C_i$ represents the latest completion time at station $m$. Once the baseline schedule is fixed, its makespan defines the reference horizon $T_{\mathrm{ref}}^0:=H^0=C_{\max}(\pi^0)$, which remains unchanged during rescheduling. Station labor load $L_m=\sum_{m_i=m} q_i D_i(W_i)$ serves as an intermediate diagnostic and reward-shaping signal.
+where $C_m^{\mathrm{end}}(\pi)=\max_{\{i\in\mathcal{O}^+\mid m_i=m\}} C_i$ represents the latest completion time at station $m$. Once the baseline schedule is fixed, its makespan defines the reference cycle span $T_{\mathrm{ref}}^0:=H^0=C_{\max}(\pi^0)$, which remains unchanged during rescheduling. Station labor load $L_m=\sum_{m_i=m} q_i D_i(W_i)$ serves as an intermediate diagnostic and reward-shaping signal.
 
 The schedule must satisfy the following assignment, precedence, resource, and temporal constraints:
 \begin{enumerate}
@@ -223,7 +223,7 @@ $}
 
 \subsection{Unified Sequential MDP and Learning Framework}
 
-Initial scheduling and stability rescheduling are unified into a sequential MDP $\mathcal{M}^z=(\mathcal{S}^z,\mathcal{A},\mathcal{P},\mathcal{R}^z,\gamma), z\in\{\mathrm{init},\mathrm{res}\}$:
+Initial scheduling and stability-aware rescheduling are unified into a sequential MDP $\mathcal{M}^z=(\mathcal{S}^z,\mathcal{A},\mathcal{P},\mathcal{R}^z,\gamma), z\in\{\mathrm{init},\mathrm{res}\}$:
 \begin{enumerate}
 \item \textbf{State representation}: State $s_t$ at decision step $t$ is encoded as a four-entity heterogeneous graph $G_t$ capturing process dependencies, station loads, and worker availability calendars. The index $t$ denotes a scheduling decision step, whereas $c_t$ denotes the current environment time.
 \item \textbf{Hierarchical action decomposition}: The discrete joint action $a_t=(i_t,m_t,W_t)$ ($|W_t|=q_{i_t}$) is autoregressively decomposed into an ordered trajectory $\widetilde a_t=(i_t,m_t,\mathbf w_t)$, mapped to unordered set $W_t$ upon team completion.
@@ -512,7 +512,7 @@ Op-Only Decisions & Heuristic station and worker dispatching & 269.66 & 779.13 &
 
 Table~\ref{tab:ablation} and Fig.~\ref{fig:3} analyze structural ablations:
 \begin{enumerate}
-\item \textbf{Worker--Station preassignment}: Pre-fixing worker affiliations inflates average makespan to 1,382.73~h (+53.2\%), indicating that static allocation bottlenecks task execution.
+\item \textbf{Worker--Station preassignment}: Pre-fixing worker--station assignments inflates average makespan to 1,382.73~h (+53.2\%), indicating that static allocation bottlenecks task execution.
 \item \textbf{Homogeneous GraphSAGE}: Collapsing heterogeneous relations increases mean makespan to 1,037.64~h (+15.0\%).
 \item \textbf{Op--Station decisions}: Bypassing worker pointers yields low initial makespans on smaller instances but leads to a 0\% feasibility rate during rescheduling due to team allocation deadlocks.
 \item \textbf{Op-only decisions}: Omitting station pointers results in infeasibility on instances with 2,338 and 3,182 operations.
@@ -650,7 +650,7 @@ SimulatedAnnealingRepair & 292.42 & 676.78 & 3445.39 & 4296.64 \\
 
 \section{Conclusions and Limitations}\label{sec:conclusions}
 
-This paper has presented HGP-PPO, a heterogeneous graph reinforcement learning framework for joint scheduling and workforce allocation on aircraft pulsating assembly lines. The hierarchical operation--station--worker autoregressive pointer decoder and dynamic masks resolve the combinatorial team explosion, while endogenous worker--station binding coordinates workforce deployment with station workloads. For initial scheduling, a single locked policy is directly evaluated across 283 to 3,182 physical operations without instance-specific fine-tuning, achieving strong scale extrapolation and the lowest average makespan of 902.40~h. For rescheduling, the policy trained under the disturbance environment is evaluated across 36 locked material delay scenarios. All generated schedules in the designated test instances and scenarios pass model constraint validation, achieve a lower average composite recovery score with observable trade-offs among individual stability components, and require an average end-to-end plan repair runtime of approximately 2 minutes (123.60~s) per scenario on the largest 3,182-operation instance.
+This paper has presented HGP-PPO, a heterogeneous graph reinforcement learning framework for joint scheduling and workforce allocation on aircraft pulsating assembly lines. The hierarchical operation--station--worker autoregressive pointer decoder and dynamic masks avoid explicit enumeration of complete teams, while endogenous worker--station binding coordinates workforce deployment with station workloads. For initial scheduling, a single locked policy is directly evaluated across 283 to 3,182 physical operations without instance-specific fine-tuning, achieving strong scale extrapolation and the lowest average makespan of 902.40~h. For rescheduling, the policy trained under the disturbance environment is evaluated across 36 locked material delay scenarios. All generated schedules in the designated test instances and scenarios pass model constraint validation, achieve a lower average composite recovery score with observable trade-offs among individual stability components, and require an average end-to-end plan repair runtime of approximately 2 minutes (123.60~s) per scenario on the largest 3,182-operation instance.
 
 \textbf{Limitations and future work}: The present work investigates cyclic operation templates and plan-level cyclic template rescheduling under material readiness delays. While Proposition~1 establishes the physical feasibility of steady-state cyclic unfolding for a fixed template, the model does not explicitly simulate the physical transient dynamics and work-in-progress (WIP) buffer congestion that occur when shop-floor operations transition from an existing template to a newly rescheduled template with in-process aircraft at disparate completion stages. Furthermore, standard operation durations are assumed deterministic. Future investigations will incorporate continuous transient line simulations, stochastic operation durations, as well as worker fatigue and time-varying productivity.
 
@@ -688,7 +688,7 @@ The candidate key combines candidate embedding, skill pressure exposure, and dyn
 where skill pressure exposure $\mathbf e_{w,t} = [\mathbf H_w \odot \mathbf P_t^{\mathrm{all}} \,\|\, \mathbf H_w \odot \mathbf P_t^{\mathrm{near}}] \in \mathbb R^{10}$ remains fixed across selection sub-steps $r=1,\dots,q_{i_t}$ for operation $i_t$. Pointer scoring evaluates $\mathbf v_W^{\top}\tanh(\mathbf q_t^{(r)}+\mathbf k_{w,t}^{(r)})$, masked by $-10^4$ on invalid candidates.
 
 \textbf{Global and near-term skill pressure}:
-Let $R_{jk}\in\{0,1\}$ indicate whether operation $j$ requires skill $k$, $H_{wk}\in\{0,1\}$ indicate whether worker $w$ possesses skill $k$, and $\widetilde p_j$ be the normalized baseline duration. Let $\mathcal U_t\subseteq\mathcal O^+$ denote unscheduled physical operations, and let $\mathcal R_t\subseteq\mathcal U_t$ denote ready operations:
+Let $R_{jk}\in\{0,1\}$ indicate whether operation $j$ requires skill $k$, $H_{wk}\in\{0,1\}$ indicate whether worker $w$ possesses skill $k$, and $\widetilde p_j$ be the normalized standard processing time. Let $\mathcal U_t\subseteq\mathcal O^+$ denote unscheduled physical operations, and let $\mathcal R_t\subseteq\mathcal U_t$ denote ready operations:
 \begin{center}
 \begin{adjustbox}{max width=\columnwidth}
 $\displaystyle
@@ -753,7 +753,7 @@ $\displaystyle
 $
 \end{adjustbox}
 \end{center}
-where $C_{k,t}^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} H_{vk}$ is the cumulative committed skill $k$ headcount across the prior $r-1$ sub-steps. The factor $(1-R_{i_tk})$ excludes skills required by operation $i_t$, penalizing only the incidental depletion of unrequired skill capacity and mitigating misallocation of multi-skilled workers on simple operations.
+where $C_{k,t}^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} H_{vk}$ is the cumulative committed skill $k$ headcount across the prior $r-1$ sub-steps. The factor $(1-R_{i_tk})$ excludes skills required by operation $i_t$, quantifying the additional pressure on unrequired skill capacity and mitigating misallocation of multi-skilled workers on simple operations.
 
 \section{Reproducibility Configuration and Metric Definitions}\label{app:reproducibility}
 
@@ -804,7 +804,7 @@ J.~Ai, F.~Qiao, J.~Liu, \textit{et~al.}, ``A graph-enhanced deep-reinforcement l
 Z.~Bao, L.~Chen, and K.~Qiu, ``An aircraft final assembly line balancing problem considering resource constraints and parallel task scheduling,'' \textit{Comput. Ind. Eng.}, vol. 182, p. 109436, 2023.
 
 \bibitem{bao2023b}
-Z.~Bao, L.~Chen, and K.~Qiu, ``A surrogate-assisted heuristic approach for the joint optimization of resource allocation and scheduling of an aircraft final assembly line,'' \textit{J. Manuf. Syst.}, vol. 70, pp. 102--116, 2023.
+Z.~Bao, L.~Chen, and K.~Qiu, ``A surrogate-assisted heuristic approach for the joint optimization of resource allocation and scheduling of an aircraft final assembly line,'' \textit{J. Manuf. Syst.}, vol. 70, pp. 99--112, 2023.
 
 \bibitem{battaia2013}
 O.~Batta\"ia and A.~Dolgui, ``A taxonomy of line balancing problems and their solution approaches,'' \textit{Int. J. Prod. Econ.}, vol. 142, no. 2, pp. 259--277, 2013.
@@ -873,10 +873,10 @@ G.~E.~Vieira, J.~W.~Herrmann, and E.~Lin, ``Rescheduling manufacturing systems: 
 D.~Wang, F.~Qiao, L.~Guan, \textit{et~al.}, ``Human--machine collaborative optimization method for dynamic worker allocation in aircraft final assembly lines,'' \textit{Comput. Ind. Eng.}, vol. 194, p. 110370, 2024.
 
 \bibitem{wang2024flexible}
-R.~Wang, G.~Zhang, H.~Sun, \textit{et~al.}, ``Flexible job shop scheduling via dual attention network-based reinforcement learning,'' \textit{IEEE Trans. Neural Netw. Learn. Syst.}, vol. 35, no. 9, pp. 12513--12527, 2024.
+R.~Wang, G.~Wang, J.~Sun, F.~Deng, and J.~Chen, ``Flexible job shop scheduling via dual attention network-based reinforcement learning,'' \textit{IEEE Trans. Neural Netw. Learn. Syst.}, vol. 35, no. 3, pp. 3091--3102, 2024.
 
 \bibitem{wen2026}
-X.~Wen, X.~Li, Q.~Zhang, \textit{et~al.}, ``A Q-learning improved particle swarm optimization for aircraft pulsating assembly line scheduling problem considering skilled operator allocation,'' \textit{Comput. Mater. Contin.}, vol. 86, no. 1, pp. 1--27, 2026.
+X.~Wen, H.~Liu, X.~Zhang, \textit{et~al.}, ``A Q-learning improved particle swarm optimization for aircraft pulsating assembly line scheduling problem considering skilled operator allocation,'' \textit{Comput. Mater. Contin.}, vol. 86, no. 1, pp. 1--27, 2026.
 
 \bibitem{wen2026b}
 X.~Wen, H.~Zhang, W.~Yang, \textit{et~al.}, ``Research on a worker skill level-aware pulsating assembly scheduling method for aircraft based on the GIN-PPO algorithm,'' \textit{Comput. Ind. Eng.}, vol. 218, p. 112135, 2026.
@@ -885,7 +885,7 @@ X.~Wen, H.~Zhang, W.~Yang, \textit{et~al.}, ``Research on a worker skill level-a
 C.~Zhang, W.~Song, Z.~Cao, \textit{et~al.}, ``Learning to dispatch for job shop scheduling via deep reinforcement learning,'' in \textit{Adv. Neural Inf. Process. Syst. (NeurIPS)}, vol. 33, 2020, pp. 1621--1632.
 
 \bibitem{zhu2021}
-H.~Zhu, L.~Gao, and X.~Li, ``Reactive scheduling for aircraft moving assembly line with material delivery disturbance,'' \textit{Int. J. Prod. Res.}, vol. 59, no. 8, pp. 2439--2456, 2021.
+H.~Zhu, Z.~Lu, C.~Lu, and Y.~Ren, ``A reactive scheduling method for disturbances in aircraft moving assembly line,'' \textit{Int. J. Prod. Res.}, vol. 59, no. 15, pp. 4756--4772, 2021.
 \end{thebibliography}
 
 \end{document}
