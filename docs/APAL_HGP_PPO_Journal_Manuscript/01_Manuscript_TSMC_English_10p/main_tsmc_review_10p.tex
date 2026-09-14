@@ -103,11 +103,12 @@ Consider an APAL comprising five fixed physical stations $\mathcal{M}=\{1,\dots,
 
 The system includes a pool of multiskilled workers $\mathcal{W}$ and a set of five skill types $\mathcal{K}$. Each physical operation $i\in\mathcal{O}^+$ has a standard processing time $p_i^{\mathrm{std}}>0$, requires a single skill $k_i\in\mathcal{K}$, and demands a fixed collaborative team size $q_i\in\mathbb{N}^+$. Each worker $w\in\mathcal{W}$ has a binary skill qualification vector $\mathbf{H}_w=(H_{wk})_{k\in\mathcal{K}}$, where $H_{wk}\in\{0,1\}$, and a baseline efficiency coefficient $\eta_w>0$. Except for initial positioning tasks, operation stations are not predetermined.
 
-The operational assumptions are established as follows:
+The model adopts the following operating assumptions:
 \begin{enumerate}
-\item \textbf{Non-preemptive execution}: Operations cannot be interrupted once initiated, and their allocated station and team cannot be altered.
-\item \textbf{Worker binding upon first selection}: All workers are initially unbound ($\ell_w=\varnothing$). When worker $w$ is first assigned to an operation at station $m$, the worker is endogenously bound to station $m$ ($\ell_w=m$) for the entire scheduling episode and any subsequent rescheduling, preventing cross-station movement. Unbound workers remain globally available.
-\item \textbf{Deterministic forward time allocation}: The policy generates discrete resource actions $(i, m_i, W_i)$ with $|W_i|=q_i$. The forward time allocation engine deterministically assigns the earliest feasible start time $B_i$ and finish time $C_i$ on the template timeline based on predecessor completions, worker calendars, material readiness, and station concurrency limits $c_m$.
+\item \textit{Non-preemptive operations:} Once an operation starts, it proceeds without interruption, and its assigned station and worker team remain unchanged until completion.
+\item \textit{Transfer and setup times:} Operation transfer and setup times are included in the standard processing times provided by the factory.
+\item \textit{Resource availability:} Workers and stations remain operational throughout the planning horizon, with no unexpected equipment failures or worker absences. Resource use remains subject to worker exclusivity and station concurrency limits.
+\item \textit{Worker--station binding:} All workers are initially unassigned to stations. Each worker's station assignment is established upon their first task assignment and remains fixed throughout the initial schedule. Workers therefore cannot serve operations at different stations within that schedule. These station assignments are retained during subsequent rescheduling.
 \end{enumerate}
 
 Table~\ref{tab:notation} outlines the mathematical notation used throughout this paper.
@@ -204,7 +205,10 @@ Since $m_j\ge m_i$ and $B_j\ge C_i$, physical precedence is naturally preserved.
 
 \subsection{Stability-Aware Template Rescheduling Under Material Delays}
 
-When material for operation $i$ is delayed by $\Delta_i>0$, its release time updates to $r_i=B_i^0+\Delta_i$. At freeze boundary $\tau^r$, operations are partitioned into frozen set $\mathcal{O}^{\mathrm{frz}}=\{i\in\mathcal{O}^+\mid B_i^0\le\tau^r\}$ and reschedulable set $\mathcal{O}^{\mathrm{mov}}=\{i\in\mathcal{O}^+\mid B_i^0>\tau^r\}$.
+\textit{Predictive--reactive template repair setting:}
+The baseline schedule $\pi^0$ defines a cyclic operation template for repeated production. Following a material readiness delay, the template is revised at the plan level for subsequent production while preserving frozen operations and existing worker--station assignments. Updated material release times are assumed known when rescheduling is triggered.
+
+Let $\mathcal{O}^{\mathrm{del}}\subseteq\mathcal{O}^{\mathrm{mov}}$ denote the set of operations affected by material readiness delays. For each $i\in\mathcal{O}^{\mathrm{del}}$, the updated release time is $r_i=B_i^0+\Delta_i$, where $\Delta_i>0$. At the schedule freeze boundary $\tau^r$, the physical operations are partitioned into frozen set $\mathcal{O}^{\mathrm{frz}}=\{i\in\mathcal{O}^{+}\mid B_i^0\le\tau^r\}$ and reschedulable set $\mathcal{O}^{\mathrm{mov}}=\{i\in\mathcal{O}^{+}\mid B_i^0>\tau^r\}$.
 
 \begin{enumerate}
 \item \textbf{Frozen commitments}: Committed operations strictly inherit baseline assignments:
@@ -225,13 +229,22 @@ Defining $N_{\mathrm{mov}}=|\mathcal{O}^{\mathrm{mov}}|$, baseline overrun $\Del
 
 \section{HGP-PPO Method}\label{sec:method}
 
-\subsection{Unified Sequential MDP and Learning Framework}
+\subsection{Unified Event-Driven MDP Formulation}
 
-Initial scheduling and stability-aware rescheduling are unified into a sequential MDP $\mathcal{M}^z=(\mathcal{S}^z,\mathcal{A},\mathcal{P},\mathcal{R}^z,\gamma), z\in\{\mathrm{init},\mathrm{res}\}$:
+Initial scheduling and stability-aware rescheduling are
+represented within a unified event-driven MDP framework:
+\[
+\mathcal{M}^{z}
+=
+(\mathcal{S}^{z},\mathcal{A},\mathcal{P},
+\mathcal{R}^{z},\gamma),
+\qquad
+z\in\{\mathrm{init},\mathrm{res}\}.
+\]
 \begin{enumerate}
 \item \textbf{State representation}: State $s_t$ at decision step $t$ is encoded as a four-entity heterogeneous graph $G_t$ capturing process dependencies, station loads, and worker availability calendars. The index $t$ denotes a scheduling decision step, whereas $c_t$ denotes the current environment time.
 \item \textbf{Hierarchical action decomposition}: The discrete joint action $a_t=(i_t,m_t,W_t)$ ($|W_t|=q_{i_t}$) is autoregressively decomposed into an ordered trajectory $\widetilde a_t=(i_t,m_t,\mathbf w_t)$, mapped to unordered set $W_t$ upon team completion.
-\item \textbf{Dynamic masking}: Hard constraints are enforced at each decision tier by masking invalid candidates with $-\infty$.
+\item \textbf{Dynamic masking and event-driven state transition}: Hard constraints are enforced at each decision tier by masking invalid candidates with $-\infty$. Given the current partial schedule and the selected joint action, the forward allocation engine deterministically assigns the earliest feasible start time $B_i$ subject to predecessor completion, worker availability, material release times, and station concurrency limits. It then sets $C_i=B_i+D_i(W_i)$ and updates the resource calendars. When no scheduling action is currently feasible, the environment clock advances to the next event that may enable further scheduling. If no such event exists while operations remain unscheduled, the episode terminates in deadlock.
 \item \textbf{Stage-specific rewards}: Initial scheduling uses differential makespan rewards and changes in the standard deviation of station labor loads: $\widetilde r_t^{\mathrm{init}} = -(\widehat C_{t+1}-\widehat C_t)/C_{\mathrm{ref}} - 0.5(\sigma_{L,t+1}-\sigma_{L,t})/L_{\mathrm{ref}}$; rescheduling directly adopts the negative composite score difference: $\widetilde r_t^{\mathrm{res}} = -[\widehat S(s_{t+1})-\widehat S(s_t)]$.
 \end{enumerate}
 
@@ -337,7 +350,12 @@ u_{w,t}^{(r)} &= \mathbf v_W^{\top}\tanh\left(\mathbf q_t^{(r)} + \mathbf k_{w,t
 \end{align}
 Infeasible candidates receive zero probability. Query $\mathbf q_t^{(r)}$ and key $\mathbf k_{w,t}^{(r)}$ incorporate skill pressures, dynamic EFT, and marginal scarcity (detailed in Appendix~\ref{app:worker_pointer}).
 
-\textbf{Endogenous binding}:
+\textit{Endogenous worker--station binding:}
+When an initially station-unassigned worker is assigned to
+an operation at station $m_t$, the worker becomes dedicated
+to that station for the remainder of the schedule.
+The resulting station assignment is retained during
+subsequent rescheduling:
 \begin{equation}
 \ell_{w,t+1} = \begin{cases} m_t, & \ell_{w,t}=\varnothing \ \text{and}\ w\in W_t, \\ \ell_{w,t}, & \text{otherwise}. \end{cases}
 \end{equation}
@@ -373,17 +391,18 @@ Experiments investigate five core evaluation questions:
 \item \textbf{EQ5 (Disturbance recovery)}: Can the architecture balance feasibility, makespan, and stability under material delays?
 \end{itemize}
 
-\textbf{Dataset partitioning}:
+\textit{Dataset partitioning:}
+The experiments use training, validation, and test sets:
 \begin{itemize}
-\item \textbf{Training}: 24 synthetic variants (400--800 operations) for gradient optimization;
-\item \textbf{Development}: 6 instances and 54 delay scenarios for hyperparameter selection and early stopping;
-\item \textbf{Locked test}: 4 real factory instances (Table~\ref{tab:instances}) and 36 fixed disturbance scenarios evaluated once without post-hoc tuning.
+    \item \textit{Training set:} 24 synthetic variants containing 400--800 physical operations, used for model parameter updates;
+    \item \textit{Validation set:} 6 instances and 54 delay scenarios, used for hyperparameter selection, early stopping, and checkpoint selection;
+    \item \textit{Test set:} 4 real factory instances (Table~\ref{tab:instances}) and 36 fixed disturbance scenarios, reserved for final evaluation after model selection and without further tuning.
 \end{itemize}
-Completeness ($R_{\mathrm{complete}}=1$) and physical validity ($R_{\mathrm{valid}}=1$) are strict prerequisites for quality ranking. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations.
+The test set comprises four instances derived from real factory APAL process data: Medium (283 physical operations), Large (680), Industrial-I (2,338), and Industrial-II (3,182). All four instances contain five physical stations. Completeness ($R_{\mathrm{complete}}=1$) and physical validity ($R_{\mathrm{valid}}=1$) are strict prerequisites for quality ranking. Physical precedence relations are derived by bypassing structural nodes while preserving the dependencies between physical operations.
 
 \begin{table}[!t]
 \centering
-\caption{Real Factory APAL Locked Evaluation Instances}
+\caption{Real Factory APAL Test Instances}
 \label{tab:instances}
 \setlength{\tabcolsep}{6pt}
 \renewcommand{\arraystretch}{0.98}
@@ -392,15 +411,15 @@ Completeness ($R_{\mathrm{complete}}=1$) and physical validity ($R_{\mathrm{vali
 \toprule
 \textbf{Instance} & \textbf{Physical operations} & \textbf{Stations} & \textbf{Role} \\
 \midrule
-283 & 283 & 5 & Locked test \\
-680 & 680 & 5 & Locked test \\
-2338 & 2,338 & 5 & Locked test \\
-3182 & 3,182 & 5 & Locked test \\
+Medium & 283 & 5 & Test \\
+Large & 680 & 5 & Test \\
+Industrial-I & 2,338 & 5 & Test \\
+Industrial-II & 3,182 & 5 & Test \\
 \bottomrule
 \end{tabular}
 \end{adjustbox}
 \vspace{2pt}
-\par\noindent{\scriptsize Note: Instance sizes count physical operations only. Source process graphs additionally contain 7, 35, 64, and 117 structural nodes (290, 715, 2,402, and 3,299 total nodes).}\par
+\par\noindent{\scriptsize Note: Instance sizes count physical operations only. The source process graphs for Medium, Large, Industrial-I, and Industrial-II additionally contain 7, 35, 64, and 117 structural nodes, respectively (290, 715, 2,402, and 3,299 total nodes).}\par
 \end{table}
 
 \begin{table}[!t]
@@ -442,7 +461,7 @@ Table~\ref{tab:baselines} outlines the comparison methods. Initial scheduling is
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{@{}llrrrrr@{}}
 \toprule
-\textbf{Category} & \textbf{Method} & \textbf{283} & \textbf{680} & \textbf{2338} & \textbf{3182} & \textbf{Mean Across Scales} \\
+\textbf{Category} & \textbf{Method} & \textbf{Medium} & \textbf{Large} & \textbf{Industrial-I} & \textbf{Industrial-II} & \textbf{Mean Across Scales} \\
 \midrule
 Graph RL & \textbf{Proposed HGP-PPO} & 286.96 & \textbf{489.00} & 1209.96 & \textbf{1623.69} & \textbf{902.40} \\
 Allocation ablation & Worker--Station Preassignment & 320.31 & 959.63 & 1605.13 & 2645.84 & 1382.73 \\
@@ -484,7 +503,7 @@ Table~\ref{tab:initial_results} reports initial makespans. Across the four scale
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{@{}llrrrrrcc@{}}
 \toprule
-\textbf{Method} & \textbf{Structural Modification} & \textbf{283} & \textbf{680} & \textbf{2338} & \textbf{3182} & \textbf{Mean} & \textbf{Init Feas.} & \textbf{Resched Feas.} \\
+\textbf{Method} & \textbf{Structural Modification} & \textbf{Medium} & \textbf{Large} & \textbf{Industrial-I} & \textbf{Industrial-II} & \textbf{Mean} & \textbf{Init Feas.} & \textbf{Resched Feas.} \\
 \midrule
 \textbf{Proposed HGP-PPO} & Full heterogeneous graph; joint Op--St--Wk decisions & 286.96 & 489.00 & 1209.96 & 1623.69 & \textbf{902.40} & 4/4 & \textbf{100\%} \\
 Homogeneous GraphSAGE & Homogeneous graph encoding without typed message passing & 292.02 & 594.04 & 1323.22 & 1941.29 & 1037.64 & 4/4 & 100\% \\
@@ -516,7 +535,7 @@ Table~\ref{tab:ablation} and Fig.~\ref{fig:3} analyze structural ablations:
 \begin{adjustbox}{max width=\textwidth}
 \begin{tabular}{@{}llrrrrrcc@{}}
 \toprule
-\textbf{Category} & \textbf{Method} & \textbf{283} & \textbf{680} & \textbf{2338} & \textbf{3182} & \textbf{Mean $S$} & \textbf{Makespan (h)} & \textbf{Feasibility} \\
+\textbf{Category} & \textbf{Method} & \textbf{Medium} & \textbf{Large} & \textbf{Industrial-I} & \textbf{Industrial-II} & \textbf{Mean $S$} & \textbf{Makespan (h)} & \textbf{Feasibility} \\
 \midrule
 Graph RL & \textbf{Proposed HGP-PPO} & 0.9572 / 297.7 & 0.7621 / 674.9 & 0.8627 / 1223.9 & 0.8224 / 1709.5 & \textbf{0.8511} & 976.5 & \textbf{100\%} \\
 Model variant & Ablated model without baseline conditioning & 0.9700 / 300.1 & 0.8242 / 682.5 & 0.9186 / 1239.2 & 1.0588 / 1786.6 & 0.9429 & 1002.1 & 100\% \\
@@ -606,7 +625,7 @@ Table~\ref{tab:paired_stats} reports paired statistics against the two closest b
 
 \subsection{Online Runtime and Scalability}
 
-Table~\ref{tab:runtime} and Fig.~\ref{fig:5} compare end-to-end online rescheduling runtimes. HGP-PPO executes forward inference in 8.02--123.60~s across the four scales. At the 3,182-operation scale, per-instance heuristic search requires 3,900--4,300~s ($\approx$65--72 minutes), whereas HGP-PPO finishes full-line plan repair in approximately 2 minutes (123.60~s), providing orders-of-magnitude acceleration for real-time shop-floor decision-making.
+Table~\ref{tab:runtime} and Fig.~\ref{fig:5} compare end-to-end online rescheduling runtimes. HGP-PPO executes forward inference in 8.02--123.60~s across the four scales. On Industrial-II (3,182 operations), per-instance heuristic search requires 3,900--4,300~s ($\approx$65--72 minutes), whereas HGP-PPO finishes full-line plan repair in approximately 2 minutes (123.60~s), providing orders-of-magnitude acceleration for real-time shop-floor decision-making.
 
 \begin{table}[!t]
 \centering
@@ -617,7 +636,7 @@ Table~\ref{tab:runtime} and Fig.~\ref{fig:5} compare end-to-end online reschedul
 \begin{adjustbox}{max width=\columnwidth}
 \begin{tabular}{@{}lrrrr@{}}
 \toprule
-\textbf{Method} & \textbf{283} & \textbf{680} & \textbf{2338} & \textbf{3182} \\
+\textbf{Method} & \textbf{Medium} & \textbf{Large} & \textbf{Industrial-I} & \textbf{Industrial-II} \\
 \midrule
 \textbf{Proposed HGP-PPO} & \textbf{8.02} & \textbf{12.84} & \textbf{51.91} & \textbf{123.60} \\
 BeamSearchRepair & 114.02 & 262.72 & 1787.00 & 3902.89 \\
@@ -639,9 +658,10 @@ SimulatedAnnealingRepair & 292.42 & 676.78 & 3445.39 & 4296.64 \\
 
 \section{Conclusions and Limitations}\label{sec:conclusions}
 
-This paper has presented HGP-PPO, a heterogeneous graph reinforcement learning framework for joint scheduling and workforce allocation on aircraft pulsating assembly lines. The hierarchical operation--station--worker autoregressive pointer decoder and dynamic masks avoid explicit enumeration of complete teams, while endogenous worker--station binding coordinates workforce deployment with station workloads. For initial scheduling, a single locked policy is directly evaluated across 283 to 3,182 physical operations without instance-specific fine-tuning, achieving strong scale extrapolation and the lowest average makespan of 902.40~h. For rescheduling, the policy trained under the disturbance environment is evaluated across 36 locked material delay scenarios. All generated schedules in the designated test instances and scenarios pass model constraint validation, achieve a lower average composite recovery score with observable trade-offs among individual stability components, and require an average end-to-end plan repair runtime of approximately 2 minutes (123.60~s) per scenario on the largest 3,182-operation instance.
+This paper has presented HGP-PPO, a heterogeneous graph reinforcement learning framework for joint scheduling and workforce allocation on aircraft pulsating assembly lines. The hierarchical operation--station--worker autoregressive pointer decoder and dynamic masks avoid explicit enumeration of complete teams, while endogenous worker--station binding coordinates workforce deployment with station workloads. For initial scheduling, a single locked policy is directly evaluated across 283 to 3,182 physical operations without instance-specific fine-tuning, achieving strong scale extrapolation and the lowest average makespan of 902.40~h. For rescheduling, the policy trained under the disturbance environment is evaluated across 36 locked material delay scenarios. All generated schedules in the designated test instances and scenarios pass model constraint validation, achieve a lower average composite recovery score with observable trade-offs among individual stability components, and require an average end-to-end plan repair runtime of approximately 2 minutes (123.60~s) per scenario on Industrial-II.
 
-\textbf{Limitations and future work}: The present work investigates cyclic operation templates and plan-level cyclic template rescheduling under material readiness delays. While Proposition~1 establishes the physical feasibility of steady-state cyclic unfolding for a fixed template, the model does not explicitly simulate the physical transient dynamics and work-in-progress (WIP) buffer congestion that occur when shop-floor operations transition from an existing template to a newly rescheduled template with in-process aircraft at disparate completion stages. Furthermore, standard operation durations are assumed deterministic. Future investigations will incorporate continuous transient line simulations, stochastic operation durations, as well as worker fatigue and time-varying productivity.
+\textit{Limitations and future work:}
+The formulation addresses cyclic operation templates and their plan-level repair. Proposition~1 establishes physical feasibility for the steady-state unfolding of a fixed template; it does not establish feasibility of the transient transition between templates. The model does not explicitly simulate cross-aircraft work-in-process (WIP) movements or buffer congestion during this transition. Updated material release times are assumed known at rescheduling, and standard processing times are deterministic. Future work will extend the framework to transient line simulation, uncertain material arrivals and processing times, and worker fatigue and time-varying productivity.
 
 \appendices
 
@@ -691,7 +711,7 @@ with team synergy discount $\rho=0.95$. Across feasible candidate set $\mathcal 
 \begin{align}
 \sigma_{C,t}^{(r)} &= \sqrt{\frac{1}{|\mathcal F_{W,t}^{(r)}|} \sum_{u\in\mathcal F_{W,t}^{(r)}} \left(\widehat C_{u,t}^{(r)}-\mu_{C,t}^{(r)}\right)^2}, \\
 \mathbf f_{w,t}^{\mathrm{eft},(r)} &= \begin{bmatrix}
-\operatorname{clip}\left(\frac{\widehat C_{w,t}^{(r)}-C_{\min,t}^{(r)}}{\widetilde p_{i_t}}, 0, 10\right) \\[4pt]
+\operatorname{clip}\left(\frac{\widehat C_{w,t}^{(r)}-C_{\min,t}^{(r)}}{\widetilde p_{i_t}}, 0, 10\right) \\
 \operatorname{clip}\left(\frac{\widehat C_{w,t}^{(r)}-\mu_{C,t}^{(r)}}{\max(\sigma_{C,t}^{(r)}, 10^{-6})}, -10, 10\right)
 \end{bmatrix}.
 \end{align}
@@ -706,25 +726,25 @@ Candidate worker $w$'s marginal skill scarcity is:
 &- \log\!\left(1 + \frac{D_{k,t}^{\mathrm{all}}}{\max(S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)},\varepsilon_s)}\right) \Bigg]_+,
 \end{aligned}
 \end{equation}
-where $C_{k,t}^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} H_{vk}$ is the cumulative committed skill $k$ headcount across the prior $r-1$ sub-steps. The factor $(1-R_{i_tk})$ excludes skills required by operation $i_t$, quantifying the additional pressure on unrequired skill capacity and mitigating misallocation of multi-skilled workers on simple operations.
+where $C_{k,t}^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} H_{vk}$ is the committed skill $k$ headcount across prior $r-1$ sub-steps. The factor $(1-R_{i_tk})$ excludes skills required by operation $i_t$, penalizing unrequired skill capacity drain and mitigating multiskilled worker misallocation.
 
 \section{Reproducibility Configuration and Metric Definitions}\label{app:reproducibility}
 
-Table~\ref{tab:reproducibility} provides the key reproducibility settings.
+Table~\ref{tab:reproducibility} provides the key reproducibility hyperparameters. \textbf{Metric definitions}: 1)~\textit{IQM}: Arithmetic mean of middle 50\% scores after 25\% trimming. 2)~\textit{ARD}: For method $m$ over scenario set $\mathcal S$ ($|\mathcal S|=36$): $\mathrm{ARD}_m = \frac{1}{|\mathcal S|}\sum_{s\in\mathcal S} \frac{S_{ms}-S_s^*}{S_s^*}\times100\%$, where $S_s^*=\min_k S_{ks}$ is the best score observed across evaluated methods in scenario $s$. 3)~\textit{Rank-biserial correlation ($r_{\mathrm{rb}}$)}: Wilcoxon effect size $r_{\mathrm{rb}}=(W^+-W^-)/(W^++W^-)\in[-1,1]$.
 
 \begin{table}[!t]
 \centering
 \caption{Key Reproducibility Hyperparameters}
 \label{tab:reproducibility}
 \setlength{\tabcolsep}{2.5pt}
-\renewcommand{\arraystretch}{0.92}
+\renewcommand{\arraystretch}{0.85}
 \begin{adjustbox}{max width=\columnwidth}
 \begin{tabular}{@{}llp{4.2cm}@{}}
 \toprule
 \textbf{Category} & \textbf{Parameter} & \textbf{Value / Configuration} \\
 \midrule
-Instances & Train / Dev / Locked test & 24 / 6 / 4 instances \\
-Disturbances & Dev / Locked test & 54 / 36 (9 scenarios per instance) \\
+Instances & Training / Validation / Test & 24 / 6 / 4 instances \\
+Disturbances & Validation / Test & 54 / 36 (9 scenarios per instance) \\
 Network & Architecture & 5 GATv2 layers, 4 heads, $d=128$ \\
 Model size & Trainable parameters & $\approx$11.2 M \\
 PPO & Learning rate / $\gamma$ / GAE $\lambda$ & $1.0\times10^{-4}$ / 0.999 / 0.9 \\
@@ -738,99 +758,65 @@ Budget & Initial / rescheduling epochs & 60 epochs / 120 epochs (two stages) \\
 \end{adjustbox}
 \end{table}
 
-\textbf{Statistical metric definitions}:
-1)~\textit{Interquartile mean (IQM)}: Arithmetic mean of the middle 50\% of scores after trimming the 25\% lowest and highest extremes.
-2)~\textit{Average relative deviation (ARD)}: For method $m$ over scenario set $\mathcal S$ ($|\mathcal S|=36$): $\mathrm{ARD}_m = \frac{1}{|\mathcal S|}\sum_{s\in\mathcal S} \frac{S_{ms}-S_s^*}{S_s^*}\times100\%$, where $S_s^*=\min_k S_{ks}$ is the best score observed among all evaluated methods in scenario $s$, rather than a theoretical optimum.
-3)~\textit{Paired rank-biserial correlation ($r_{\mathrm{rb}}$)}: Nonparametric effect size for the Wilcoxon signed-rank test: $r_{\mathrm{rb}}=(W^+-W^-)/(W^++W^-)\in[-1,1]$.
-
 \begin{thebibliography}{30}
 \bibitem{fang2021}
 S.~Fang, M.~Liu, G.~Xian, et~al., ``Aircraft moving assembly line: Pulsating and continuous,'' \textit{Aeronaut. Manuf. Technol.}, vol. 64, no. 16, pp. 40--50, 2021.
-
 \bibitem{bao2023}
 Z.~Bao, L.~Chen, and K.~Qiu, ``An aircraft final assembly line balancing problem considering resource constraints and parallel task scheduling,'' \textit{Comput. Ind. Eng.}, vol. 182, p. 109436, 2023.
-
 \bibitem{wang2024}
 D.~Wang, F.~Qiao, L.~Guan, et~al., ``Human--machine collaborative optimization method for dynamic worker allocation in aircraft final assembly lines,'' \textit{Comput. Ind. Eng.}, vol. 194, p. 110370, 2024.
-
 \bibitem{lu2019}
 Z.~Lu, Y.~Ren, L.~Wang, et~al., ``A resource investment problem based on project splitting with time windows for aircraft moving assembly line,'' \textit{Comput. Ind. Eng.}, vol. 135, pp. 568--581, 2019.
-
 \bibitem{becker2006}
 C.~Becker and A.~Scholl, ``A survey on problems and methods in generalized assembly line balancing,'' \textit{Eur. J. Oper. Res.}, vol. 168, no. 3, pp. 694--715, 2006.
-
 \bibitem{boysen2007}
 N.~Boysen, M.~Fliedner, and A.~Scholl, ``A classification of assembly line balancing problems,'' \textit{Eur. J. Oper. Res.}, vol. 183, no. 2, pp. 674--693, 2007.
-
 \bibitem{vieira2003}
 G.~E.~Vieira, J.~W.~Herrmann, and E.~Lin, ``Rescheduling manufacturing systems: A framework of strategies, policies, and methods,'' \textit{J. Sched.}, vol. 6, no. 1, pp. 39--62, 2003.
-
 \bibitem{hu2024}
 J.-H.~Hu, J.-Y.~Zhu, Y.-N.~Sun, et~al., ``Network-based two-stage robust scheduling strategy for the aircraft assembly system with uncertain duration,'' \textit{Comput. Ind. Eng.}, vol. 188, p. 109911, 2024.
-
 \bibitem{battaia2013}
 O.~Batta\"ia and A.~Dolgui, ``A taxonomy of line balancing problems and their solution approaches,'' \textit{Int. J. Prod. Econ.}, vol. 142, no. 2, pp. 259--277, 2013.
-
 \bibitem{bao2023b}
 Z.~Bao, L.~Chen, and K.~Qiu, ``A surrogate-assisted heuristic approach for the joint optimization of resource allocation and scheduling of an aircraft final assembly line,'' \textit{J. Manuf. Syst.}, vol. 70, pp. 99--112, 2023.
-
 \bibitem{fang2021flexible}
 P.~Fang, J.-J.~Yang, Y.~Jiang, et~al., ``Flexible worker allocation in aircraft final assembly line using multiobjective evolutionary algorithms,'' \textit{IEEE Trans. Ind. Informat.}, vol. 17, no. 11, pp. 7468--7478, 2021.
-
 \bibitem{liu2025}
 M.~Liu, L.~Li, X.~Liu, et~al., ``A multi-pass heuristic for multi-skilled worker scheduling in aircraft final assembly line with variable duration,'' \textit{J. Syst. Eng. Electron.}, vol. 36, no. 6, pp. 1532--1547, 2025.
-
 \bibitem{wen2026}
 X.~Wen, H.~Liu, X.~Zhang, et~al., ``A Q-learning improved particle swarm optimization for aircraft pulsating assembly line scheduling problem considering skilled operator allocation,'' \textit{Comput. Mater. Contin.}, vol. 86, no. 1, pp. 1--27, 2026.
-
 \bibitem{cappart2023}
 Q.~Cappart, D.~Ch\'etelat, E.~B.~Khalil, et~al., ``Combinatorial optimization and reasoning with graph neural networks,'' \textit{J. Mach. Learn. Res.}, vol. 24, no. 130, pp. 1--61, 2023.
-
 \bibitem{zhang2020}
 C.~Zhang, W.~Song, Z.~Cao, et~al., ``Learning to dispatch for job shop scheduling via deep reinforcement learning,'' in \textit{Adv. Neural Inf. Process. Syst. (NeurIPS)}, vol. 33, 2020, pp. 1621--1632.
-
 \bibitem{park2021}
 J.~Park, J.~Chun, S.~H.~Kim, et~al., ``Learning to schedule job-shop problems: Representation and policy learning using graph neural network and reinforcement learning,'' \textit{Int. J. Prod. Res.}, vol. 59, no. 11, pp. 3342--3359, 2021.
-
 \bibitem{wang2024flexible}
 R.~Wang, G.~Wang, J.~Sun, F.~Deng, and J.~Chen, ``Flexible job shop scheduling via dual attention network-based reinforcement learning,'' \textit{IEEE Trans. Neural Netw. Learn. Syst.}, vol. 35, no. 3, pp. 3091--3102, 2024.
-
 \bibitem{ai2025}
 J.~Ai, F.~Qiao, J.~Liu, et~al., ``A graph-enhanced deep-reinforcement learning approach for the aircraft pulse assembly line balancing problem,'' in \textit{Proc. 2025 China Autom. Congr. (CAC)}, 2025, pp. 6623--6628.
-
 \bibitem{wen2026b}
 X.~Wen, H.~Zhang, W.~Yang, et~al., ``Research on a worker skill level-aware pulsating assembly scheduling method for aircraft based on the GIN-PPO algorithm,'' \textit{Comput. Ind. Eng.}, vol. 218, p. 112135, 2026.
-
 \bibitem{vonder2007}
 S.~Van~de~Vonder, E.~Demeulemeester, and W.~Herroelen, ``A classification of predictive-reactive project scheduling procedures,'' \textit{J. Sched.}, vol. 10, no. 3, pp. 195--207, 2007.
-
 \bibitem{zhu2021}
 H.~Zhu, Z.~Lu, C.~Lu, and Y.~Ren, ``A reactive scheduling method for disturbances in aircraft moving assembly line,'' \textit{Int. J. Prod. Res.}, vol. 59, no. 15, pp. 4756--4772, 2021.
-
 \bibitem{chen2026}
 B.~Chen, J.~Zhang, X.~Luo, et~al., ``A multi-agent graph attention deep reinforcement learning method for aircraft assembly dynamic scheduling,'' \textit{Adv. Eng. Inform.}, vol. 68, p. 104565, 2026.
-
 \bibitem{brody2022}
 S.~Brody, U.~Alon, and E.~Yahav, ``How attentive are graph attention networks?'' in \textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2022.
-
 \bibitem{schulman2016}
 J.~Schulman, P.~Moritz, S.~Levine, et~al., ``High-dimensional continuous control using generalized advantage estimation,'' in \textit{Proc. Int. Conf. Learn. Represent. (ICLR)}, 2016.
-
 \bibitem{schulman2017}
 J.~Schulman, F.~Wolski, P.~Dhariwal, et~al., ``Proximal policy optimization algorithms,'' \textit{arXiv preprint arXiv:1707.06347}, 2017.
-
 \bibitem{smith1956}
 W.~E.~Smith, ``Various optimizers for single-stage production,'' \textit{Nav. Res. Logist. Q.}, vol. 3, no. 1--2, pp. 59--66, 1956.
-
 \bibitem{kelley1961}
 J.~E.~Kelley, Jr., ``Critical-path planning and scheduling: Mathematical basis,'' \textit{Oper. Res.}, vol. 9, no. 3, pp. 296--320, 1961.
-
 \bibitem{ow1988}
 P.~S.~Ow and T.~E.~Morton, ``Filtered beam search in scheduling,'' \textit{Int. J. Prod. Res.}, vol. 26, no. 1, pp. 35--62, 1988.
-
 \bibitem{ruiz2007}
 R.~Ruiz and T.~St\"utzle, ``A simple and effective iterated greedy algorithm for the permutation flowshop scheduling problem,'' \textit{Eur. J. Oper. Res.}, vol. 177, no. 3, pp. 2033--2049, 2007.
-
 \bibitem{kirkpatrick1983}
 S.~Kirkpatrick, C.~D.~Gelatt, and M.~P.~Vecchi, ``Optimization by simulated annealing,'' \textit{Science}, vol. 220, no. 4598, pp. 671--680, 1983.
 \end{thebibliography}

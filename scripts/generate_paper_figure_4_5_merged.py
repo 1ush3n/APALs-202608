@@ -158,8 +158,8 @@ def main():
             ax_b.text(c_idx, r_idx, text, ha="center", va="center", fontsize=6.8, fontweight="bold" if r_idx==0 else "normal", color=text_color, zorder=3)
 
     ax_b.set_xticks(range(n_cols))
-    ax_b.set_xticklabels(["283", "680*", "2338", "3182"], fontsize=7.2, fontweight="bold")
-    ax_b.set_xlabel("Physical Scale [Tasks]", fontsize=7.2, labelpad=2)
+    ax_b.set_xticklabels(["Medium", "Large", "Industrial-I", "Industrial-II"], fontsize=7.2, fontweight="bold")
+    ax_b.set_xlabel("Instance", fontsize=7.2, labelpad=2)
     ax_b.set_yticks(range(n_rows))
     ax_b.set_yticklabels(config_names, fontsize=6.8, fontweight="bold")
     ax_b.set_title("(b) Ablation: Relative Degradation $\\Delta J(\\%)$", fontsize=8.0, fontweight="bold", loc="left", pad=4)

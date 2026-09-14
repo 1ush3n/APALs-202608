@@ -74,10 +74,17 @@ MARKERS = {
 }
 
 INSTANCE_NAMES = {
-    "real_283": "Instance 283\n(Below Training Scale)",
-    "real_680": "Instance 680\n(Within Training Scale)",
-    "real_2338": "Instance 2338\n(Above Training Scale)",
-    "real_3182": "Instance 3182\n(Above Training Scale)",
+    "real_283": "Medium\n(283 ops)",
+    "real_680": "Large\n(680 ops)",
+    "real_2338": "Industrial-I\n(2,338 ops)",
+    "real_3182": "Industrial-II\n(3,182 ops)",
+}
+
+INSTANCE_SHORT_NAMES = {
+    "real_283": "Medium",
+    "real_680": "Large",
+    "real_2338": "Industrial-I",
+    "real_3182": "Industrial-II",
 }
 
 SEVERITY_ORDER = ["low", "medium", "high"]
@@ -86,17 +93,20 @@ STAGE_ORDER = ["early", "middle", "late"]
 
 def export_bundle(fig, base_name: str, source_df: pd.DataFrame):
     """Export PDF, SVG, PNG, and source CSV."""
-    png_path = FIGURES_DIR / f"{base_name}.png"
-    pdf_path = FIGURES_DIR / f"{base_name}.pdf"
-    svg_path = FIGURES_DIR / f"{base_name}.svg"
+    ASSETS_DIR = PROJECT_ROOT / "docs" / "APAL_HGP_PPO_Journal_Manuscript" / "04_Figures_and_Assets"
+    ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    for out_dir in [FIGURES_DIR, ASSETS_DIR]:
+        for b_name in [base_name, "fig4_reschedule_scenarios_heatmap"]:
+            png_path = out_dir / f"{b_name}.png"
+            pdf_path = out_dir / f"{b_name}.pdf"
+            svg_path = out_dir / f"{b_name}.svg"
+            fig.savefig(png_path, dpi=300, bbox_inches="tight")
+            fig.savefig(pdf_path, dpi=300, bbox_inches="tight")
+            fig.savefig(svg_path, bbox_inches="tight")
     csv_path = FIGURES_DIR / f"{base_name}_source.csv"
-
-    fig.savefig(png_path, dpi=300, bbox_inches="tight")
-    fig.savefig(pdf_path, dpi=300, bbox_inches="tight")
-    fig.savefig(svg_path, bbox_inches="tight")
     source_df.to_csv(csv_path, index=False)
 
-    print(f"[Export] Saved:\n  {png_path}\n  {pdf_path}\n  {svg_path}\n  {csv_path}")
+    print(f"[Export] Saved {base_name} and fig4_reschedule_scenarios_heatmap to {FIGURES_DIR} and {ASSETS_DIR}")
 
 
 def main():
@@ -326,7 +336,7 @@ def main():
         else:
             ax.set_yticklabels([])
 
-        ax.set_title(f"Instance {inst.split('_')[1]}", fontsize=8.8, fontweight="bold", pad=4)
+        ax.set_title(INSTANCE_SHORT_NAMES[inst], fontsize=8.8, fontweight="bold", pad=4)
 
     # Row 2: vs. StabilityAwareRepair
     for idx, inst in enumerate(INSTANCES):
