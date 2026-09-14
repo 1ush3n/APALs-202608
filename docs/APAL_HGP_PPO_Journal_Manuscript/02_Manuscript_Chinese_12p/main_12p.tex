@@ -1020,37 +1020,65 @@ PPO & 更新轮数／裁剪范围 & 2／0.20 线性衰减至 0.10 \\
 重调度统计以 36 个场景的逐场景配对结果为输入。综合分先按场景所属实例的 \(T_{\mathrm{ref}}^0\) 归一化，再进行实例内和跨实例等权汇总；Friedman 检验纳入 19 种在全部场景中合法的方法，成对 Wilcoxon 检验对 18 个基线进行 Holm--Bonferroni 校正，分层 Bootstrap 使用 10,000 次实例内配对重采样。逐场景结果矩阵、五个原始分项、统计脚本和统计总账作为独立审计材料保存。
 
 \begin{thebibliography}{99}
-\small
-\bibitem{ai2025} J. Ai, F. Qiao, J. Liu, \emph{et al.}, ``A graph-enhanced deep-reinforcement learning approach for the aircraft pulse assembly line balancing problem,'' in \emph{Proc. 2025 China Automation Congress (CAC)}, 2025, pp. 6623--6628.
-\bibitem{bao2023afal} Z. Bao, L. Chen, and K. Qiu, ``An aircraft final assembly line balancing problem considering resource constraints and parallel task scheduling,'' \emph{Computers \& Industrial Engineering}, vol. 182, Art. no. 109436, 2023.
-\bibitem{bao2023jms} Z. Bao, L. Chen, and K. Qiu, ``A surrogate-assisted heuristic approach for the joint optimization of resource allocation and scheduling of an aircraft final assembly line,'' \emph{Journal of Manufacturing Systems}, vol. 70, pp. 99--112, 2023.
-\bibitem{battaia2013} O. Battaïa and A. Dolgui, ``A taxonomy of line balancing problems and their solution approaches,'' \emph{International Journal of Production Economics}, vol. 142, no. 2, pp. 259--277, 2013.
-\bibitem{becker2006} C. Becker and A. Scholl, ``A survey on problems and methods in generalized assembly line balancing,'' \emph{European Journal of Operational Research}, vol. 168, no. 3, pp. 694--715, 2006.
-\bibitem{boysen2007} N. Boysen, M. Fliedner, and A. Scholl, ``A classification of assembly line balancing problems,'' \emph{European Journal of Operational Research}, vol. 183, no. 2, pp. 674--693, 2007.
-\bibitem{brody2022} S. Brody, U. Alon, and E. Yahav, ``How attentive are graph attention networks?'' in \emph{International Conference on Learning Representations (ICLR)}, 2022.
-\bibitem{cappart2023} Q. Cappart, D. Chételat, E. B. Khalil, A. Lodi, C. Morris, and P. Veličković, ``Combinatorial optimization and reasoning with graph neural networks,'' \emph{Journal of Machine Learning Research}, vol. 24, no. 130, pp. 1--61, 2023.
-\bibitem{chen2026} B. Chen, J. Zhang, X. Luo, and S. Jiang, ``A multi-agent graph attention deep reinforcement learning method for aircraft assembly dynamic scheduling,'' \emph{Advanced Engineering Informatics}, vol. 68, Art. no. 104565, 2026.
-\bibitem{fangp2021} P. Fang, J.-J. Yang, Y. Jiang, and Q. Liao, ``Flexible worker allocation in aircraft final assembly line using multiobjective evolutionary algorithms,'' \emph{IEEE Transactions on Industrial Informatics}, vol. 17, no. 11, pp. 7468--7478, 2021.
 \bibitem{fangs2021} S. Fang, M. Liu, G. Xian, Y. Qin, and Y. Tian, ``Aircraft moving assembly line: Pulsating and continuous,'' \emph{Aeronautical Manufacturing Technology}, vol. 64, no. 16, pp. 40--50, 2021.
-\bibitem{hu2024} J.-H. Hu, J.-Y. Zhu, Y.-N. Sun, Y. Chen, and W. Qin, ``Network-based two-stage robust scheduling strategy for the aircraft assembly system with uncertain duration,'' \emph{Computers \& Industrial Engineering}, vol. 188, Art. no. 109911, 2024.
-\bibitem{kelley1961} J. E. Kelley, Jr., ``Critical-path planning and scheduling: Mathematical basis,'' \emph{Operations Research}, vol. 9, no. 3, pp. 296--320, 1961.
-\bibitem{kirkpatrick1983} S. Kirkpatrick, C. D. Gelatt, and M. P. Vecchi, ``Optimization by simulated annealing,'' \emph{Science}, vol. 220, no. 4598, pp. 671--680, 1983.
-\bibitem{liu2025} M. Liu, L. Li, X. Liu, and E. Pan, ``A multi-pass heuristic for multi-skilled worker scheduling in aircraft final assembly line with variable duration,'' \emph{Journal of Systems Engineering and Electronics}, vol. 36, no. 6, pp. 1532--1547, 2025.
-\bibitem{lu2019} Z. Lu, Y. Ren, L. Wang, and H. Zhu, ``A resource investment problem based on project splitting with time windows for aircraft moving assembly line,'' \emph{Computers \& Industrial Engineering}, vol. 135, pp. 568--581, 2019.
-\bibitem{ow1988} P. S. Ow and T. E. Morton, ``Filtered beam search in scheduling,'' \emph{International Journal of Production Research}, vol. 26, no. 1, pp. 35--62, 1988.
-\bibitem{park2021} J. Park, J. Chun, S. H. Kim, Y. Choi, and J. Park, ``Learning to schedule job-shop problems: Representation and policy learning using graph neural network and reinforcement learning,'' \emph{International Journal of Production Research}, vol. 59, no. 11, pp. 3342--3359, 2021.
-\bibitem{ruiz2007} R. Ruiz and T. Stützle, ``A simple and effective iterated greedy algorithm for the permutation flowshop scheduling problem,'' \emph{European Journal of Operational Research}, vol. 177, no. 3, pp. 2033--2049, 2007.
-\bibitem{schulman2016} J. Schulman, P. Moritz, S. Levine, M. Jordan, and P. Abbeel, ``High-dimensional continuous control using generalized advantage estimation,'' in \emph{International Conference on Learning Representations (ICLR)}, 2016.
-\bibitem{schulman2017} J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, ``Proximal policy optimization algorithms,'' \emph{arXiv preprint arXiv:1707.06347}, 2017.
-\bibitem{smith1956} W. E. Smith, ``Various optimizers for single-stage production,'' \emph{Naval Research Logistics Quarterly}, vol. 3, no. 1--2, pp. 59--66, 1956.
-\bibitem{vandeVonder2007} S. Van de Vonder, E. Demeulemeester, and W. Herroelen, ``A classification of predictive-reactive project scheduling procedures,'' \emph{Journal of Scheduling}, vol. 10, no. 3, pp. 195--207, 2007.
-\bibitem{vieira2003} G. E. Vieira, J. W. Herrmann, and E. Lin, ``Rescheduling manufacturing systems: A framework of strategies, policies, and methods,'' \emph{Journal of Scheduling}, vol. 6, no. 1, pp. 39--62, 2003.
+
+\bibitem{bao2023afal} Z. Bao, L. Chen, and K. Qiu, ``An aircraft final assembly line balancing problem considering resource constraints and parallel task scheduling,'' \emph{Computers \& Industrial Engineering}, vol. 182, Art. no. 109436, 2023.
+
 \bibitem{wangd2024} D. Wang, F. Qiao, L. Guan, J. Liu, C. Ding, and J. Shi, ``Human--machine collaborative optimization method for dynamic worker allocation in aircraft final assembly lines,'' \emph{Computers \& Industrial Engineering}, vol. 194, Art. no. 110370, 2024.
-\bibitem{wangr2024} R. Wang, G. Wang, J. Sun, F. Deng, and J. Chen, ``Flexible job shop scheduling via dual attention network-based reinforcement learning,'' \emph{IEEE Transactions on Neural Networks and Learning Systems}, vol. 35, no. 3, pp. 3091--3102, 2024.
+
+\bibitem{lu2019} Z. Lu, Y. Ren, L. Wang, and H. Zhu, ``A resource investment problem based on project splitting with time windows for aircraft moving assembly line,'' \emph{Computers \& Industrial Engineering}, vol. 135, pp. 568--581, 2019.
+
+\bibitem{becker2006} C. Becker and A. Scholl, ``A survey on problems and methods in generalized assembly line balancing,'' \emph{European Journal of Operational Research}, vol. 168, no. 3, pp. 694--715, 2006.
+
+\bibitem{boysen2007} N. Boysen, M. Fliedner, and A. Scholl, ``A classification of assembly line balancing problems,'' \emph{European Journal of Operational Research}, vol. 183, no. 2, pp. 674--693, 2007.
+
+\bibitem{vieira2003} G. E. Vieira, J. W. Herrmann, and E. Lin, ``Rescheduling manufacturing systems: A framework of strategies, policies, and methods,'' \emph{Journal of Scheduling}, vol. 6, no. 1, pp. 39--62, 2003.
+
+\bibitem{hu2024} J.-H. Hu, J.-Y. Zhu, Y.-N. Sun, Y. Chen, and W. Qin, ``Network-based two-stage robust scheduling strategy for the aircraft assembly system with uncertain duration,'' \emph{Computers \& Industrial Engineering}, vol. 188, Art. no. 109911, 2024.
+
+\bibitem{battaia2013} O. Battaïa and A. Dolgui, ``A taxonomy of line balancing problems and their solution approaches,'' \emph{International Journal of Production Economics}, vol. 142, no. 2, pp. 259--277, 2013.
+
+\bibitem{bao2023jms} Z. Bao, L. Chen, and K. Qiu, ``A surrogate-assisted heuristic approach for the joint optimization of resource allocation and scheduling of an aircraft final assembly line,'' \emph{Journal of Manufacturing Systems}, vol. 70, pp. 99--112, 2023.
+
+\bibitem{fangp2021} P. Fang, J.-J. Yang, Y. Jiang, and Q. Liao, ``Flexible worker allocation in aircraft final assembly line using multiobjective evolutionary algorithms,'' \emph{IEEE Transactions on Industrial Informatics}, vol. 17, no. 11, pp. 7468--7478, 2021.
+
+\bibitem{liu2025} M. Liu, L. Li, X. Liu, and E. Pan, ``A multi-pass heuristic for multi-skilled worker scheduling in aircraft final assembly line with variable duration,'' \emph{Journal of Systems Engineering and Electronics}, vol. 36, no. 6, pp. 1532--1547, 2025.
+
 \bibitem{wen2026qlpso} X. Wen, H. Liu, X. Zhang, \emph{et al.}, ``A Q-learning improved particle swarm optimization for aircraft pulsating assembly line scheduling problem considering skilled operator allocation,'' \emph{Computers, Materials \& Continua}, vol. 86, no. 1, pp. 1--27, 2026.
-\bibitem{wen2026ginppo} X. Wen, H. Zhang, W. Yang, H. Li, H. Wang, H. Xing, and S. Liu, ``Research on a worker skill level-aware pulsating assembly scheduling method for aircraft based on the GIN-PPO algorithm,'' \emph{Computers \& Industrial Engineering}, vol. 218, Art. no. 112135, 2026.
+
+\bibitem{cappart2023} Q. Cappart, D. Chételat, E. B. Khalil, A. Lodi, C. Morris, and P. Veličković, ``Combinatorial optimization and reasoning with graph neural networks,'' \emph{Journal of Machine Learning Research}, vol. 24, no. 130, pp. 1--61, 2023.
+
 \bibitem{zhang2020} C. Zhang, W. Song, Z. Cao, J. Zhang, P. S. Tan, and X. Chi, ``Learning to dispatch for job shop scheduling via deep reinforcement learning,'' in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, vol. 33, 2020, pp. 1621--1632.
+
+\bibitem{park2021} J. Park, J. Chun, S. H. Kim, Y. Choi, and J. Park, ``Learning to schedule job-shop problems: Representation and policy learning using graph neural network and reinforcement learning,'' \emph{International Journal of Production Research}, vol. 59, no. 11, pp. 3342--3359, 2021.
+
+\bibitem{wangr2024} R. Wang, G. Wang, J. Sun, F. Deng, and J. Chen, ``Flexible job shop scheduling via dual attention network-based reinforcement learning,'' \emph{IEEE Transactions on Neural Networks and Learning Systems}, vol. 35, no. 3, pp. 3091--3102, 2024.
+
+\bibitem{ai2025} J. Ai, F. Qiao, J. Liu, \emph{et al.}, ``A graph-enhanced deep-reinforcement learning approach for the aircraft pulse assembly line balancing problem,'' in \emph{Proc. 2025 China Automation Congress (CAC)}, 2025, pp. 6623--6628.
+
+\bibitem{wen2026ginppo} X. Wen, H. Zhang, W. Yang, H. Li, H. Wang, H. Xing, and S. Liu, ``Research on a worker skill level-aware pulsating assembly scheduling method for aircraft based on the GIN-PPO algorithm,'' \emph{Computers \& Industrial Engineering}, vol. 218, Art. no. 112135, 2026.
+
+\bibitem{vandeVonder2007} S. Van de Vonder, E. Demeulemeester, and W. Herroelen, ``A classification of predictive-reactive project scheduling procedures,'' \emph{Journal of Scheduling}, vol. 10, no. 3, pp. 195--207, 2007.
+
 \bibitem{zhu2021} H. Zhu, Z. Lu, C. Lu, and Y. Ren, ``A reactive scheduling method for disturbances in aircraft moving assembly line,'' \emph{International Journal of Production Research}, vol. 59, no. 15, pp. 4756--4772, 2021.
+
+\bibitem{chen2026} B. Chen, J. Zhang, X. Luo, and S. Jiang, ``A multi-agent graph attention deep reinforcement learning method for aircraft assembly dynamic scheduling,'' \emph{Advanced Engineering Informatics}, vol. 68, Art. no. 104565, 2026.
+
+\bibitem{brody2022} S. Brody, U. Alon, and E. Yahav, ``How attentive are graph attention networks?'' in \emph{International Conference on Learning Representations (ICLR)}, 2022.
+
+\bibitem{schulman2017} J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, ``Proximal policy optimization algorithms,'' \emph{arXiv preprint arXiv:1707.06347}, 2017.
+
+\bibitem{schulman2016} J. Schulman, P. Moritz, S. Levine, M. Jordan, and P. Abbeel, ``High-dimensional continuous control using generalized advantage estimation,'' in \emph{International Conference on Learning Representations (ICLR)}, 2016.
+
+\bibitem{smith1956} W. E. Smith, ``Various optimizers for single-stage production,'' \emph{Naval Research Logistics Quarterly}, vol. 3, no. 1--2, pp. 59--66, 1956.
+
+\bibitem{kelley1961} J. E. Kelley, Jr., ``Critical-path planning and scheduling: Mathematical basis,'' \emph{Operations Research}, vol. 9, no. 3, pp. 296--320, 1961.
+
+\bibitem{ow1988} P. S. Ow and T. E. Morton, ``Filtered beam search in scheduling,'' \emph{International Journal of Production Research}, vol. 26, no. 1, pp. 35--62, 1988.
+
+\bibitem{ruiz2007} R. Ruiz and T. Stützle, ``A simple and effective iterated greedy algorithm for the permutation flowshop scheduling problem,'' \emph{European Journal of Operational Research}, vol. 177, no. 3, pp. 2033--2049, 2007.
+
+\bibitem{kirkpatrick1983} S. Kirkpatrick, C. D. Gelatt, and M. P. Vecchi, ``Optimization by simulated annealing,'' \emph{Science}, vol. 220, no. 4598, pp. 671--680, 1983.
 \end{thebibliography}
 
 \end{document}
