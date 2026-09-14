@@ -10,9 +10,9 @@
 
 | 文件名 | 格式 / 规范 | 篇幅 | 建议阅读方式 |
 |:---|:---|:---:|:---|
-| **[`APAL_Joint_Scheduling_TSMC_10p_English.pdf`](file:///d:/APAL-Dynamic-v4/docs/APAL_HGP_PPO_Journal_Manuscript/00_Advisor_Review_Package/APAL_Joint_Scheduling_TSMC_10p_English.pdf)** | **IEEE TSMC 官方标准模板**（双栏 10pt，Times New Roman） | **10 页**（标准篇幅） | **【主推投审版】** 包含完整的英文长摘要、全彩架构图表与 30 篇 IEEE 规范参考文献，零溢出、零多余空白 |
-| **[`APAL_脉动装配线联合调度_12页精简版_Chinese.pdf`](file:///d:/APAL-Dynamic-v4/docs/APAL_HGP_PPO_Journal_Manuscript/00_Advisor_Review_Package/APAL_脉动装配线联合调度_12页精简版_Chinese.pdf)** | 中文 IEEEtran 适配模板（双栏 10pt） | **12 页**（精炼版） | **【中文速读版】** 结构与英文版完全 1:1 镜像，便于快速把握段落论证与公式逻辑 |
-| **[`论文简明大纲_导师审阅版_v2.md`](file:///d:/APAL-Dynamic-v4/docs/APAL_HGP_PPO_Journal_Manuscript/00_Advisor_Review_Package/论文简明大纲_导师审阅版_v2.md)** | Markdown 大纲报告 | — | **【快速汇报大纲】** 提炼了核心贡献、关键公式定义、实验对比数据与审稿常见问题应对策略 |
+| **[`APAL_Joint_Scheduling_Review_11p_English.pdf`](file:///d:/APAL-Dynamic-v4/docs/APAL_HGP_PPO_Journal_Manuscript/00_Advisor_Review_Package/APAL_Joint_Scheduling_Review_11p_English.pdf)** | IEEE 标准双栏模板（双栏 10pt，大图清晰版） | **11 页**（自然篇幅） | **【主推投审版】** 恢复自然大图尺寸与跨双栏表格，零溢出，图表清晰度极佳，页眉已改为通用审阅格式 |
+| **[`APAL_脉动装配线联合调度_12页精简版_Chinese.pdf`](file:///d:/APAL-Dynamic-v4/docs/APAL_HGP_PPO_Journal_Manuscript/00_Advisor_Review_Package/APAL_脉动装配线联合调度_12页精简版_Chinese.pdf)** | 中文 IEEEtran 适配模板（双栏 10pt） | **12 页**（精炼版） | **【中文速读版】** 便于快速把握段落论证与公式逻辑，已移除特定期刊标注 |
+| **[`论文简明大纲_导师审阅版_v2.md`](file:///d:/APAL-Dynamic-v4/docs/APAL_HGP_PPO_Journal_Manuscript/00_Advisor_Review_Package/论文简明大纲_导师审阅版_v2.md)** | Markdown 大纲报告（定稿精炼版） | — | **【快速汇报大纲】** 提炼研究痛点、逻辑主线、四大核心创新点、各章精炼大纲、真实实验证据与导师把关议题 |
 
 ---
 
