@@ -599,8 +599,8 @@ Table~\ref{tab:paired_stats} reports paired statistics against the two closest b
 
 \begin{figure*}[!t]
 \centering
-\includegraphics[width=0.90\textwidth,height=0.175\textheight,keepaspectratio]{figures/fig4_reschedule_scenarios_heatmap.png}
-\caption{Paired-difference heatmaps for 36 template rescheduling scenarios under dynamic material delays and instance-level mean recovery scores. (a) Composite recovery scores $S$ for the four physical instance sizes and their equal-weight mean; lower is better. (b) Symmetric diverging heatmaps of paired score differences $d=S_{\mathrm{HGP}}-S_{\mathrm{Baseline}}$ between the proposed method and L2D-PPO-APAL or StabilityAwareRepair across 36 disturbance scenarios (four instances $\times$ three delay levels $\times$ three freeze timings). Blue indicates an advantage for the proposed method, and red indicates an advantage for the baseline. Win / Tie / Loss badges at the top summarize the pairwise comparisons.}
+\includegraphics[width=\textwidth,height=0.22\textheight,keepaspectratio]{figures/fig4_reschedule_scenarios_heatmap.pdf}
+\caption{Paired-difference heatmaps for 36 template rescheduling scenarios under dynamic material delays and instance-level mean recovery scores. (a) Composite recovery scores $S$ for the four physical instance sizes and their equal-weight mean; lower is better. (b) Symmetric diverging heatmaps of paired score differences $d=S_{\mathrm{HGP}}-S_{\mathrm{Baseline}}$ between the proposed method and L2D-PPO-APAL or StabilityAwareRepair across 36 disturbance scenarios (four instances $\times$ three delay levels $\times$ three freeze timings). Blue indicates an advantage for the proposed method, and red indicates an advantage for the baseline. Win / Tie / Loss badges on the right margin summarize the pairwise comparisons.}
 \label{fig:4}
 \end{figure*}
 
@@ -648,14 +648,11 @@ This paper has presented HGP-PPO, a heterogeneous graph reinforcement learning f
 \section{Worker Pointer Architecture and Dynamic Features}\label{app:worker_pointer}
 
 \textbf{Network layers and partial-team pooling}:
-For the selected member sequence $\mathbf w_t^{(<r)}$, each member is projected via $\mathbf m_v = \mathbf W_{\mathrm{mem}}\mathbf h_v$. To achieve strict permutation invariance, partial-team state $\mathbf h_{\mathrm{team},t}^{(r)}$ is formed by symmetric Sum, Mean, and Max pooling:
+For the selected member sequence $\mathbf w_t^{(<r)}$, each member is projected via $\mathbf m_v = \mathbf W_{\mathrm{mem}}\mathbf h_v$. To achieve strict permutation invariance, symmetric Sum, Mean, and Max pooling vectors are computed: $\mathbf p_{\mathrm{sum},t}^{(r)} = \sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v$, $\mathbf p_{\mathrm{mean},t}^{(r)} = \frac{1}{\max(1, r-1)}\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v$, and $\mathbf p_{\mathrm{max},t}^{(r)} = \max_{v\in \mathbf w_t^{(<r)}} \mathbf m_v$. Partial-team state $\mathbf h_{\mathrm{team},t}^{(r)}$ is then formed by:
 \begin{equation}
-\begin{aligned}
-\mathbf h_{\mathrm{team},t}^{(r)} = \operatorname{LeakyReLU}\Big(\mathbf W_{\mathrm{team}} \Big[ &\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \,\Big\|\, \frac{1}{\max(1, r-1)}\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \\
-&\Big\|\, \max_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \Big]\Big).
-\end{aligned}
+\mathbf h_{\mathrm{team},t}^{(r)} = \operatorname{LeakyReLU}\left( \mathbf W_{\mathrm{team}} \left[ \mathbf p_{\mathrm{sum},t}^{(r)} \,\|\, \mathbf p_{\mathrm{mean},t}^{(r)} \,\|\, \mathbf p_{\mathrm{max},t}^{(r)} \right] \right).
 \end{equation}
-For the initial member selection sub-step ($r=1$ where $\mathbf w_t^{(<1)}=\emptyset$), Sum, Mean, and Max pooling outputs are defined as zero vectors $\mathbf 0\in\mathbb R^d$, reducing the partial-team state to $\mathbf h_{\mathrm{team},t}^{(1)}=\mathbf 0$.
+For the initial member selection sub-step ($r=1$ where $\mathbf w_t^{(<1)}=\emptyset$), the pooling outputs are defined as zero vectors $\mathbf 0\in\mathbb R^d$, reducing the partial-team state to $\mathbf h_{\mathrm{team},t}^{(1)}=\mathbf 0$.
 
 Query $\mathbf q_t^{(r)}$ projects the concatenation of operation embedding, station embedding, global context, team state, macro pressure, skill consumption ratio, and selection progress:
 \begin{equation}
@@ -694,15 +691,19 @@ with team synergy discount $\rho=0.95$. Across feasible candidate set $\mathcal 
 When $|\mathcal F_{W,t}^{(r)}|=1$, the standard deviation is zero, and denominator clamp $10^{-6}$ ensures numerical safety.
 
 \textbf{Marginal skill scarcity}:
-Candidate worker $w$'s marginal skill scarcity is:
+Define the skill pressure function as:
 \begin{equation}
-\begin{aligned}
-\mu_{w,t}^{(r)} = \sum_{k\in\mathcal K} H_{wk}(1-R_{i_tk}) \Bigg[
-&\log\!\left(1 + \frac{D_{k,t}^{\mathrm{all}}}{\max(S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)}-H_{wk},\varepsilon_s)}\right) \\
-&- \log\!\left(1 + \frac{D_{k,t}^{\mathrm{all}}}{\max(S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)},\varepsilon_s)}\right) \Bigg]_+,
-\end{aligned}
+P_{k,t}^{(r)}(x) = \log\!\left( 1+ \frac{D_{k,t}^{\mathrm{all}}} {\max\!\left( S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)}-x,\, \varepsilon_s \right)} \right),
 \end{equation}
-where $C_{k,t}^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} H_{vk}$ is the cumulative committed skill $k$ headcount across the prior $r-1$ sub-steps. The factor $(1-R_{i_tk})$ excludes skills required by operation $i_t$, quantifying the additional pressure on unrequired skill capacity and mitigating misallocation of multi-skilled workers on simple operations.
+and the marginal pressure increment as:
+\begin{equation}
+\Delta P_{k,t}^{(r)}(w) = P_{k,t}^{(r)}(H_{wk}) - P_{k,t}^{(r)}(0).
+\end{equation}
+Candidate worker $w$'s marginal skill scarcity is then:
+\begin{equation}
+\mu_{w,t}^{(r)} = \sum_{k\in\mathcal K} H_{wk}(1-R_{i_tk}) \max\!\left( 0,\, \Delta P_{k,t}^{(r)}(w) \right),
+\end{equation}
+where $C_{k,t}^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} H_{vk}$ is the committed skill $k$ headcount across prior $r-1$ sub-steps. The factor $(1-R_{i_tk})$ excludes skills required by operation $i_t$, penalizing unrequired skill capacity drain and mitigating multiskilled worker misallocation.
 
 \section{Reproducibility Configuration and Metric Definitions}\label{app:reproducibility}
 

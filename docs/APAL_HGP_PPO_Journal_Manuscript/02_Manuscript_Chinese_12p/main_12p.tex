@@ -610,9 +610,9 @@ StabilityAwareRepair & −0.0265 & 3.01\% & 22／0／14 & 0.5498 & −0.210 & [�
 
 \begin{figure*}[!t]
 \centering
-\includegraphics[width=\textwidth,height=0.26\textheight,keepaspectratio]{figures/fig4_reschedule_scenarios_heatmap.png}
+\includegraphics[width=\textwidth,height=0.25\textheight,keepaspectratio]{figures/fig4_reschedule_scenarios_heatmap.pdf}
 \vspace{2pt}
-\parbox{\textwidth}{\footnotesize \textbf{图 4　动态物料延误下模板重调度 36 场景配对差值热图与实例级恢复均值点图。} (a) Medium、Large、Industrial-I 与 Industrial-II 四个物理规模实例及四实例等权平均下的综合恢复得分 $S$（越小越好）；(b) 本文方法相对于 L2D-PPO-APAL 和 StabilityAwareRepair 在 36 个扰动场景上的配对得分差值 $d = S_{\mathrm{HGP}} - S_{\mathrm{Baseline}}$ 对称发散热图（蓝色表示本文方法占优，红色表示基准占优），顶部标明两两比较的胜／平／负统计徽章。}
+\parbox{\textwidth}{\footnotesize \textbf{图 4　动态物料延误下模板重调度 36 场景配对差值热图与实例级恢复均值点图。} (a) Medium、Large、Industrial-I 与 Industrial-II 四个物理规模实例及四实例等权平均下的综合恢复得分 $S$（越小越好）；(b) 本文方法相对于 L2D-PPO-APAL 和 StabilityAwareRepair 在 36 个扰动场景上的配对得分差值 $d = S_{\mathrm{HGP}} - S_{\mathrm{Baseline}}$ 对称发散热图（蓝色表示本文方法占优，红色表示基准占优），右侧标明两两比较的胜／平／负统计徽章。}
 \end{figure*}
 
 \begin{table}[!t]
@@ -657,15 +657,11 @@ Simulated\allowbreak{}Annealing\allowbreak{}Repair & 292.42 & 676.78 & 3445.39 &
 
 \section{Worker Pointer 架构、团队状态与候选动态特征}\label{app:worker_pointer}
 
-\textbf{网络结构与部分团队表示。} 对已选成员序列 $\mathbf w_t^{(<r)}$，每个入选工人先由线性层投影为 $\mathbf m_v = \mathbf W_{\mathrm{mem}}\mathbf h_v$。为保证置换不变性，部分团队状态采用 Sum、Mean 与 Max 三路池化特征拼接融合：
+\textbf{网络结构与部分团队表示。} 对已选成员序列 $\mathbf w_t^{(<r)}$，每个入选工人先由线性层投影为 $\mathbf m_v = \mathbf W_{\mathrm{mem}}\mathbf h_v$。为保证严格置换不变性，提取对称的 Sum、Mean 与 Max 三路池化特征：$\mathbf p_{\mathrm{sum},t}^{(r)} = \sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v$、$\mathbf p_{\mathrm{mean},t}^{(r)} = \frac{1}{\max(1, r-1)}\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v$ 以及 $\mathbf p_{\mathrm{max},t}^{(r)} = \max_{v\in \mathbf w_t^{(<r)}} \mathbf m_v$。部分团队状态特征 $\mathbf h_{\mathrm{team},t}^{(r)}$ 形成如下：
 \begin{equation}
-\begin{aligned}
-\mathbf h_{\mathrm{team},t}^{(r)} = \operatorname{LeakyReLU}\Big(\mathbf W_{\mathrm{team}} \Big[ &\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \\
-&\Big\|\, \frac{1}{\max(1, r-1)}\sum_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \\
-&\Big\|\, \max_{v\in \mathbf w_t^{(<r)}} \mathbf m_v \Big]\Big).
-\end{aligned}
+\mathbf h_{\mathrm{team},t}^{(r)} = \operatorname{LeakyReLU}\left( \mathbf W_{\mathrm{team}} \left[ \mathbf p_{\mathrm{sum},t}^{(r)} \,\|\, \mathbf p_{\mathrm{mean},t}^{(r)} \,\|\, \mathbf p_{\mathrm{max},t}^{(r)} \right] \right).
 \end{equation}
-对于首个成员选择步（$r=1$ 且 $\mathbf w_t^{(<1)}=\emptyset$），约定池化结果为零向量 $\mathbf 0\in\mathbb R^d$，退化为零嵌入 $\mathbf h_{\mathrm{team},t}^{(1)}=\mathbf 0$。
+对于首个成员选择步（$r=1$ 且 $\mathbf w_t^{(<1)}=\emptyset$），约定三路池化结果为零向量 $\mathbf 0\in\mathbb R^d$，退化为零嵌入 $\mathbf h_{\mathrm{team},t}^{(1)}=\mathbf 0$。
 
 查询向量 $\mathbf q_t^{(r)}$ 拼接工序、站位、全局上下文、团队状态、宏观压力、技能消耗比及选人进度后投影：
 \begin{equation}
@@ -706,15 +702,19 @@ P_{k,t}^{h} &= \log\!\left( 1+\frac{D_{k,t}^{h}}{\max(S_{k,t}^{h},\varepsilon_s)
 \end{bmatrix}.
 \end{align}
 
-\textbf{额外技能边际稀缺度。} 候选工人 $w$ 的额外技能边际稀缺度定义为：
+\textbf{额外技能边际稀缺度。} 先定义技能压力函数为：
 \begin{equation}
-\begin{aligned}
-\mu_{w,t}^{(r)} = \sum_{k\in\mathcal K} H_{wk}&(1-R_{i_tk}) \Bigg[ \\
-&\log\!\left(1 + \frac{D_{k,t}^{\mathrm{all}}}{\max(S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)}-H_{wk},\varepsilon_s)}\right) \\
-&- \log\!\left(1 + \frac{D_{k,t}^{\mathrm{all}}}{\max(S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)},\varepsilon_s)}\right) \Bigg]_+.
-\end{aligned}
+P_{k,t}^{(r)}(x) = \log\!\left( 1+ \frac{D_{k,t}^{\mathrm{all}}} {\max\!\left( S_{k,t}^{\mathrm{all}}-C_{k,t}^{(r)}-x,\, \varepsilon_s \right)} \right).
 \end{equation}
-因子 $1-R_{i_tk}$ 排除当前工序所需技能，衡量占用该工人附带其他技能的边际压力增量。
+再定义候选工人 $w$ 的技能边际压力增量为：
+\begin{equation}
+\Delta P_{k,t}^{(r)}(w) = P_{k,t}^{(r)}(H_{wk}) - P_{k,t}^{(r)}(0).
+\end{equation}
+最终候选工人 $w$ 的额外技能边际稀缺度为：
+\begin{equation}
+\mu_{w,t}^{(r)} = \sum_{k\in\mathcal K} H_{wk}(1-R_{i_tk}) \max\!\left( 0,\, \Delta P_{k,t}^{(r)}(w) \right),
+\end{equation}
+其中 $C_{k,t}^{(r)} = \sum_{v\in\mathbf w_t^{(<r)}} H_{vk}$ 为前 $r-1$ 个子步已选团队成员对技能 $k$ 的已承诺占用人头数。因子 $1-R_{i_tk}$ 排除当前工序所需技能，衡量占用该工人附带其他技能的边际压力增量。
 
 \section{实验复现与统计审计配置}\label{app:reproducibility}
 
