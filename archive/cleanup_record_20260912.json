@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-09-12 15:58:11",
+  "dry_run": false,
+  "actions": [
+    {
+      "group": "runs_smoke",
+      "type": "archive_and_delete",
+      "count": 2,
+      "orig_size": 254351823,
+      "archive": "runs_smoke_backup_20260912.zip"
+    },
+    {
+      "group": "_docx_work",
+      "type": "archive_and_delete",
+      "orig_size": 228206,
+      "archive": "docx_work_backup_20260912.zip"
+    },
+    {
+      "group": "90_legacy_and_smoke",
+      "type": "archive_and_delete",
+      "orig_size": 4966770139,
+      "archive": "root_artifacts_20260717.7z + legacy_smoke_results_pre20260815.zip"
+    },
+    {
+      "group": "transient_caches",
+      "type": "direct_delete",
+      "cache_files_count": 306,
+      "orig_size": 7305538
+    }
+  ],
+  "freed_bytes_estimated": 5228655706,
+  "archives_created": [
+    "archive\\runs_smoke_backup_20260912.zip",
+    "archive\\docx_work_backup_20260912.zip",
+    "archive\\root_artifacts_20260717.7z",
+    "archive\\legacy_smoke_results_pre20260815.zip"
+  ],
+  "elapsed_seconds": 211.55,
+  "freed_human": "4.87 GB"
+}
