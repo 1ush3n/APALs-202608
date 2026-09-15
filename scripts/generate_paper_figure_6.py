@@ -201,205 +201,177 @@ def main():
     norm = TwoSlopeNorm(vmin=-norm_limit, vcenter=0.0, vmax=norm_limit)
 
     # -------------------------------------------------------------------------
-    # Layout Construction
+    # Layout Construction (Scheme B: Left-Right Dual Block, Aspect Ratio ~2.7:1)
     # -------------------------------------------------------------------------
-    fig = plt.figure(figsize=(13.2, 9.6))
-
-    # Outer layout:
-    # 0: Section (a) title
-    # 1: Section (a) panels
-    # 2: Section (b) title
-    # 3: Section (b) heatmaps
-    outer_gs = gridspec.GridSpec(
-        4, 1,
-        height_ratios=[0.05, 0.28, 0.05, 0.62],
-        hspace=0.22,
-        top=0.96, bottom=0.06, left=0.07, right=0.88
-    )
-
-    # -------------------------------------------------------------------------
-    # SECTION (A) TITLE
-    # -------------------------------------------------------------------------
-    ax_title_a = fig.add_subplot(outer_gs[0])
-    ax_title_a.axis("off")
-    ax_title_a.text(
-        0.0, 0.5,
-        "(a) Instance-Level and Overall Mean Composite Score S (Lower is Better; Shaded Bar = 4-Instance Equal-Weighted)",
-        fontsize=10.5, fontweight="bold", ha="left", va="center"
-    )
-
-    # -------------------------------------------------------------------------
-    # SECTION (A) PANELS
-    # -------------------------------------------------------------------------
-    part_a_gs = gridspec.GridSpecFromSubplotSpec(
-        1, 5,
-        subplot_spec=outer_gs[1],
-        wspace=0.25,
-        width_ratios=[1, 1, 1, 1, 1.15]
-    )
-
+    fig = plt.figure(figsize=(14.8, 5.5))
     methods_order = ["StabilityAware", "L2D-PPO", "HGP-PPO"]
-    y_pos = [0, 1, 2]
+
+    # Left: 31% width for (a) Consolidated Instance & Overall Mean Plot
+    # Right: 69% width for (b) 2x4 Heatmaps + Badges + Colorbar
+    gs_main = gridspec.GridSpec(
+        1, 2,
+        width_ratios=[0.31, 0.69],
+        wspace=0.18,
+        top=0.92, bottom=0.10, left=0.06, right=0.90
+    )
+
+    # =========================================================================
+    # LEFT PANEL: (a) Consolidated Mean Plot across 4 Scales + Overall Mean
+    # =========================================================================
+    ax_left = fig.add_subplot(gs_main[0])
+    y_labels = [
+        "Medium\n(283 ops)",
+        "Large\n(680 ops)",
+        "Industrial-I\n(2,338 ops)",
+        "Industrial-II\n(3,182 ops)",
+        "Overall Mean\n(4-Instance Equal)",
+    ]
+    y_positions = [0, 1, 2, 3, 4.3]
+
+    # Shaded background highlight for Overall Mean
+    ax_left.axhspan(3.65, 4.95, facecolor="#F0F7FB", alpha=0.85, zorder=0)
 
     for idx, inst in enumerate(INSTANCES):
-        ax = fig.add_subplot(part_a_gs[idx])
-        for y_idx, m in enumerate(methods_order):
+        y = y_positions[idx]
+        vals = [inst_means[m][inst] for m in methods_order]
+        ax_left.plot([min(vals), max(vals)], [y, y], color="#DCDCDC", lw=2.0, zorder=1)
+        for m in methods_order:
             val = inst_means[m][inst]
-            col = COLORS[m]
-            marker = MARKERS[m]
-            ax.plot([0.65, val], [y_idx, y_idx], color="#D8D8D8", lw=1.2, zorder=1)
-            ax.scatter(val, y_idx, color=col, marker=marker, s=65, zorder=3, edgecolor="black", lw=0.6)
-            # Numeric Label with smart placement
-            ax.text(val + 0.02, y_idx, f"{val:.4f}", va="center", ha="left",
-                    fontsize=8.0, fontweight="bold" if m == "HGP-PPO" else "normal",
-                    color=col if m == "HGP-PPO" else "#333333")
+            ax_left.scatter(
+                val, y,
+                color=COLORS[m], marker=MARKERS[m],
+                s=65, zorder=3, edgecolor="black", lw=0.6,
+                label=m if idx == 0 else ""
+            )
+            # Smart numeric placement to avoid collision
+            offset_y = 0.16 if m == "StabilityAware" else (-0.16 if m == "L2D-PPO" else 0.0)
+            ax_left.text(
+                val, y + offset_y, f"{val:.4f}",
+                ha="center", va="bottom" if offset_y >= 0 else "top",
+                fontsize=7.0, color=COLORS[m],
+                fontweight="bold" if m == "HGP-PPO" else "normal"
+            )
 
-        ax.set_yticks(y_pos)
-        if idx == 0:
-            ax.set_yticklabels(methods_order, fontweight="bold")
-        else:
-            ax.set_yticklabels([])
-
-        ax.set_title(INSTANCE_NAMES[inst], fontsize=8.6, fontweight="bold", pad=6)
-        ax.set_xlabel("Mean Score S", fontsize=8.2)
-        ax.set_xlim(0.68, 1.18)
-        ax.grid(axis="x", linestyle="--", alpha=0.4)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-
-    # 5th Panel: Overall 4-Instance Mean
-    ax_mean = fig.add_subplot(part_a_gs[4])
-    for y_idx, m in enumerate(methods_order):
+    # 5th Row: Overall Mean
+    y_ov = y_positions[4]
+    ov_vals = [overall_means[m] for m in methods_order]
+    ax_left.plot([min(ov_vals), max(ov_vals)], [y_ov, y_ov], color="#B0C8D8", lw=2.5, zorder=1)
+    for m in methods_order:
         val = overall_means[m]
-        col = COLORS[m]
-        marker = MARKERS[m]
-        ax_mean.plot([0.65, val], [y_idx, y_idx], color="#BFBFBF", lw=1.5, zorder=1)
-        ax_mean.scatter(val, y_idx, color=col, marker=marker, s=80, zorder=3, edgecolor="black", lw=0.7)
-        ax_mean.text(val + 0.02, y_idx, f"{val:.4f}", va="center", ha="left",
-                     fontsize=8.2, fontweight="bold", color=col)
+        ax_left.scatter(
+            val, y_ov,
+            color=COLORS[m], marker=MARKERS[m],
+            s=80, zorder=3, edgecolor="black", lw=0.7
+        )
+        offset_y = 0.16 if m == "StabilityAware" else (-0.16 if m == "L2D-PPO" else 0.0)
+        ax_left.text(
+            val, y_ov + offset_y, f"{val:.4f}",
+            ha="center", va="bottom" if offset_y >= 0 else "top",
+            fontsize=7.3, color=COLORS[m], fontweight="bold"
+        )
 
-    ax_mean.set_yticks(y_pos)
-    ax_mean.set_yticklabels([])
-    ax_mean.set_title("Overall Mean\n(4-Instance Equal)", fontsize=8.6, fontweight="bold", pad=6, color="#0072B2")
-    ax_mean.set_xlabel("Equal-Weighted S", fontsize=8.2)
-    ax_mean.set_xlim(0.68, 1.18)
-    ax_mean.grid(axis="x", linestyle="--", alpha=0.4)
-    ax_mean.spines["top"].set_visible(False)
-    ax_mean.spines["right"].set_visible(False)
-    ax_mean.patch.set_facecolor("#F0F7FB")
-    ax_mean.patch.set_alpha(0.8)
+    ax_left.set_yticks(y_positions)
+    ax_left.set_yticklabels(y_labels, fontsize=8.2, fontweight="bold")
+    ax_left.set_xlabel("Mean Composite Score S (Lower is Better)", fontsize=8.5, fontweight="bold")
+    ax_left.set_title("(a) Instance & Overall Mean Score S", fontsize=9.2, fontweight="bold", pad=8)
+    ax_left.set_xlim(0.70, 1.15)
+    ax_left.grid(axis="x", linestyle="--", alpha=0.4)
+    ax_left.spines["top"].set_visible(False)
+    ax_left.spines["right"].set_visible(False)
+    ax_left.legend(loc="lower right", frameon=True, fontsize=7.8, facecolor="white", framealpha=0.92, edgecolor="#D0D0D0")
 
-    # -------------------------------------------------------------------------
-    # SECTION (B) TITLE
-    # -------------------------------------------------------------------------
-    ax_title_b = fig.add_subplot(outer_gs[2])
-    ax_title_b.axis("off")
-    ax_title_b.text(
-        0.0, 0.5,
-        "(b) 36-Scenario Paired Difference Heatmaps: d = S(HGP-PPO) - S(Baseline)  [Negative / Blue Favors HGP-PPO; Symmetrical Scale]",
-        fontsize=10.5, fontweight="bold", ha="left", va="center"
+    # =========================================================================
+    # RIGHT BLOCK: (b) 2x4 Heatmaps (vs. L2D and vs. StabilityAware)
+    # =========================================================================
+    fig.text(
+        0.395, 0.965,
+        "(b) 36-Scenario Paired Difference Heatmaps: d = S(HGP-PPO) - S(Baseline)  [Negative / Blue Favors HGP-PPO]",
+        fontsize=9.2, fontweight="bold", ha="left", va="top"
     )
 
-    # -------------------------------------------------------------------------
-    # SECTION (B) HEATMAPS
-    # -------------------------------------------------------------------------
-    part_b_gs = gridspec.GridSpecFromSubplotSpec(
+    gs_right = gridspec.GridSpecFromSubplotSpec(
         2, 4,
-        subplot_spec=outer_gs[3],
-        wspace=0.18, hspace=0.25
+        subplot_spec=gs_main[1],
+        wspace=0.16, hspace=0.25
     )
-
     cmap = plt.colormaps["RdBu_r"]
 
-    # Row 1: vs. L2D-PPO
     for idx, inst in enumerate(INSTANCES):
-        ax = fig.add_subplot(part_b_gs[0, idx])
-        data = diff_l2d[idx]
-
-        im = ax.imshow(data, cmap=cmap, norm=norm, aspect="auto")
-
-        # Cell annotations
+        # Row 0: vs. L2D-PPO
+        ax0 = fig.add_subplot(gs_right[0, idx])
+        im = ax0.imshow(diff_l2d[idx], cmap=cmap, norm=norm, aspect="auto")
         for r in range(3):
             for c in range(3):
-                val = data[r, c]
+                val = diff_l2d[idx, r, c]
                 txt_col = "white" if abs(val) > 0.45 else "black"
                 prefix = "+" if val > 0 else ""
-                ax.text(c, r, f"{prefix}{val:.2f}", ha="center", va="center",
-                        fontsize=8.0, fontweight="bold", color=txt_col)
-
-        ax.set_xticks([0, 1, 2])
-        ax.set_xticklabels([])
-        ax.set_yticks([0, 1, 2])
+                ax0.text(c, r, f"{prefix}{val:.2f}", ha="center", va="center",
+                         fontsize=7.5, fontweight="bold", color=txt_col)
+        ax0.set_xticks([0, 1, 2])
+        ax0.set_xticklabels([])
+        ax0.set_yticks([0, 1, 2])
         if idx == 0:
-            ax.set_yticklabels(["Low", "Med", "High"], fontsize=8.0, fontweight="medium")
-            ax.set_ylabel("vs. L2D-PPO-APAL\nDelay Severity", fontsize=8.8, fontweight="bold", labelpad=4)
+            ax0.set_yticklabels(["Low", "Med", "High"], fontsize=7.6)
+            ax0.set_ylabel("vs. L2D-PPO\nDelay Severity", fontsize=8.0, fontweight="bold", labelpad=2)
         else:
-            ax.set_yticklabels([])
+            ax0.set_yticklabels([])
+        ax0.set_title(INSTANCE_SHORT_NAMES[inst], fontsize=8.2, fontweight="bold", pad=3)
 
-        ax.set_title(INSTANCE_SHORT_NAMES[inst], fontsize=8.8, fontweight="bold", pad=4)
-
-    # Row 2: vs. StabilityAwareRepair
-    for idx, inst in enumerate(INSTANCES):
-        ax = fig.add_subplot(part_b_gs[1, idx])
-        data = diff_sta[idx]
-
-        im = ax.imshow(data, cmap=cmap, norm=norm, aspect="auto")
-
-        # Cell annotations
+        # Row 1: vs. StabilityAwareRepair
+        ax1 = fig.add_subplot(gs_right[1, idx])
+        ax1.imshow(diff_sta[idx], cmap=cmap, norm=norm, aspect="auto")
         for r in range(3):
             for c in range(3):
-                val = data[r, c]
+                val = diff_sta[idx, r, c]
                 txt_col = "white" if abs(val) > 0.45 else "black"
                 prefix = "+" if val > 0 else ""
-                ax.text(c, r, f"{prefix}{val:.2f}", ha="center", va="center",
-                        fontsize=8.0, fontweight="bold", color=txt_col)
-
-        ax.set_xticks([0, 1, 2])
-        ax.set_xticklabels(["Early", "Mid", "Late"], fontsize=8.0)
-        ax.set_xlabel("Planning Freeze Phase", fontsize=8.2)
-
-        ax.set_yticks([0, 1, 2])
+                ax1.text(c, r, f"{prefix}{val:.2f}", ha="center", va="center",
+                         fontsize=7.5, fontweight="bold", color=txt_col)
+        ax1.set_xticks([0, 1, 2])
+        ax1.set_xticklabels(["Early", "Mid", "Late"], fontsize=7.5)
+        ax1.set_xlabel("Freeze Phase", fontsize=7.8)
+        ax1.set_yticks([0, 1, 2])
         if idx == 0:
-            ax.set_yticklabels(["Low", "Med", "High"], fontsize=8.0, fontweight="medium")
-            ax.set_ylabel("vs. StabilityAware\nDelay Severity", fontsize=8.8, fontweight="bold", labelpad=4)
+            ax1.set_yticklabels(["Low", "Med", "High"], fontsize=7.6)
+            ax1.set_ylabel("vs. StabilityAware\nDelay Severity", fontsize=8.0, fontweight="bold", labelpad=2)
         else:
-            ax.set_yticklabels([])
+            ax1.set_yticklabels([])
 
     # -------------------------------------------------------------------------
-    # Win / Tie / Loss Badges (Positioned to the right of Section b)
+    # Win / Tie / Loss Badges (Right Margin)
     # -------------------------------------------------------------------------
     fig.text(
-        0.895, 0.45,
+        0.910, 0.68,
         f"vs. L2D-PPO-APAL\n"
         f"Win / Tie / Loss\n"
         f"  {win_l2d} / {tie_l2d} / {loss_l2d}\n"
         f"  (Win: {win_l2d/36*100:.1f}%)",
-        fontsize=8.5, ha="left", va="center", fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.45", facecolor="#EBF3F9", edgecolor="#0072B2", lw=1.2)
+        fontsize=7.5, ha="left", va="center", fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#EBF3F9", edgecolor="#0072B2", lw=1.0)
     )
 
     fig.text(
-        0.895, 0.18,
+        0.910, 0.35,
         f"vs. StabilityAware\n"
         f"Win / Tie / Loss\n"
         f"  {win_sta} / {tie_sta} / {loss_sta}\n"
         f"  (Win: {win_sta/36*100:.1f}%)",
-        fontsize=8.5, ha="left", va="center", fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.45", facecolor="#F7EFF5", edgecolor="#CC79A7", lw=1.2)
+        fontsize=7.5, ha="left", va="center", fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.35", facecolor="#F7EFF5", edgecolor="#CC79A7", lw=1.0)
     )
 
     # -------------------------------------------------------------------------
-    # Shared Colorbar (Vertically spans Section b)
+    # Shared Colorbar
     # -------------------------------------------------------------------------
-    cbar_ax = fig.add_axes([0.965, 0.12, 0.015, 0.44])
+    cbar_ax = fig.add_axes([0.970, 0.14, 0.010, 0.72])
     cbar = fig.colorbar(im, cax=cbar_ax, orientation="vertical")
-    cbar.set_label("Score Difference d\n(<0 favors HGP-PPO)", fontsize=8.0, labelpad=4)
-    cbar.ax.tick_params(labelsize=7.5)
+    cbar.set_label("Score Difference d\n(<0 favors HGP-PPO)", fontsize=7.2, labelpad=3)
+    cbar.ax.tick_params(labelsize=6.8)
 
     # Export
     export_bundle(fig, "fig6_reschedule_scenarios_heatmap", source_df)
     plt.close(fig)
-    print("[Figure 6] Generation complete.")
+    print("[Figure 6/4] Generation complete with Scheme B layout.")
 
 
 if __name__ == "__main__":
