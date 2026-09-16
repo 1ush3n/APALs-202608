@@ -1,0 +1,368 @@
+From daa8d6902740ade8c06490577ced7c98452a5e1d Mon Sep 17 00:00:00 2001
+From: 1ush3n <281842176lu@gmail.com>
+Date: Sat, 29 Aug 2026 17:06:01 +0800
+Subject: [PATCH] feat: add gamma1 action truncation r5 evaluation
+
+---
+ evaluate_reschedule_model.py               | 121 +++++++++++++++----
+ scripts/evaluate_action_truncation_r5.py   | 131 +++++++++++++++++++++
+ tests/test_action_truncation_evaluation.py |  55 +++++++++
+ 3 files changed, 283 insertions(+), 24 deletions(-)
+ create mode 100644 scripts/evaluate_action_truncation_r5.py
+ create mode 100644 tests/test_action_truncation_evaluation.py
+
+diff --git a/evaluate_reschedule_model.py b/evaluate_reschedule_model.py
+index bc53229..cd43690 100644
+--- a/evaluate_reschedule_model.py
++++ b/evaluate_reschedule_model.py
+@@ -56,6 +56,55 @@ RESCHEDULE_EVAL_EXTRA_ARGS = {
+ }
+ 
+ 
++_ACTION_TRUNCATION_FORBIDDEN_HEADS: dict[str, tuple[str, ...]] = {
++    "operation": ("station_head", "worker_head"),
++    "operation_station": ("worker_head",),
++}
++
++
++def get_action_truncation_forbidden_heads(action_scope: str) -> tuple[str, ...]:
++    """返回动作截取模式下不得调用的策略头。"""
++
++    try:
++        return _ACTION_TRUNCATION_FORBIDDEN_HEADS[action_scope]
++    except KeyError as exc:
++        allowed = ", ".join(sorted(_ACTION_TRUNCATION_FORBIDDEN_HEADS))
++        raise ValueError(f"动作截取只允许 {allowed}，实际为 {action_scope!r}") from exc
++
++
++def prepare_action_truncation_scope(config: Any, action_scope: str) -> None:
++    """在完整模型已构造后切换动作范围，并固定使用 EA 资源补全。"""
++
++    get_action_truncation_forbidden_heads(action_scope)
++    source_scope = str(getattr(config, "policy_action_scope", ""))
++    if source_scope != "operation_station_worker":
++        raise ValueError(
++            "动作截取的来源模型必须是 operation_station_worker，"
++            f"实际为 {source_scope!r}"
++        )
++    if str(getattr(config, "policy_observation_scope", "")) != "full":
++        raise ValueError("动作截取必须保留 full policy_observation_scope")
++    config.policy_action_scope = action_scope
++    config.action_completion_mode = "earliest_availability"
++
++
++def _install_action_truncation_guards(
++    model: torch.nn.Module,
++    action_scope: str,
++) -> list[Any]:
++    handles: list[Any] = []
++    for head_name in get_action_truncation_forbidden_heads(action_scope):
++        head = getattr(model, head_name, None)
++        if head is None:
++            raise AttributeError(f"完整模型缺少动作头: {head_name}")
++
++        def fail_if_called(_module: torch.nn.Module, _inputs: tuple[Any, ...], *, name: str = head_name) -> None:
++            raise RuntimeError(f"动作截取越界：不允许调用 {name}")
++
++        handles.append(head.register_forward_pre_hook(fail_if_called))
++    return handles
++
++
+ def _as_id_list(value: Any) -> list[str] | None:
+     if value is None:
+         return None
+@@ -92,6 +141,7 @@ def evaluate_saved_reschedule_model(
+     scenario_ids: Sequence[str] | None = None,
+     use_cached_observation: bool = False,
+     skip_value_estimation: bool = False,
++    action_scope_override: str | None = None,
+ ) -> dict[str, object]:
+     """按固定重调度验证场景评估已保存 PPO 模型，并导出逐场景 CSV。"""
+ 
+@@ -107,31 +157,45 @@ def evaluate_saved_reschedule_model(
+     env = AirLineEnv_Graph(data_path_or_dir=str(resolve_workspace_path(configs.data_file_path)), seed=int(configs.seed))
+     model = HBGATPN(configs).to(device)
+     load_stats = _load_policy_weights(model, model_path, device)
+-    agent = PPOAgent(
+-        model,
+-        configs.lr,
+-        configs.gamma,
+-        configs.k_epochs,
+-        configs.eps_clip,
+-        device,
+-        batch_size=configs.batch_size,
+-        total_timesteps=1,
+-        config=configs,
+-    )
++    original_scope = str(getattr(configs, "policy_action_scope", ""))
++    original_completion_mode = str(getattr(configs, "action_completion_mode", "earliest_finish"))
++    guard_handles: list[Any] = []
++    if action_scope_override is not None:
++        prepare_action_truncation_scope(configs, action_scope_override)
++        guard_handles = _install_action_truncation_guards(model, action_scope_override)
+ 
+-    start_time = time.time()
+-    makespan, balance, reward, _best_schedule, duration, worker_util, station_util = evaluate_reschedule_model(
+-        env,
+-        agent,
+-        num_runs=num_runs,
+-        scenario_ids=scenario_ids,
+-        temperature=temperature,
+-        use_cached_observation=use_cached_observation,
+-        skip_value_estimation=skip_value_estimation,
+-    )
+-    elapsed = time.time() - start_time
+-    rows = list(getattr(evaluate_reschedule_model, "last_scenario_metrics", []))
+-    avg_metrics = dict(getattr(evaluate_reschedule_model, "last_metrics", {}))
++    try:
++        agent = PPOAgent(
++            model,
++            configs.lr,
++            configs.gamma,
++            configs.k_epochs,
++            configs.eps_clip,
++            device,
++            batch_size=configs.batch_size,
++            total_timesteps=1,
++            config=configs,
++        )
++
++        start_time = time.time()
++        makespan, balance, reward, _best_schedule, duration, worker_util, station_util = evaluate_reschedule_model(
++            env,
++            agent,
++            num_runs=num_runs,
++            scenario_ids=scenario_ids,
++            temperature=temperature,
++            use_cached_observation=use_cached_observation,
++            skip_value_estimation=skip_value_estimation,
++        )
++        elapsed = time.time() - start_time
++        rows = list(getattr(evaluate_reschedule_model, "last_scenario_metrics", []))
++        avg_metrics = dict(getattr(evaluate_reschedule_model, "last_metrics", {}))
++    finally:
++        for handle in guard_handles:
++            handle.remove()
++        if action_scope_override is not None:
++            configs.policy_action_scope = original_scope
++            configs.action_completion_mode = original_completion_mode
+ 
+     output_dir.mkdir(parents=True, exist_ok=True)
+     csv_path = output_dir / "reschedule_ppo_eval.csv"
+@@ -160,6 +224,15 @@ def evaluate_saved_reschedule_model(
+         "load_stats": load_stats,
+         "rows": rows,
+     }
++    if action_scope_override is not None:
++        summary.update(
++            {
++                "source_policy_action_scope": original_scope,
++                "action_scope_override": action_scope_override,
++                "action_completion_mode": "earliest_availability",
++                "forbidden_heads": list(get_action_truncation_forbidden_heads(action_scope_override)),
++            }
++        )
+     with json_path.open("w", encoding="utf-8") as f:
+         json.dump(summary, f, ensure_ascii=False, indent=2)
+     return summary
+diff --git a/scripts/evaluate_action_truncation_r5.py b/scripts/evaluate_action_truncation_r5.py
+new file mode 100644
+index 0000000..856c6a1
+--- /dev/null
++++ b/scripts/evaluate_action_truncation_r5.py
+@@ -0,0 +1,131 @@
++from __future__ import annotations
++
++import json
++import sys
++from pathlib import Path
++from typing import Any
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
++
++from configs import configs
++from evaluate_reschedule_model import evaluate_saved_reschedule_model
++from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint
++from runtime.hydra_config import (
++    ExtraArgument,
++    HydraCliError,
++    hydra_help,
++    initialize_hydra_runtime,
++    should_show_help,
++)
++from runtime.initial_worker_mapping import apply_initial_worker_mapping
++from runtime.paths import resolve_workspace_path
++from runtime.reschedule_manifest import REAL_INSTANCE_IDS, load_reschedule_manifest, validate_r5_manifest_assets
++
++
++ACTION_TRUNCATION_ARGS = {
++    "model_path": ExtraArgument(required=True, help="完整 gamma=1 主模型 checkpoint"),
++    "manifest_path": ExtraArgument(required=True, help="r5 固定场景 manifest"),
++    "instance_id": ExtraArgument(required=True, help="单个真实实例 ID"),
++    "action_scope": ExtraArgument(required=True, help="operation 或 operation_station"),
++    "output_dir": ExtraArgument(required=True, help="当前实例输出目录"),
++}
++
++
++def evaluate_one_instance(
++    *,
++    model_path: Path,
++    manifest_path: Path,
++    instance_id: str,
++    action_scope: str,
++    output_dir: Path,
++    explicit_fields: set[str] | None = None,
++) -> dict[str, Any]:
++    if instance_id not in REAL_INSTANCE_IDS:
++        raise ValueError(f"instance_id 必须属于 {REAL_INSTANCE_IDS}，实际为 {instance_id!r}")
++    if action_scope not in {"operation", "operation_station"}:
++        raise ValueError("action_scope 只允许 operation 或 operation_station")
++
++    checkpoint = load_checkpoint(model_path)
++    apply_checkpoint_model_spec(configs, checkpoint.model_spec, explicit_fields=explicit_fields)
++    manifest = load_reschedule_manifest(manifest_path)
++    validate_r5_manifest_assets(manifest)
++    entry = manifest.get(instance_id)
++    if entry.scenario_path is None:
++        raise ValueError(f"{instance_id} 缺少固定 r5 场景文件")
++
++    configs.enable_reschedule_mode = True
++    configs.reschedule_manifest_path = str(manifest.path)
++    configs.reschedule_eval_instance_id = instance_id
++    configs.verbose_reschedule_eval_progress = True
++    configs.data_file_path = str(entry.data_path)
++    configs.reschedule_baseline_schedule_path = str(entry.baseline_schedule_path)
++    configs.reschedule_eval_scenario_path = str(entry.scenario_path)
++    apply_initial_worker_mapping(configs, entry.data_path, explicit_fields=set())
++
++    summary = evaluate_saved_reschedule_model(
++        model_path=model_path,
++        num_runs=None,
++        scenario_ids=None,
++        temperature=0.0,
++        output_dir=output_dir,
++        use_cached_observation=False,
++        skip_value_estimation=False,
++        action_scope_override=action_scope,
++    )
++    if int(summary["scenario_count"]) != 9:
++        raise ValueError(f"r5 {instance_id} 必须完成 9 个固定场景，实际为 {summary['scenario_count']}")
++
++    result = {
++        "instance_id": instance_id,
++        "action_scope": action_scope,
++        "model_path": str(model_path.resolve()),
++        "manifest_path": str(manifest.path.resolve()),
++        "data_path": str(entry.data_path),
++        "baseline_schedule_path": str(entry.baseline_schedule_path),
++        "scenario_path": str(entry.scenario_path),
++        "data_sha256": entry.data_sha256,
++        "baseline_sha256": entry.baseline_sha256,
++        "scenario_sha256": entry.scenario_sha256,
++        "summary": summary,
++    }
++    output_dir.mkdir(parents=True, exist_ok=True)
++    (output_dir / "instance_result.json").write_text(
++        json.dumps(result, ensure_ascii=False, indent=2),
++        encoding="utf-8",
++    )
++    return result
++
++
++def main(argv: list[str] | None = None) -> int:
++    raw_args = list(sys.argv[1:] if argv is None else argv)
++    if should_show_help(raw_args):
++        print(hydra_help(ACTION_TRUNCATION_ARGS))
++        return 0
++    try:
++        args = initialize_hydra_runtime(
++            raw_args,
++            target=configs,
++            project_root=PROJECT_ROOT,
++            default_experiment="reschedule_task_delay_r5",
++            extra_arguments=ACTION_TRUNCATION_ARGS,
++            create_run_context=False,
++        )
++        result = evaluate_one_instance(
++            model_path=resolve_workspace_path(args.model_path),
++            manifest_path=resolve_workspace_path(args.manifest_path),
++            instance_id=str(args.instance_id),
++            action_scope=str(args.action_scope),
++            output_dir=resolve_workspace_path(args.output_dir),
++            explicit_fields=set(getattr(args, "explicit_config_fields", set())),
++        )
++    except (HydraCliError, KeyError, ValueError, RuntimeError, FileNotFoundError) as exc:
++        print(f"[CLI] {exc}", file=sys.stderr)
++        return 2
++    print(json.dumps(result, ensure_ascii=False, indent=2))
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/test_action_truncation_evaluation.py b/tests/test_action_truncation_evaluation.py
+new file mode 100644
+index 0000000..8b993ff
+--- /dev/null
++++ b/tests/test_action_truncation_evaluation.py
+@@ -0,0 +1,55 @@
++from types import SimpleNamespace
++
++import pytest
++
++from evaluate_reschedule_model import (
++    get_action_truncation_forbidden_heads,
++    prepare_action_truncation_scope,
++)
++
++
++def test_action_truncation_forbidden_heads_match_scope():
++    assert get_action_truncation_forbidden_heads("operation") == (
++        "station_head",
++        "worker_head",
++    )
++    assert get_action_truncation_forbidden_heads("operation_station") == (
++        "worker_head",
++    )
++
++
++def test_action_truncation_scope_keeps_full_observation_and_uses_ea():
++    config = SimpleNamespace(
++        policy_action_scope="operation_station_worker",
++        policy_observation_scope="full",
++        action_completion_mode="earliest_finish",
++    )
++
++    prepare_action_truncation_scope(config, "operation")
++
++    assert config.policy_action_scope == "operation"
++    assert config.policy_observation_scope == "full"
++    assert config.action_completion_mode == "earliest_availability"
++
++
++@pytest.mark.parametrize("scope", ["operation_station_worker", "ctg", "apcf", "unknown"])
++def test_action_truncation_rejects_non_truncated_scope(scope):
++    config = SimpleNamespace(
++        policy_action_scope="operation_station_worker",
++        policy_observation_scope="full",
++        action_completion_mode="earliest_finish",
++    )
++
++    with pytest.raises(ValueError):
++        prepare_action_truncation_scope(config, scope)
++
++
++def test_action_truncation_rejects_non_full_source_model():
++    config = SimpleNamespace(
++        policy_action_scope="operation",
++        policy_observation_scope="task",
++        action_completion_mode="earliest_finish",
++    )
++
++    with pytest.raises(ValueError):
++        prepare_action_truncation_scope(config, "operation_station")
+-- 
+2.53.0.windows.1
+

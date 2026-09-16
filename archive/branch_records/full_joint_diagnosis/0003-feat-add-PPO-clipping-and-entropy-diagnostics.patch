@@ -1,0 +1,398 @@
+From 2a04bc1ab0f34a987c7b6f4a3faf5be13050fa28 Mon Sep 17 00:00:00 2001
+From: 1ush3n <281842176lu@gmail.com>
+Date: Fri, 28 Aug 2026 15:14:35 +0800
+Subject: [PATCH 3/3] feat: add PPO clipping and entropy diagnostics
+
+---
+ scripts/diagnose_ppo_dynamics.py | 379 +++++++++++++++++++++++++++++++
+ 1 file changed, 379 insertions(+)
+ create mode 100644 scripts/diagnose_ppo_dynamics.py
+
+diff --git a/scripts/diagnose_ppo_dynamics.py b/scripts/diagnose_ppo_dynamics.py
+new file mode 100644
+index 0000000..9c55ad3
+--- /dev/null
++++ b/scripts/diagnose_ppo_dynamics.py
+@@ -0,0 +1,379 @@
++from __future__ import annotations
++
++import argparse
++import csv
++import json
++import math
++import platform
++import sys
++from collections import defaultdict
++from pathlib import Path
++from typing import Any
++
++import numpy as np
++import torch
++
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
++
++from configs import configs
++from diagnostics.full_joint import summarize_numeric
++from diagnostics.full_joint import team_size_bucket
++from models.hb_gat_pn import HBGATPN
++from ppo_agent import PPOAgent
++from runtime.seed import set_seed
++from scripts.diagnose_full_joint import DEFAULT_CHECKPOINT, _resolve_path
++from runtime.checkpoints import load_checkpoint, load_policy_weights
++from training.rollout_service import APALRolloutService
++from utils.vector_env import EnvCreator, VectorEnv
++
++
++DEFAULT_DATA = [
++    PROJECT_ROOT / "data" / "283.csv",
++    PROJECT_ROOT / "data" / "680.csv",
++    PROJECT_ROOT / "data" / "2338.csv",
++    PROJECT_ROOT / "data" / "3182.csv",
++]
++
++
++def _write_json(path: Path, value: Any) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(
++        json.dumps(value, ensure_ascii=False, indent=2, allow_nan=True),
++        encoding="utf-8",
++    )
++
++
++def _load_agent(checkpoint_path: Path, batch_size: int) -> tuple[Any, PPOAgent]:
++    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
++    from evaluate_model import restore_checkpoint_saved_config
++    from runtime.checkpoints import apply_checkpoint_model_spec
++
++    restore_checkpoint_saved_config(configs, checkpoint, set())
++    apply_checkpoint_model_spec(configs, checkpoint.model_spec, explicit_fields=set())
++    configs.update_from_dict(
++        {
++            "num_envs": 4,
++            "batch_size": int(batch_size),
++            "train_data_path_or_dir": str(DEFAULT_DATA[0]),
++            "data_file_path": str(DEFAULT_DATA[0]),
++            "randomize_durations": False,
++            "enable_dynamic_events": False,
++            "enable_station_breakdown": False,
++            "enable_material_delay": False,
++            "enable_online_duration_perturb": False,
++            "rollout_heartbeat_interval_sec": 0.0,
++            "update_every_episodes": 1,
++            "enable_rollout_ipc_fusion": False,
++        }
++    )
++    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
++    model = HBGATPN(configs).to(device)
++    load_policy_weights(model, checkpoint, strict=True)
++    agent = PPOAgent(
++        model=model,
++        lr=float(configs.lr),
++        gamma=float(configs.gamma),
++        k_epochs=int(configs.k_epochs),
++        eps_clip=float(configs.eps_clip),
++        device=device,
++        batch_size=int(batch_size),
++        total_timesteps=1,
++        config=configs,
++    )
++    return checkpoint, agent
++
++
++def _build_service(agent: PPOAgent, data_path: Path, seed: int, max_steps: int) -> APALRolloutService:
++    configs.update_from_dict(
++        {
++            "data_file_path": str(data_path),
++            "train_data_path_or_dir": str(data_path),
++            "rollout_max_steps": int(max_steps),
++            "seed": int(seed),
++        }
++    )
++    start_method = "forkserver" if platform.system() == "Linux" else "spawn"
++    vector_env = VectorEnv(
++        EnvCreator(str(data_path), seed_offset=int(seed)),
++        num_envs=4,
++        start_method=start_method,
++        worker_threads=1,
++        init_timeout_sec=float(configs.vector_env_init_timeout_sec),
++        command_timeout_sec=float(configs.vector_env_command_timeout_sec),
++    )
++    return APALRolloutService(
++        agent=agent,
++        vector_env=vector_env,
++        eval_env=vector_env.envs[0],
++        config=configs,
++        device=agent.device,
++    )
++
++
++def _replay_rows(agent: PPOAgent, memory: Any, env: Any) -> list[dict[str, Any]]:
++    rows: list[dict[str, Any]] = []
++    for index, (snapshot, action, masks) in enumerate(
++        zip(memory.states, memory.actions, memory.masks)
++    ):
++        obs = env.rebuild_state_from_snapshot(snapshot).to(agent.device)
++        replay = agent.diagnose_action_logprobs(
++            obs,
++            tuple(action),
++            mask_task=masks[0].to(agent.device),
++            mask_station_matrix=masks[1].to(agent.device),
++            mask_worker=masks[2].to(agent.device),
++            temperature=1.0,
++            is_eval=True,
++        )
++        rows.append(
++            {
++                "memory_index": int(index),
++                "team_size": int(len(action[2])),
++                "task": float(replay["task"]),
++                "station": float(replay["station"]),
++                "worker": float(replay["worker"]),
++                "total": float(replay["total"]),
++                "worker_entropy_sum": float(sum(replay.get("worker_entropy", []))),
++                "worker_entropy_mean": float(
++                    np.mean(replay.get("worker_entropy", []))
++                    if replay.get("worker_entropy")
++                    else 0.0
++                ),
++                "worker_max_probability_mean": float(
++                    np.mean(replay.get("worker_max_probability", []))
++                    if replay.get("worker_max_probability")
++                    else 0.0
++                ),
++                "legal_worker_count_mean": float(
++                    np.mean(replay.get("legal_worker_count", []))
++                    if replay.get("legal_worker_count")
++                    else 0.0
++                ),
++            }
++        )
++    return rows
++
++
++def _ratio(old: float, new: float) -> float:
++    return math.exp(max(-20.0, min(20.0, float(new) - float(old))))
++
++
++def _group_summary(rows: list[dict[str, Any]], eps_clip: float) -> dict[str, Any]:
++    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
++    for row in rows:
++        team_size = int(row["team_size"])
++        if team_size > 0:
++            grouped[team_size_bucket(team_size)].append(row)
++    summary: dict[str, Any] = {}
++    for bucket, values in sorted(grouped.items()):
++        result: dict[str, Any] = {"count": len(values)}
++        for key in ("ratio_task", "ratio_station", "ratio_worker", "ratio_joint"):
++            result[key] = summarize_numeric([float(item[key]) for item in values])
++            result[f"{key}_clip_fraction"] = float(
++                np.mean(
++                    [abs(float(item[key]) - 1.0) > float(eps_clip) for item in values]
++                )
++            )
++        summary[bucket] = result
++    return summary
++
++
++def _entropy_summary(
++    rows: list[dict[str, Any]],
++    *,
++    max_worker_dim: int,
++    entropy_coefficient: float,
++) -> dict[str, Any]:
++    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
++    for row in rows:
++        team_size = int(row["team_size"])
++        if team_size > 0:
++            grouped[team_size_bucket(team_size)].append(row)
++    denominator = 2.0 * math.log(max(2.0, float(max_worker_dim)))
++    result: dict[str, Any] = {}
++    for bucket, values in sorted(grouped.items()):
++        raw = [float(item["worker_entropy_sum"]) for item in values]
++        counts = [int(item["team_size"]) for item in values]
++        per_token = [
++            value / max(1, count)
++            for value, count in zip(raw, counts)
++            if count > 0
++        ]
++        worker_loss = [-entropy_coefficient * 0.5 * value / denominator for value in raw]
++        result[bucket] = {
++            "count": len(values),
++            "raw_worker_entropy": summarize_numeric(raw),
++            "worker_entropy_per_token": summarize_numeric(per_token),
++            "legal_worker_count": summarize_numeric(
++                [float(item["legal_worker_count_mean"]) for item in values]
++            ),
++            "worker_max_probability": summarize_numeric(
++                [float(item["worker_max_probability_mean"]) for item in values]
++            ),
++            "worker_entropy_loss_contribution": summarize_numeric(worker_loss),
++        }
++    return result
++
++
++def _entropy_coefficient(current_ep: int) -> float:
++    decay_eps = max(1, int(configs.entropy_decay_episodes))
++    progress = min(1.0, float(current_ep) / float(decay_eps))
++    base = float(configs.c_entropy)
++    end = float(configs.c_entropy_end)
++    return end + (base - end) * math.exp(-3.0 * progress)
++
++
++def run_probe(
++    checkpoint_path: Path,
++    data_paths: list[Path],
++    output_dir: Path,
++    *,
++    seed: int,
++    max_steps: int,
++    batch_size: int,
++) -> dict[str, Any]:
++    all_runs: list[dict[str, Any]] = []
++    for data_path in data_paths:
++        set_seed(int(seed))
++        checkpoint, agent = _load_agent(checkpoint_path, batch_size)
++        service = _build_service(agent, data_path, seed, max_steps)
++        try:
++            update = service.collect(1)
++            if not update.memory.actions:
++                raise RuntimeError(f"未收集到 PPO 轨迹: {data_path}")
++            agent.policy.eval()
++            old_rows = _replay_rows(agent, update.memory, update.env)
++            max_worker_dim = max(
++                int(update.env.rebuild_state_from_snapshot(state)["worker"].x.size(0))
++                for state in update.memory.states[: min(8, len(update.memory.states))]
++            )
++            agent.policy.train()
++            update_metrics = agent.update(
++                update.memory,
++                update.env,
++                current_ep=1,
++            )
++            agent.policy.eval()
++            new_rows = _replay_rows(agent, update.memory, update.env)
++            rows: list[dict[str, Any]] = []
++            for old, new in zip(old_rows, new_rows):
++                row = {
++                    "memory_index": int(old["memory_index"]),
++                    "team_size": int(old["team_size"]),
++                }
++                for branch in ("task", "station", "worker", "total"):
++                    row[f"old_{branch}"] = float(old[branch])
++                    row[f"new_{branch}"] = float(new[branch])
++                    row[f"ratio_{branch if branch != 'total' else 'joint'}"] = _ratio(
++                        float(old[branch]), float(new[branch])
++                    )
++                row.update(
++                    {
++                        "worker_entropy_sum": float(old["worker_entropy_sum"]),
++                        "worker_entropy_mean": float(old["worker_entropy_mean"]),
++                        "worker_max_probability_mean": float(
++                            old["worker_max_probability_mean"]
++                        ),
++                        "legal_worker_count_mean": float(
++                            old["legal_worker_count_mean"]
++                        ),
++                    }
++                )
++                rows.append(row)
++            all_runs.append(
++                {
++                    "data": str(data_path.resolve()),
++                    "sample_count": len(rows),
++                    "update_metrics": update_metrics,
++                    "eps_clip": float(agent.eps_clip),
++                    "max_worker_dim": int(max_worker_dim),
++                    "entropy_coefficient": _entropy_coefficient(1),
++                    "clip_by_team_size": _group_summary(rows, float(agent.eps_clip)),
++                    "entropy_by_team_size": _entropy_summary(
++                        old_rows,
++                        max_worker_dim=max_worker_dim,
++                        entropy_coefficient=_entropy_coefficient(1),
++                    ),
++                    "rows": rows,
++                }
++            )
++        finally:
++            service.close()
++    report = {
++        "protocol": "same_full_checkpoint_short_rollout_one_ppo_update",
++        "checkpoint": str(checkpoint_path.resolve()),
++        "seed": int(seed),
++        "max_steps_per_env": int(max_steps),
++        "num_envs": 4,
++        "batch_size": int(batch_size),
++        "runs": all_runs,
++    }
++    _write_json(output_dir / "ppo_dynamics.json", report)
++    flat_rows = [
++        {"data": run["data"], **row}
++        for run in all_runs
++        for row in run["rows"]
++    ]
++    if flat_rows:
++        fields = list(flat_rows[0])
++        with (output_dir / "ppo_dynamics.csv").open(
++            "w", encoding="utf-8-sig", newline=""
++        ) as handle:
++            writer = csv.DictWriter(handle, fieldnames=fields)
++            writer.writeheader()
++            writer.writerows(flat_rows)
++    return report
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description="Full legacy PPO clipping/entropy 诊断")
++    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
++    parser.add_argument("--data", type=Path, action="append", default=None)
++    parser.add_argument("--output-dir", type=Path, required=True)
++    parser.add_argument("--seed", type=int, default=42)
++    parser.add_argument("--max-steps", type=int, default=128)
++    parser.add_argument("--batch-size", type=int, default=64)
++    return parser.parse_args()
++
++
++def main() -> int:
++    args = parse_args()
++    checkpoint_path = _resolve_path(args.checkpoint)
++    data_paths = [
++        _resolve_path(path)
++        for path in (args.data if args.data is not None else DEFAULT_DATA)
++    ]
++    if not checkpoint_path.is_file():
++        raise FileNotFoundError(checkpoint_path)
++    missing = [str(path) for path in data_paths if not path.is_file()]
++    if missing:
++        raise FileNotFoundError(f"找不到数据文件: {missing}")
++    if args.max_steps < 1 or args.batch_size < 1:
++        raise ValueError("max_steps 和 batch_size 必须大于 0")
++    output_dir = _resolve_path(args.output_dir)
++    report = run_probe(
++        checkpoint_path,
++        data_paths,
++        output_dir,
++        seed=int(args.seed),
++        max_steps=int(args.max_steps),
++        batch_size=int(args.batch_size),
++    )
++    print(
++        json.dumps(
++            {
++                "output": str(output_dir.resolve()),
++                "sample_counts": [run["sample_count"] for run in report["runs"]],
++            },
++            ensure_ascii=False,
++        ),
++        flush=True,
++    )
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+-- 
+2.53.0.windows.1
+
