@@ -1,7 +1,7 @@
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 import platform
 
 @dataclass
@@ -52,6 +52,11 @@ class Config:
     # 默认值保持旧的资源感知掩码逻辑。
     task_mask_mode: str = "resource_aware"
     station_mask_mode: str = "resource_aware"
+    # 站位最小前瞻贪心解码 (MES Decoding: Minimum Earliest Station)
+    enable_mes_decoding: bool = False
+    mes_penalty_lambda: float = 2.0
+    mes_max_station_jump: Optional[int] = 1
+    mes_mode: str = "soft_penalty"
     ablation_protocol: str = "legacy"
     conditional_team_max_candidates: int = 4
     conditional_team_gate_bias: float = -4.0

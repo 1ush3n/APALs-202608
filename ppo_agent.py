@@ -21,6 +21,7 @@ from core.action_completion import (
     TeamCandidates,
     build_action_completer,
 )
+from core.mes_decoding import apply_mes_station_logits
 from models.worker_pointer_context import (
     PHYSICAL_PREDECESSOR_EDGE,
     WorkerPointerV2State,
@@ -2297,6 +2298,15 @@ class PPOAgent:
             )
             if not bool(station_usable.item()):
                 return None, 0.0, 0.0, specific_station_mask, True
+
+            if getattr(self.config, "enable_mes_decoding", False):
+                station_logits, station_invalid = apply_mes_station_logits(
+                    station_logits,
+                    station_invalid,
+                    penalty_lambda=float(getattr(self.config, "mes_penalty_lambda", 2.0)),
+                    max_station_jump=getattr(self.config, "mes_max_station_jump", 1),
+                    mode=str(getattr(self.config, "mes_mode", "soft_penalty")),
+                )
             
             if deterministic:
                 station_action = torch.argmax(station_logits, dim=-1)
@@ -3015,6 +3025,15 @@ class PPOAgent:
                     worker_mask_refs.append(None)
                     eval_fail_flags.append(True)
                     continue
+
+                if getattr(self.config, "enable_mes_decoding", False):
+                    station_logits, station_invalid = apply_mes_station_logits(
+                        station_logits,
+                        station_invalid,
+                        penalty_lambda=float(getattr(self.config, "mes_penalty_lambda", 2.0)),
+                        max_station_jump=getattr(self.config, "mes_max_station_jump", 1),
+                        mode=str(getattr(self.config, "mes_mode", "soft_penalty")),
+                    )
                 
                 if deterministic:
                     station_action = torch.argmax(station_logits, dim=-1)

@@ -109,3 +109,12 @@ env/
 *.synctex*
 *.fls
 *.fdb_latexmk
+
+# ============================================================
+# 本地实验产出与临时草稿
+# ============================================================
+/output/
+*_repaired_schedule*.csv
+*baseline_mes.csv
+scratch_drawing_plan.txt
+

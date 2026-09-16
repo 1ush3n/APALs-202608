@@ -116,6 +116,10 @@ class ActionMasker:
             )
             fixed_station = int(env.fixed_stations[task_id])
             max_station = int(env.max_allowed_stations[task_id])
+            enable_mes = getattr(configs, "enable_mes_decoding", False)
+            mes_jump = getattr(configs, "mes_max_station_jump", None)
+            if enable_mes and mes_jump is not None:
+                max_station = min(max_station, min_station + max(0, int(mes_jump)))
             if fixed_station != -1:
                 candidates = (
                     [fixed_station]
@@ -184,10 +188,17 @@ class ActionMasker:
         
         fixed = torch.from_numpy(env.fixed_stations[ready_indices_cpu]).to(device=t_device, dtype=torch.long)
         max_allowed = torch.from_numpy(env.max_allowed_stations[ready_indices_cpu]).to(device=t_device, dtype=torch.long)
-        
+
+        enable_mes = getattr(configs, "enable_mes_decoding", False)
+        mes_jump = getattr(configs, "mes_max_station_jump", None)
+        if enable_mes and mes_jump is not None:
+            max_allowed_eff = torch.minimum(max_allowed, min_stations + max(0, int(mes_jump)))
+        else:
+            max_allowed_eff = max_allowed
+
         # 2. 产生站位合法区间掩码: [len(ready_indices), num_stations]
         stations = torch.arange(env.num_stations, device=t_device)[None, :]
-        in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed[:, None])
+        in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed_eff[:, None])
         in_range_fixed = (
             (stations == fixed[:, None])
             & (stations >= min_stations[:, None])
@@ -283,10 +294,17 @@ class ActionMasker:
                 
         fixed = env.fixed_stations[ready_indices]
         max_allowed = env.max_allowed_stations[ready_indices]
-        
+
+        enable_mes = getattr(configs, "enable_mes_decoding", False)
+        mes_jump = getattr(configs, "mes_max_station_jump", None)
+        if enable_mes and mes_jump is not None:
+            max_allowed_eff = np.minimum(max_allowed, min_stations + max(0, int(mes_jump)))
+        else:
+            max_allowed_eff = max_allowed
+
         # 2. 产生站位合法区间掩码: [len(ready_indices), num_stations]
         stations = np.arange(env.num_stations)[None, :]
-        in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed[:, None])
+        in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed_eff[:, None])
         in_range_fixed = (
             (stations == fixed[:, None])
             & (stations >= min_stations[:, None])
@@ -370,6 +388,10 @@ class ActionMasker:
             
             valid_stations = False
             max_station = env.max_allowed_stations[t]
+            enable_mes = getattr(configs, "enable_mes_decoding", False)
+            mes_jump = getattr(configs, "mes_max_station_jump", None)
+            if enable_mes and mes_jump is not None:
+                max_station = min(max_station, min_station + max(0, int(mes_jump)))
             station_range = (
                 [fixed]
                 if fixed != -1 and min_station <= fixed <= max_station
