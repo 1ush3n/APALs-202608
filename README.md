@@ -63,6 +63,77 @@ python train.py experiment=initial_schedule_283 train.batch_size=24 parallel.num
 
 配置优先级为：代码默认值 `<` 实验 YAML `<` 平台硬件 YAML `<` Hydra 命令行 `key=value`。
 
+### APCF：锚点条件完整团队提议与反事实门控（初始调度）
+
+APCF（Anchor-Conditioned Full Team Proposal with Counterfactual Gating）是初始
+调度的主方法扩展，动作链为 `(o, s, H, P, z, T)`：锚点团队 `H` 由启发式生成，
+提议器自回归生成完整合法团队 `P`，反事实门控 `z` 在两者间选择，随后执行
+`T`（换人序列）。三大组件：
+
+1. **反事实预训练数据**：确定性轨迹上采样决策点，强制替换候选团队后完整续排，
+   记录相对收益 `y = (C(H) − C(P)) / max(C(H), ε)`；
+2. **双头模型**：`AnchorConditionedTeamPointer`（自回归完整团队提议）与
+   `AnchorProposalGate`（价值头 + 门控，未预训练时零初始化保证温度 0 必选锚点）；
+3. **可追溯 PPO 微调**：`FrozenAnchorProposalTrace` 冻结决策点，重算对数概率必须
+   与 rollout 期完全一致，且 z=0 时提议链仍计入 `log π`。
+
+反事实数据构建（分位状态采样 + 候选预算：锚点/单换/双换/哈希代表）：
+
+```powershell
+python -X utf8 scripts/build_anchor_proposal_cf_data.py `
+  --workers 6 `
+  --worker-torch-threads 1
+```
+
+产物为 `data/initial_anchor_proposal_cf_v1/`：manifest.json（split 96/24/40、
+候选预算、每样本 SHA-256、obs_pt 路径）+ 样本 npz/obs.pt。
+
+`--workers` 以跨平台 `spawn` 方式按训练图并行构建；每个 worker 仅写私有临时目录，主进程按 manifest 固定顺序合并并生成唯一 manifest。`--workers=1` 保持单进程语义。建议在 16GB 内存设备上使用 6 个 worker，并固定 `--worker-torch-threads=1`，避免多进程下 PyTorch/OpenMP 线程过度订阅。
+
+反事实预训练（Huber 相对收益回归 + 排序 BCE + 门控 CE + 正收益加权 BC，
+仅训练双头、冻结编码器）：
+
+```powershell
+Generated APCF assets (staging directories, manifests, NPZ/PT samples, integrity reports, and pretraining checkpoints) are local/server artifacts and are never committed to Git. Before pretraining, independently validate the formal asset:
+
+```powershell
+python -X utf8 scripts/validate_anchor_proposal_cf_data.py `
+  --dataset-dir data/initial_anchor_proposal_cf_v1 `
+  --source-manifest data/scale_400_800_datasets/manifest_ctg_160_explicit_fiveskill_v1.json `
+  --write-report data/initial_anchor_proposal_cf_v1/integrity_check.json
+```
+
+`--data-file data/680.csv` only applies the existing 100-worker initial-scheduling mapping; it is never a counterfactual sample source. Samples may only originate from the 160-graph manifest. `--max-candidates=4` limits anchor-trajectory candidate enumeration, while the independent label budget is anchor + at most two single swaps + at most two double swaps + one hash-selected double-swap representative (at most six teams after deduplication).
+
+```powershell
+python -X utf8 scripts/pretrain_anchor_proposal_cf.py `
+  --manifest data/initial_anchor_proposal_cf_v1/manifest.json `
+  --experiment conf/experiment/initial_anchor_proposal_cf_v1.yaml `
+  --output checkpoints/apcf_pretrain_v1.ckpt
+```
+
+正式 PPO 微调必须显式提供预训练 checkpoint 与反事实 manifest，启动时会核验
+checkpoint 的 model spec 为 APCF scope 且 manifest SHA-256 与当前配置一致：
+
+```powershell
+python train.py `
+  experiment=initial_anchor_proposal_cf_v1 `
+  anchor_proposal_pretrain_checkpoint_path=checkpoints/apcf_pretrain_v1.ckpt `
+  anchor_proposal_cf_manifest_path=data/initial_anchor_proposal_cf_v1/manifest.json `
+  train.num_envs=16 `
+  train.max_episodes=300
+```
+
+探索下限按 `branch_floor_decay_fraction` 进度从 `0.20` 线性退火至 `0.02`；
+每次成功 PPO 更新后推进（OOM 跳过时不推进）。APCF 冷启动会严格校验
+反事实 manifest、预训练 checkpoint 的动作语义与 manifest SHA-256；续训只校验
+latest PPO checkpoint 的 APCF 语义与 manifest，不重新加载预训练文件。Rollout 指标含
+`APCF/RolloutDecisionCount`、`APCF/RolloutProposalAvailableRate`、
+`APCF/RolloutHammingDistanceMean`、`APCF/RolloutRawProposalSelectRate`，以及
+proposal pointer 对数概率/熵、预测反事实收益、gate 值和 raw 分支 logit 差，
+可作为短轮筛选的诊断证据。
+
+
 ### 初始调度异步验证
 
 Lightning 初始调度可将逐 episode 验证与 GPU 训练分离。单实例模式固定在 `async_eval_initial_data_path` 的 Standard 场景上按 Makespan 选择 best，且只有完整排程可以覆盖 best：
@@ -108,10 +179,11 @@ python train.py --help
 | `runs_root` | `runs_root` | `runs_root=runs` | 统一运行目录根路径 |
 | `use_skill_hub` | `use_skill_hub` | `use_skill_hub=true` | 启用 Skill Hub |
 | `skill_hub_bidirectional` | `skill_hub_bidirectional` | `skill_hub_bidirectional=true` | 启用 Skill Hub 反向关系 |
+| `policy_observation_scope` | `policy_observation_scope` | `policy_observation_scope=task` | 策略网络可见节点：`full`、`task` 或 `task_station`；默认 `full` |
 | `resume` | 恢复训练 | `resume=true` | Lightning 读取当前 run 的最近断点 |
 | `ablation_no_gat` | `ablation_no_gat` | `ablation_no_gat=true` | GAT 消融实验 |
 | `ablation_no_pointer` | `ablation_no_pointer` | `ablation_no_pointer=true` | Pointer 消融实验 |
-| `ablation_no_mask` | `ablation_no_mask` | `ablation_no_mask=true` | 动作掩码消融实验 |
+| `ablation_no_mask` | `ablation_no_mask` | 已禁用 | 主 PPO 必须保留动作硬约束 mask |
 
 参数覆盖必须使用 `key=value`。例如 batch size 的推荐写法是：
 
@@ -894,6 +966,46 @@ python train.py \
 
 常用三类结构消融：
 
+节点范围对比消融的定义如下：`operation_only` 仅向策略网络编码工序节点，`operation_station` 仅编码工序和站位节点；工人、站位的真实负载、等待时间和可行性仍由环境用于动作掩码与完工时间计算，但不会作为这两种策略的图节点输入。旧名称 `operation_only`、`operation_station` 使用 EFT；新增 `operation_only_ea`、`operation_station_ea` 使用 EA。主方法 `full_joint` 及其他方法保持 `policy_observation_scope=full`。
+
+```bash
+python train.py \
+  experiment=scale_400_800_schedule \
+  policy_action_scope=operation \
+  policy_observation_scope=task \
+  experiment_name=scale_400_800_operation_only \
+  enable_multi_benchmark_eval=false
+
+python train.py \
+  experiment=scale_400_800_schedule \
+  policy_action_scope=operation_station \
+  policy_observation_scope=task_station \
+  experiment_name=scale_400_800_operation_station \
+  enable_multi_benchmark_eval=false
+```
+
+EA 变体从头训练时使用独立的 run ID 和结果目录：
+
+```bash
+python train.py \
+  experiment=scale_400_800_schedule \
+  policy_action_scope=operation \
+  policy_observation_scope=task \
+  action_completion_mode=earliest_availability \
+  experiment_name=scale_400_800_operation_only_ea \
+  enable_multi_benchmark_eval=false
+
+python train.py \
+  experiment=scale_400_800_schedule \
+  policy_action_scope=operation_station \
+  policy_observation_scope=task_station \
+  action_completion_mode=earliest_availability \
+  experiment_name=scale_400_800_operation_station_ea \
+  enable_multi_benchmark_eval=false
+```
+
+把旧 checkpoint 临时切换到 EA 只属于诊断评估；正式论文结果必须来自 EA 训练并使用 EA 评估，不得将 checkpoint 换补全器结果登记为主表结果。
+
 ```bash
 python train.py \
   experiment=scale_400_800_schedule \
@@ -907,12 +1019,9 @@ python train.py \
   experiment_name=scale_400_800_no_pointer \
   enable_multi_benchmark_eval=false
 
-python train.py \
-  experiment=scale_400_800_schedule \
-  ablation_no_mask=true \
-  experiment_name=scale_400_800_no_mask \
-  enable_multi_benchmark_eval=false
 ```
+
+`ablation_no_mask=true` 在主 PPO 中会显式报错；合法性 mask 属于安全约束，不再作为消融变量。
 
 也可以通过 `key=value` 做其他结构或训练机制消融：
 

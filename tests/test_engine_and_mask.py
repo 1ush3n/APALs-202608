@@ -14,11 +14,13 @@
  10. 工人缺勤事件注入与恢复
  11. Station Slot Model 并发控制
 """
+from collections.abc import Iterator
 import sys
 import os
 import copy
 import numpy as np
 import torch
+import pytest
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT_DIR)
@@ -26,11 +28,21 @@ sys.path.insert(0, ROOT_DIR)
 from core.event_engine import Event, EventType, EventQueue
 from core.action_masker import ActionMasker
 from environment import AirLineEnv_Graph
-import configs
+from configs import configs
 
 TOTAL_TESTS = 0
 PASSED_TESTS = 0
 FAILED_TESTS = []
+
+
+@pytest.fixture(autouse=True)
+def _restore_global_config_after_each_case() -> Iterator[None]:
+    original = configs.to_flat_dict()
+    try:
+        yield
+    finally:
+        configs.update_from_dict(original)
+
 
 
 def check(condition, name):
@@ -42,6 +54,7 @@ def check(condition, name):
     else:
         FAILED_TESTS.append(name)
         print(f"  [FAIL] {name}")
+        raise AssertionError(name)
 
 
 def test_eventqueue_basic():
@@ -204,6 +217,7 @@ def test_worker_absence_injection():
     print("\n--- test_worker_absence_injection ---")
     DATA = os.path.join(ROOT_DIR, "data", "283.csv")
     configs.n_w = 40
+    configs.n_w_min = 40
     configs.n_m = 5
     configs.enable_dynamic_events = True
     configs.prob_worker_absent_base = 0.3

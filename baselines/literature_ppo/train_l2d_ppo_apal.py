@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import sys
@@ -23,12 +24,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from baselines.graph_baseline import GraphBaselineActorCritic
+from baselines.graph_baseline import GraphBaselineActorCritic, SimpleWorkerHead
 from baselines.literature.common import (
     evaluate_graph_policy,
     export_best_schedule,
+    is_r5_learning_protocol,
     load_training_metrics,
     make_eval_env,
+    LiteratureCheckpointSaver,
     prepare_literature_output,
     save_literature_checkpoint,
     training_data_source,
@@ -38,12 +41,13 @@ from configs import configs
 from ppo_agent import PPOAgent
 from runtime.hydra_config import ExtraArgument, HydraCliError, hydra_help, initialize_hydra_runtime, should_show_help
 from runtime.seed import set_seed
+from training.async_evaluation import AsyncEvaluationManager
 from training.rollout_service import APALRolloutService
 from utils.device_utils import clear_torch_cache, get_available_device
 from utils.vector_env import EnvCreator, VectorEnv
 
 
-METHOD_NAME = "Simple-HeteroGAT-PPO"
+METHOD_NAME = "L2D-PPO-APAL"
 ENTRYPOINT = "baselines/literature_ppo/train_l2d_ppo_apal.py"
 EXTRA_ARGS = {
     "output_dir": ExtraArgument(default=None, help="可选输出目录；缺省写入 runs artifacts"),
@@ -51,7 +55,42 @@ EXTRA_ARGS = {
 
 
 class SimpleHeteroGATPPO(GraphBaselineActorCritic):
-    """历史联合动作异构图 PPO；不再将其错误标记为 L2D。"""
+    """受 L2D 思想启发的 APAL 异构图联合动作 PPO。"""
+
+
+def preflight_l2d_ppo_r5_config(config: Any) -> bool:
+    """在创建环境前拒绝会触发 Worker Pointer v2 的 r5 配置。"""
+    if str(getattr(config, "reschedule_async_protocol", "")) != "r5_task_delay_v1":
+        raise ValueError("L2D-PPO-APAL r5 训练必须使用 reschedule_async_protocol=r5_task_delay_v1")
+    if str(getattr(config, "team_selection_mode", "")) != "autoregressive":
+        raise ValueError("L2D-PPO-APAL r5 必须使用 team_selection_mode=autoregressive")
+    if bool(getattr(config, "worker_pointer_v2_dynamic_eft_features", True)):
+        raise ValueError("L2D-PPO-APAL r5 必须关闭 worker_pointer_v2_dynamic_eft_features")
+    if hasattr(SimpleWorkerHead, "initialize_v2_state"):
+        raise RuntimeError("SimpleWorkerHead 不得提供 Worker Pointer v2 状态接口")
+    if int(getattr(config, "task_feat_dim", 0)) != 24:
+        raise ValueError("L2D-PPO-APAL r5 必须使用 task_feat_dim=24")
+    if int(getattr(config, "worker_feat_dim", 0)) != 17:
+        raise ValueError("L2D-PPO-APAL r5 必须使用 worker_feat_dim=17")
+    if int(getattr(config, "num_skill_types", 0)) != 5 or int(
+        getattr(config, "worker_skill_feature_slots", 0)
+    ) != 5:
+        raise ValueError("L2D-PPO-APAL r5 必须使用五技能 worker feature layout")
+    initialization = str(getattr(config, "initialization", "random"))
+    if initialization != "random":
+        raise ValueError("L2D-PPO-APAL r5 正式训练必须使用 initialization=random")
+    warm_start = str(getattr(config, "reschedule_baseline_model_path", "")).strip()
+    if warm_start:
+        raise ValueError("L2D-PPO-APAL r5 禁止从旧初始调度模型 warm start")
+    return True
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _save_checkpoint(
@@ -63,6 +102,16 @@ def _save_checkpoint(
     episode: int,
     dataset_selector_state: dict[str, Any] | None = None,
 ) -> None:
+    raw_manifest_path = str(getattr(configs, "reschedule_manifest_path", "")).strip()
+    manifest_path = Path(raw_manifest_path)
+    if raw_manifest_path and not manifest_path.is_absolute():
+        manifest_path = PROJECT_ROOT / manifest_path
+    manifest_path = manifest_path.resolve() if raw_manifest_path else manifest_path
+    formal_r5 = bool(
+        str(getattr(configs, "reschedule_async_protocol", "")) == "r5_task_delay_v1"
+        and manifest_path.is_file()
+    )
+
     save_literature_checkpoint(
         path,
         algorithm=METHOD_NAME,
@@ -73,6 +122,19 @@ def _save_checkpoint(
         extra={
             "optimizer": "PPO",
             "model_type": "SimpleHeteroGATPPO",
+            "implementation_variant": "apal_heterogat_joint_action_v1",
+            "training_protocol": str(getattr(configs, "reschedule_async_protocol", "")),
+            "initialization": "random",
+            "team_selection_mode": str(getattr(configs, "team_selection_mode", "")),
+            "worker_pointer_v2_dynamic_eft_features": bool(
+                getattr(configs, "worker_pointer_v2_dynamic_eft_features", False)
+            ),
+            "manifest_path": str(manifest_path) if raw_manifest_path else "",
+            "manifest_sha256": _sha256(manifest_path) if formal_r5 else "",
+            "formal_r5_checkpoint": formal_r5,
+            "comparison_role": (
+                "formal_r5_baseline" if formal_r5 else "auxiliary_initial_checkpoint"
+            ),
             "batch_size": int(agent.batch_size),
             "k_epochs": int(agent.k_epochs),
             "eps_clip": float(agent.eps_clip),
@@ -89,7 +151,7 @@ def _load_resume_checkpoint(
     agent: PPOAgent,
 ) -> tuple[int, float, dict[str, Any] | None]:
     checkpoint = torch.load(path, map_location=agent.device, weights_only=False)
-    if checkpoint.get("algorithm") != METHOD_NAME:
+    if checkpoint.get("algorithm") not in {METHOD_NAME, "Simple-HeteroGAT-PPO"}:
         raise ValueError(f"checkpoint algorithm={checkpoint.get('algorithm')!r}，不是 {METHOD_NAME}")
     agent.policy.load_state_dict(checkpoint["model_state_dict"])
     if "optimizer_state_dict" in checkpoint:
@@ -167,9 +229,14 @@ def _restore_service_dataset_state(
 def train(args: Any) -> None:
     seed = int(getattr(configs, "seed", 42))
     set_seed(seed)
+    preflight_l2d_ppo_r5_config(configs)
     output_dir = prepare_literature_output(args, method_name=METHOD_NAME, entrypoint=ENTRYPOINT)
     start_time = time.time()
     device = get_available_device()
+
+    r5_protocol = is_r5_learning_protocol(configs)
+    if r5_protocol and device.type != "cuda":
+        raise RuntimeError("r5 literature PPO 训练期异步验证必须使用 CUDA")
 
     train_vector_env = _build_training_vector_env(args, seed=seed)
     eval_env = make_eval_env(args, seed=seed)
@@ -201,6 +268,12 @@ def train(args: Any) -> None:
         eval_env=eval_env,
         config=configs,
         device=device,
+    )
+
+    async_manager = (
+        AsyncEvaluationManager(config=configs, latest_path=latest_path, best_path=best_path, project_root=PROJECT_ROOT)
+        if r5_protocol
+        else None
     )
 
     if bool(getattr(args, "resume", False)):
@@ -271,39 +344,49 @@ def train(args: Any) -> None:
         }
 
         if episode % int(getattr(configs, "eval_freq", 1)) == 0:
-            eval_metrics, eval_schedule, _eval_runs = evaluate_graph_policy(
-                agent.policy,
-                eval_env,
-                device,
-                seed=seed,
-                num_runs=1,
-                temperature=float(getattr(configs, "eval_temperature", 0.0)),
-            )
-            row.update(
-                {
-                    "eval_makespan": float(eval_metrics["makespan"]),
-                    "eval_valid": float(eval_metrics["valid"]),
-                    "eval_complete": float(eval_metrics["complete"]),
-                    "eval_inference_time": float(eval_metrics["inference_time"]),
-                }
-            )
-            if eval_metrics["valid"] >= 1.0 and float(eval_metrics["makespan"]) < best_makespan:
-                best_makespan = float(eval_metrics["makespan"])
-                best_eval_schedule = list(eval_schedule)
-                _save_checkpoint(
-                    best_path,
-                    agent,
-                    best_makespan,
-                    args,
-                    episode=episode,
-                    dataset_selector_state=_service_dataset_state(service),
+            if r5_protocol:
+                if episode % int(getattr(configs, "async_eval_submit_every_episodes", 2)) == 0:
+                    assert async_manager is not None
+                    async_manager.submit(
+                        LiteratureCheckpointSaver(
+                            lambda path: _save_checkpoint(path, agent, best_makespan, args, episode=episode, dataset_selector_state=_service_dataset_state(service))
+                        ),
+                        episode=episode,
+                    )
+            else:
+                eval_metrics, eval_schedule, _eval_runs = evaluate_graph_policy(
+                    agent.policy,
+                    eval_env,
+                    device,
+                    seed=seed,
+                    num_runs=1,
+                    temperature=float(getattr(configs, "eval_temperature", 0.0)),
                 )
-                export_best_schedule(output_dir, best_eval_schedule, title="simple_heterogat_ppo_best")
-                print(
-                    f"[{METHOD_NAME}][Checkpoint] ep={episode} 保存最优模型 "
-                    f"Mk={best_makespan:.2f} path={best_path}",
-                    flush=True,
+                row.update(
+                    {
+                        "eval_makespan": float(eval_metrics["makespan"]),
+                        "eval_valid": float(eval_metrics["valid"]),
+                        "eval_complete": float(eval_metrics["complete"]),
+                        "eval_inference_time": float(eval_metrics["inference_time"]),
+                    }
                 )
+                if eval_metrics["valid"] >= 1.0 and float(eval_metrics["makespan"]) < best_makespan:
+                    best_makespan = float(eval_metrics["makespan"])
+                    best_eval_schedule = list(eval_schedule)
+                    _save_checkpoint(
+                        best_path,
+                        agent,
+                        best_makespan,
+                        args,
+                        episode=episode,
+                        dataset_selector_state=_service_dataset_state(service),
+                    )
+                    export_best_schedule(output_dir, best_eval_schedule, title="simple_heterogat_ppo_best")
+                    print(
+                        f"[{METHOD_NAME}][Checkpoint] ep={episode} 保存最优模型 "
+                        f"Mk={best_makespan:.2f} path={best_path}",
+                        flush=True,
+                    )
 
         rows.append(row)
         print(
@@ -334,6 +417,8 @@ def train(args: Any) -> None:
         episode=max_episodes,
         dataset_selector_state=_service_dataset_state(service),
     )
+    if async_manager is not None:
+        async_manager.finalize(wait=True)
     write_training_metrics(output_dir, rows)
     print(f"[{METHOD_NAME}] done elapsed={time.time() - start_time:.1f}s best={best_makespan:.2f}", flush=True)
     clear_torch_cache()

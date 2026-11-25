@@ -1,0 +1,9 @@
+﻿defaults:
+  - /experiment/initial_worker_pointer_v2_full_x@_global_
+  - _self_
+
+experiment:
+  experiment_name: initial_worker_pointer_v2_full_x_no_b1
+
+model:
+  conditional_head_baseline_mode: "off"

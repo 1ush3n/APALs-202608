@@ -1,0 +1,28 @@
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Assembly line balancing and APAL positioning}
+
+Classical assembly line balancing provides the historical foundation for allocating tasks to stations under precedence and workload constraints. However, surveys and taxonomies of generalized assembly line balancing emphasize that real production systems often exceed the assumptions of simple line balancing. They may involve heterogeneous resources, line variants, additional assignment restrictions, and multiple operational objectives. This literature is important for APAL because it supports the problem boundary: APAL should be positioned within complex assembly line balancing and scheduling, not reduced to a generic benchmark scheduling problem.
+
+For aircraft assembly, the operational constraints are especially strong. Aerospace assembly tasks often involve large task sets, strict precedence, resource heterogeneity, load balance, and rapid reaction to disturbances. Related aircraft-structure task allocation work highlights load balancing, conflict avoidance, and real-time reassignment after failures. Although such work does not solve APAL directly, it motivates the dynamic rescheduling setting considered here.
+
+\subsection{Graph learning for scheduling}
+
+Graph neural networks have become a common representation tool for neural combinatorial optimization and scheduling. In JSSP and FJSP, operations, machines, and precedence relations can be encoded as disjunctive or heterogeneous graphs, while reinforcement learning learns dispatching rules from graph states. These studies support two methodological choices in this paper: scheduling can be modeled as sequential decision making, and graph encoders can provide policies that transfer across related instances.
+
+Direct APAL evidence is provided by Wen et al.~\cite{wen2026ginppo}, who formulate worker-skill-level-aware pulsating aircraft assembly scheduling within one workstation and combine a job-graph GIN encoder with PPO. Their serial schedule generation scheme learns to select the next feasible operation, and one model trained on 30-, 50-, and 100-operation instances is evaluated on instances with up to 800 operations. This study establishes that graph PPO and cross-scale policy transfer already have a direct APAL precedent. The present work therefore does not claim novelty from either ingredient alone; it instead studies an entity-explicit action that sequentially selects an operation, a physical station, and a prescribed-cardinality worker subset under schedule-endogenous worker--station binding.
+
+The APAL setting considered here differs from job-only graph policies and operation--machine models in its resource semantics. The key decision is not only which operation should be scheduled next. It also requires selecting a physical station and constructing a worker team that satisfies skill, station-binding, and capacity constraints, while worker release times determine the earliest feasible start. Therefore, graph learning is used here as an APAL-specific modeling tool rather than as a direct replacement for a JSSP/FJSP graph.
+
+\subsection{Heterogeneous resources and skilled workers}
+
+Recent FJSP extensions with skilled workers and dual-resource constraints are closer to APAL than machine-only scheduling models. They show that worker capabilities and resource relations can materially affect scheduling performance. However, most of them still do not represent APAL pulse-line spatial flow, fixed or dynamic station-worker relations, and variable-size worker-team construction under a single action. HGP-PPO therefore uses heterogeneous graph attention and pointer decoding to model the APAL-specific coupling between operations, stations, skills, and workers.
+
+\subsection{Dynamic and stochastic rescheduling}
+
+Dynamic scheduling and stochastic scheduling studies emphasize that disturbances should be part of the evaluation design rather than treated as incidental noise. For APAL, this principle leads to disturbance manifests with material delays, processing-time perturbations, worker unavailability, station abnormality, and mixed disturbances. The rescheduling objective should include not only makespan, but also eligibility, takt violation, frozen-task violation, start-time deviation, station changes, team changes, and response time. This broader metric set is necessary because a schedule that improves makespan but disrupts frozen operations or requires excessive changes may be unacceptable in an aircraft pulse line.
+
+\subsection{Positioning of this paper}
+
+The closest methodological references motivate graph reinforcement learning, heterogeneous relation modeling, and learned dispatching. The closest industrial references motivate APAL as a constrained aircraft assembly problem. This paper connects these two directions by using graph reinforcement learning to solve APAL-specific multi-resource scheduling and rescheduling. The central claim is not that GNN, PPO, or pointer networks are new in general. The claim is that their combination is structured around APAL's operation-station-worker-team decision, hard feasibility constraints, and dynamic rescheduling requirements.

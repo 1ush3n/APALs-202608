@@ -3,7 +3,8 @@ import multiprocessing as mp
 import os
 import time
 from multiprocessing.connection import wait
-from typing import Callable, List, Tuple, Any, Optional
+from pathlib import Path
+from typing import Callable, List, Tuple, Any, Optional, Sequence
 import numpy as np
 import torch
 from torch_geometric.data import HeteroData
@@ -13,8 +14,8 @@ class EnvCreator:
     一个可序列化 (Picklable) 的环境创建器。
     用于规避 Windows 平台 spawn 模式下闭包 (Local Function) 无法被序列化传输至子进程的问题。
     """
-    def __init__(self, data_path_or_dir: str, seed_offset: int = 42, config_overrides: Optional[dict] = None):
-        self.data_path_or_dir = data_path_or_dir
+    def __init__(self, data_path_or_dir: str | Sequence[str], seed_offset: int = 42, config_overrides: Optional[dict] = None):
+        self.data_path_or_dir = tuple(data_path_or_dir) if not isinstance(data_path_or_dir, str) else data_path_or_dir
         self.seed_offset = seed_offset
         if config_overrides is None:
             try:
@@ -39,9 +40,10 @@ class VectorEnvWorkerError(RuntimeError):
 def _snapshot_to_ipc(snapshot: dict) -> dict:
     """只转换 snapshot 中可能触发 Torch 共享内存传输的张量。"""
     result = dict(snapshot)
-    base_worker_x = result.get("base_worker_x")
-    if torch.is_tensor(base_worker_x):
-        result["base_worker_x"] = base_worker_x.detach().cpu().numpy()
+    for key in ("base_task_x", "base_worker_x"):
+        value = result.get(key)
+        if torch.is_tensor(value):
+            result[key] = value.detach().cpu().numpy().copy()
     return result
 
 
@@ -90,6 +92,7 @@ def _worker(
             'pid': os.getpid(),
             'torch_num_threads': torch.get_num_threads(),
             'omp_num_threads': os.environ.get("OMP_NUM_THREADS"),
+            'cuda_available': torch.cuda.is_available(),
         },
     }
     conn.send(("INIT_OK", init_info))
@@ -105,12 +108,13 @@ def _worker(
             if cmd == 'step':
                 if data is None:
                     # 停滞或死锁处理，不步进，返回轻量级切片 snapshot 作为 obs 兜底
-                    obs = env.get_state_snapshot()
+                    snap = _snapshot_to_ipc(env.get_state_snapshot())
                     reward = 0.0
                     done = True
                     info = {}
                 else:
-                    obs, reward, done, info = env.step(data)
+                    _, reward, done, info = env.step(data)
+                    snap = _snapshot_to_ipc(env.get_state_snapshot())
                 
                 # 随每一次步进返回更新后的动态属性
                 dynamic_info = {
@@ -120,10 +124,11 @@ def _worker(
                     'current_time': getattr(env, 'current_time', 0.0),
                 }
                 info['dynamic_info'] = dynamic_info
-                conn.send(("OK", (obs, reward, done, info)))
+                conn.send(("OK", (snap, reward, done, info)))
                 
             elif cmd == 'reset':
-                obs = env.reset(**data)
+                env.reset(**data)
+                snap = _snapshot_to_ipc(env.get_state_snapshot())
                 
                 # 域随机化后，很多静态和动态属性会改变，需回传主进程同步刷新缓存
                 dynamic_info = {
@@ -135,7 +140,7 @@ def _worker(
                     'mean_task_time': getattr(env, 'mean_task_time', None),
                     'current_time': getattr(env, 'current_time', 0.0),
                 }
-                conn.send(("OK", (obs, dynamic_info)))
+                conn.send(("OK", (snap, dynamic_info)))
 
             elif cmd == 'reset_rollout':
                 old_skip_obs = getattr(env, 'skip_obs_building', False)
@@ -261,12 +266,12 @@ def _worker(
                 
             elif cmd == 'rebuild_state_from_snapshot':
                 # 兜底接口，通常只由本地 Proxy 直接执行，此处仅作向下兼容
-                res = env.rebuild_state_from_snapshot(data)
-                conn.send(("OK", res))
+                env.rebuild_state_from_snapshot(data)
+                conn.send(("OK", None))
                 
             elif cmd == 'initialize_dataset_context':
-                idx = data
-                conn.send(("OK", env.export_dataset_context(idx)))
+                idx = int(data)
+                conn.send(("OK", env.get_dataset_descriptor(idx)))
                 
             elif cmd == 'close':
                 conn.send(("OK", None))
@@ -280,6 +285,41 @@ def _worker(
 
 
 class EnvProxy:
+    def _load_dataset_context_locally(self, idx: int) -> dict:
+        """在主进程按路径重建静态上下文，避免通过 Pipe 传递 Tensor。"""
+        if not 0 <= idx < len(self.dataset_pool):
+            raise IndexError(f"数据集索引越界: {idx}/{len(self.dataset_pool)}")
+        descriptor = self.dataset_pool[idx]
+        if not descriptor or not descriptor.get("file_path"):
+            raise VectorEnvWorkerError(
+                f"VectorEnv worker {self._idx} 缺少数据集 {idx} 的文件描述"
+            )
+
+        from environment import AirLineEnv_Graph
+
+        file_path = Path(str(descriptor["file_path"])).resolve()
+        loader = AirLineEnv_Graph(file_path, seed=0)
+        source = loader.dataset_pool[loader.active_dataset_idx]
+        required = (
+            "file_path",
+            "num_tasks",
+            "base_data",
+            "base_task_x",
+            "base_worker_x",
+            "base_station_x",
+            "task_skill_edge_index",
+            "mean_task_time",
+            "ideal_station_load",
+        )
+        missing = [key for key in required if key not in source]
+        if missing:
+            raise VectorEnvWorkerError(
+                f"数据集 {file_path} 的静态上下文缺少字段: {missing}"
+            )
+        context = {key: source[key] for key in required}
+        context["file_path"] = str(file_path)
+        self.dataset_pool[idx] = context
+        return context
     """
     用于多进程 VectorEnv 的环境代理类。
     对主进程表现得与单环境一模一样，通过本地属性影子缓存实现超低延迟的同步属性查询。
@@ -347,17 +387,17 @@ class EnvProxy:
 
     def reset(self, randomize_duration: bool = False, randomize_workers: bool = False, seed: Optional[int] = None):
         self._conn.send(('reset', {'randomize_duration': randomize_duration, 'randomize_workers': randomize_workers, 'seed': seed}))
-        obs, dynamic_info = self._recv("reset")
+        snapshot, dynamic_info = self._recv("reset")
         self.update_dynamic_properties(dynamic_info)
         self.update_static_properties(dynamic_info)
-        return obs
+        return self.rebuild_state_from_snapshot(snapshot)
 
     def step(self, action: Any):
         self._conn.send(('step', action))
-        obs, reward, done, info = self._recv("step")
+        snapshot, reward, done, info = self._recv("step")
         if 'dynamic_info' in info:
             self.update_dynamic_properties(info.pop('dynamic_info'))
-        return obs, reward, done, info
+        return self.rebuild_state_from_snapshot(snapshot), reward, done, info
 
     def get_masks(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         self._conn.send(('get_masks', None))
@@ -413,16 +453,24 @@ class EnvProxy:
             self.dataset_pool.append(None)
         ctx = self.dataset_pool[ctx_idx]
         
-        # 防御机制：如果该数据集尚未在代理端加载 base_data，发送紧急 IPC 请求子进程就地初始化
+        # 数据集上下文只在主进程按路径构造，禁止通过 Pipe 传递 Tensor。
         if ctx is None or 'base_data' not in ctx:
-            self._conn.send(('initialize_dataset_context', ctx_idx))
-            self.dataset_pool[ctx_idx] = self._recv("initialize_dataset_context")
-            ctx = self.dataset_pool[ctx_idx]
+            ctx = self._load_dataset_context_locally(ctx_idx)
 
         data = ctx['base_data'].clone()
         
         # 1. 重建任务节点特征
-        task_x = ctx['base_task_x'].clone()
+        snapshot_task_x = snapshot.get('base_task_x')
+        task_x = (
+            torch.as_tensor(snapshot_task_x).clone()
+            if snapshot_task_x is not None
+            else ctx['base_task_x'].clone()
+        )
+        if task_x.shape != ctx['base_task_x'].shape:
+            raise ValueError(
+                "向量环境快照任务特征形状与数据集上下文不一致: "
+                f"snapshot={tuple(task_x.shape)}, context={tuple(ctx['base_task_x'].shape)}"
+            )
         task_x[:, 1:5] = 0.0
         task_x[torch.arange(ctx['num_tasks']), snapshot['task_status'] + 1] = 1.0
         
@@ -648,17 +696,38 @@ class VectorEnv:
         except (TypeError, ValueError):
             return max(1, (os.cpu_count() or 1) // max(1, int(num_envs)))
 
+    def _send_worker(self, index: int, command: tuple[str, Any]) -> None:
+        if self.closed:
+            raise VectorEnvWorkerError(
+                "VectorEnv 已关闭或因 worker 失败而失效，不可复用"
+            )
+        try:
+            self.parent_conns[index].send(command)
+        except Exception as exc:
+            self.close()
+            raise VectorEnvWorkerError(
+                f"VectorEnv worker {index} 命令发送失败，环境已失效且不可复用"
+            ) from exc
+
     def _recv_worker(self, index: int, operation: str):
         conn = self.parent_conns[index]
         process = self.processes[index]
         if not conn.poll(self.command_timeout_sec):
             state = "alive" if process.is_alive() else f"exitcode={process.exitcode}"
+            self.close()
             raise TimeoutError(
                 f"VectorEnv worker {index} 执行 {operation} 超时 "
                 f"({self.command_timeout_sec:.1f}s, {state})"
             )
-        status, value = conn.recv()
+        try:
+            status, value = conn.recv()
+        except (EOFError, OSError) as exc:
+            self.close()
+            raise VectorEnvWorkerError(
+                f"VectorEnv worker {index} 执行 {operation} 时通信中断"
+            ) from exc
         if status != "OK":
+            self.close()
             raise VectorEnvWorkerError(
                 f"VectorEnv worker {index} 执行 {operation} 失败:\n{value}"
             )
@@ -679,6 +748,7 @@ class VectorEnv:
                     process = self.processes[index]
                     state = "alive" if process.is_alive() else f"exitcode={process.exitcode}"
                     details.append(f"{index}:{state}")
+                self.close()
                 raise TimeoutError(
                     f"VectorEnv workers 执行 {operation} 超时 "
                     f"({self.command_timeout_sec:.1f}s, pending={','.join(details)})"
@@ -690,9 +760,16 @@ class VectorEnv:
 
             for conn in ready:
                 index = conn_to_index[conn]
-                status, value = conn.recv()
+                try:
+                    status, value = conn.recv()
+                except (EOFError, OSError) as exc:
+                    self.close()
+                    raise VectorEnvWorkerError(
+                        f"VectorEnv worker {index} 执行 {operation} 时通信中断"
+                    ) from exc
                 pending.pop(index, None)
                 if status != "OK":
+                    self.close()
                     raise VectorEnvWorkerError(
                         f"VectorEnv worker {index} 执行 {operation} 失败:\n{value}"
                     )
@@ -703,15 +780,15 @@ class VectorEnv:
     def reset_all(self, randomize_duration: bool = False, randomize_workers: bool = False) -> List[Any]:
         """异步广播复位指令并同步收集子图状态"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('reset', {'randomize_duration': randomize_duration, 'randomize_workers': randomize_workers}))
+            self._send_worker(i, ('reset', {'randomize_duration': randomize_duration, 'randomize_workers': randomize_workers}))
         
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "reset")
         results = []
         for i in range(self.num_envs):
-            obs, dynamic_info = worker_results[i]
+            snapshot, dynamic_info = worker_results[i]
             self.envs[i].update_dynamic_properties(dynamic_info)
             self.envs[i].update_static_properties(dynamic_info)
-            results.append(obs)
+            results.append(self.envs[i].rebuild_state_from_snapshot(snapshot))
         return results
 
     def reset_rollout_all(
@@ -728,7 +805,7 @@ class VectorEnv:
             'randomize_workers': bool(randomize_workers),
         }
         for index in range(self.num_envs):
-            self.parent_conns[index].send(('reset_rollout', request))
+            self._send_worker(index, ('reset_rollout', request))
         worker_results = self._recv_workers_unordered(
             list(range(self.num_envs)),
             "reset_rollout",
@@ -752,28 +829,28 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(("reset", dict(requests[index])))
+            self._send_worker(index, ("reset", dict(requests[index])))
         worker_results = self._recv_workers_unordered(target_indices, "reset")
         results: dict[int, Any] = {}
         for index in target_indices:
-            obs, dynamic_info = worker_results[index]
+            snapshot, dynamic_info = worker_results[index]
             self.envs[index].update_dynamic_properties(dynamic_info)
             self.envs[index].update_static_properties(dynamic_info)
-            results[index] = obs
+            results[index] = self.envs[index].rebuild_state_from_snapshot(snapshot)
         return results
 
     def step_all(self, actions: List[Any]) -> Tuple[List[Any], List[float], List[bool], List[dict]]:
         """异步发送物理步进指令并收集步进后的全部观测及奖励数据"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('step', actions[i]))
+            self._send_worker(i, ('step', actions[i]))
                 
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "step")
         results = []
         for i in range(self.num_envs):
-            obs, reward, done, info = worker_results[i]
+            snapshot, reward, done, info = worker_results[i]
             if 'dynamic_info' in info:
                 self.envs[i].update_dynamic_properties(info.pop('dynamic_info'))
-            results.append((obs, reward, done, info))
+            results.append((self.envs[i].rebuild_state_from_snapshot(snapshot), reward, done, info))
                 
         next_states = [r[0] for r in results]
         rewards = [r[1] for r in results]
@@ -784,7 +861,7 @@ class VectorEnv:
     def step_snapshot_all(self, actions: List[Any]) -> Tuple[List[dict], List[float], List[bool], List[dict]]:
         """异步步进并返回轻量 snapshot，主进程本地 rebuild 以消除 HeteroData 跨进程序列化开销"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('step_snapshot', actions[i]))
+            self._send_worker(i, ('step_snapshot', actions[i]))
                 
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "step_snapshot")
         results = []
@@ -809,7 +886,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(("step_snapshot", actions[index]))
+            self._send_worker(index, ("step_snapshot", actions[index]))
         worker_results = self._recv_workers_unordered(target_indices, "step_snapshot")
         results: dict[int, tuple[dict, float, bool, dict]] = {}
         for index in target_indices:
@@ -837,7 +914,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(('step_rollout', actions[index]))
+            self._send_worker(index, ('step_rollout', actions[index]))
         worker_results = self._recv_workers_unordered(target_indices, "step_rollout")
         results = {}
         for index in target_indices:
@@ -856,7 +933,7 @@ class VectorEnv:
     def get_masks_all(self) -> List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """异步收集各进程环境的动作空间掩码"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('get_masks', None))
+            self._send_worker(i, ('get_masks', None))
         
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "get_masks")
         results = []
@@ -868,7 +945,7 @@ class VectorEnv:
     def get_masks_and_snapshots_all(self):
         """合并 IPC：一次命令返回 masks + snapshot + dynamic_info，替代 get_masks_all() + 逐环境 get_state_snapshot()"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('get_rollout_state', None))
+            self._send_worker(i, ('get_rollout_state', None))
         
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "get_rollout_state")
         masks_list = []
@@ -886,7 +963,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(('get_rollout_state', None))
+            self._send_worker(index, ('get_rollout_state', None))
 
         worker_results = self._recv_workers_unordered(target_indices, "get_rollout_state")
         results = {}
@@ -907,7 +984,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(('try_wait_for_resources', None))
+            self._send_worker(index, ('try_wait_for_resources', None))
 
         worker_results = self._recv_workers_unordered(target_indices, "try_wait_for_resources")
         results = {}
@@ -933,7 +1010,7 @@ class VectorEnv:
         if not target_indices:
             return {}
         for index in target_indices:
-            self.parent_conns[index].send(('wait_rollout', None))
+            self._send_worker(index, ('wait_rollout', None))
         worker_results = self._recv_workers_unordered(target_indices, "wait_rollout")
         results = {}
         for index in target_indices:
@@ -953,7 +1030,7 @@ class VectorEnv:
     def switch_dataset_all(self, idx: int):
         """同步广播命令给所有并行子进程切换相同的数据集"""
         for i in range(self.num_envs):
-            self.parent_conns[i].send(('switch_dataset', idx))
+            self._send_worker(i, ('switch_dataset', idx))
             
         worker_results = self._recv_workers_unordered(list(range(self.num_envs)), "switch_dataset")
         for i in range(self.num_envs):
@@ -967,8 +1044,9 @@ class VectorEnv:
         if not target_indices:
             return
         for index in target_indices:
-            self.parent_conns[index].send(
-                ("switch_dataset", int(dataset_indices[index]))
+            self._send_worker(
+                index,
+                ("switch_dataset", int(dataset_indices[index])),
             )
         worker_results = self._recv_workers_unordered(
             target_indices,

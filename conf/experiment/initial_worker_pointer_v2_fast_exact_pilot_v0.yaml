@@ -1,0 +1,6 @@
+defaults:
+  - /experiment/initial_worker_pointer_v2_fast_exact_pilot@_global_
+  - _self_
+
+model:
+  worker_pointer_v2_explicit_team_state: false

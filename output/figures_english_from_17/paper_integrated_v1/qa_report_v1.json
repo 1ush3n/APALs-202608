@@ -1,0 +1,227 @@
+[
+  {
+    "slide": 1,
+    "slug": "fig1_apal_unfolding_delay",
+    "raw_png_size": [
+      4800,
+      2700
+    ],
+    "cropped_png_600_size": [
+      4693,
+      2111
+    ],
+    "pdf_size_in": [
+      13.04,
+      5.86
+    ],
+    "aspect_ratio": 2.22,
+    "ieee_716in_print_h_in": 3.22,
+    "ieee_textheight_pct": 34.8,
+    "min_ppt_pt": 8.8,
+    "max_ppt_pt": 12.6,
+    "min_print_pt_at_716in": 4.8,
+    "cjk_count": 0,
+    "forbidden_hits": [],
+    "status": "PASS"
+  },
+  {
+    "slide": 2,
+    "slug": "fig2_compact_b1_b5",
+    "raw_png_size": [
+      4800,
+      2700
+    ],
+    "cropped_png_600_size": [
+      4696,
+      2184
+    ],
+    "pdf_size_in": [
+      13.04,
+      6.07
+    ],
+    "aspect_ratio": 2.15,
+    "ieee_716in_print_h_in": 3.33,
+    "ieee_textheight_pct": 36.0,
+    "min_ppt_pt": 8.6,
+    "max_ppt_pt": 14.4,
+    "min_print_pt_at_716in": 4.7,
+    "cjk_count": 0,
+    "forbidden_hits": [],
+    "status": "PASS"
+  },
+  {
+    "slide": 3,
+    "slug": "fig2_standalone_b1",
+    "raw_png_size": [
+      4800,
+      2700
+    ],
+    "cropped_png_600_size": [
+      4450,
+      2102
+    ],
+    "pdf_size_in": [
+      12.36,
+      5.84
+    ],
+    "aspect_ratio": 2.12,
+    "ieee_716in_print_h_in": 3.38,
+    "ieee_textheight_pct": 36.6,
+    "min_ppt_pt": 9.6,
+    "max_ppt_pt": 16.5,
+    "min_print_pt_at_716in": 5.6,
+    "cjk_count": 0,
+    "forbidden_hits": [],
+    "status": "PASS"
+  },
+  {
+    "slide": 4,
+    "slug": "fig3_standalone_b5",
+    "raw_png_size": [
+      4800,
+      2700
+    ],
+    "cropped_png_600_size": [
+      4296,
+      3387
+    ],
+    "pdf_size_in": [
+      9.13,
+      7.19
+    ],
+    "aspect_ratio": 1.27,
+    "ieee_716in_print_h_in": 5.65,
+    "ieee_textheight_pct": 61.0,
+    "min_ppt_pt": 10.8,
+    "max_ppt_pt": 18.0,
+    "min_print_pt_at_716in": 8.5,
+    "cjk_count": 0,
+    "forbidden_hits": [],
+    "status": "PASS"
+  },
+  {
+    "slide": 5,
+    "slug": "fig_appA_b8_worker_pointer",
+    "raw_png_size": [
+      4800,
+      2700
+    ],
+    "cropped_png_600_size": [
+      4296,
+      2247
+    ],
+    "pdf_size_in": [
+      10.48,
+      5.48
+    ],
+    "aspect_ratio": 1.91,
+    "ieee_716in_print_h_in": 3.75,
+    "ieee_textheight_pct": 40.5,
+    "min_ppt_pt": 9.2,
+    "max_ppt_pt": 16.5,
+    "min_print_pt_at_716in": 6.3,
+    "cjk_count": 0,
+    "forbidden_hits": [],
+    "status": "PASS"
+  },
+  {
+    "slide": 6,
+    "slug": "extra_b3_hetero_gatv2",
+    "raw_png_size": [
+      4800,
+      2700
+    ],
+    "cropped_png_600_size": [
+      4685,
+      2349
+    ],
+    "pdf_size_in": [
+      13.01,
+      6.52
+    ],
+    "aspect_ratio": 1.99,
+    "ieee_716in_print_h_in": 3.59,
+    "ieee_textheight_pct": 38.8,
+    "min_ppt_pt": 9.8,
+    "max_ppt_pt": 14.4,
+    "min_print_pt_at_716in": 5.4,
+    "cjk_count": 0,
+    "forbidden_hits": [],
+    "status": "PASS"
+  },
+  {
+    "slide": 7,
+    "slug": "extra_b6_op_pointer",
+    "raw_png_size": [
+      4800,
+      2700
+    ],
+    "cropped_png_600_size": [
+      4516,
+      2352
+    ],
+    "pdf_size_in": [
+      12.54,
+      6.53
+    ],
+    "aspect_ratio": 1.92,
+    "ieee_716in_print_h_in": 3.73,
+    "ieee_textheight_pct": 40.3,
+    "min_ppt_pt": 9.0,
+    "max_ppt_pt": 13.8,
+    "min_print_pt_at_716in": 5.1,
+    "cjk_count": 0,
+    "forbidden_hits": [],
+    "status": "PASS"
+  },
+  {
+    "slide": 8,
+    "slug": "extra_b10_critic_head",
+    "raw_png_size": [
+      4800,
+      2700
+    ],
+    "cropped_png_600_size": [
+      4481,
+      1731
+    ],
+    "pdf_size_in": [
+      12.45,
+      4.81
+    ],
+    "aspect_ratio": 2.59,
+    "ieee_716in_print_h_in": 2.77,
+    "ieee_textheight_pct": 29.9,
+    "min_ppt_pt": 9.8,
+    "max_ppt_pt": 13.0,
+    "min_print_pt_at_716in": 5.6,
+    "cjk_count": 0,
+    "forbidden_hits": [],
+    "status": "PASS"
+  },
+  {
+    "slide": 9,
+    "slug": "extra_b11_ppo_gae",
+    "raw_png_size": [
+      4800,
+      2700
+    ],
+    "cropped_png_600_size": [
+      4567,
+      2306
+    ],
+    "pdf_size_in": [
+      12.69,
+      6.41
+    ],
+    "aspect_ratio": 1.98,
+    "ieee_716in_print_h_in": 3.62,
+    "ieee_textheight_pct": 39.1,
+    "min_ppt_pt": 9.2,
+    "max_ppt_pt": 15.0,
+    "min_print_pt_at_716in": 5.2,
+    "cjk_count": 0,
+    "forbidden_hits": [],
+    "status": "PASS"
+  }
+]

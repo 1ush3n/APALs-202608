@@ -1,0 +1,1148 @@
+{
+  "version": 1,
+  "kind": "initial_schedule_training_manifest",
+  "protocol": "explicit_fiveskill_v1",
+  "pool_id": "ctg_original_directory_160_frozen_v1",
+  "purpose": "冻结 CTG-FV1 旧目录加载语义；不移动、不复制任何训练 CSV。",
+  "source_directory": "data/scale_400_800_datasets",
+  "source_manifest_80": "manifest.json",
+  "legacy_loader_semantics": "sorted_directory_csvs",
+  "template": "mixed_existing_ctg_pool",
+  "template_sha256": "",
+  "baseline_file": "",
+  "min_length": 400,
+  "max_length": 800,
+  "num_samples": 160,
+  "time_var": 0.2,
+  "seed": "mixed_existing_ctg_pool",
+  "require_explicit_skill_columns": true,
+  "required_skill_ids": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "files": [
+    {
+      "file": "syn_403_77.csv",
+      "target_task_count": 403,
+      "actual_task_count": 403,
+      "graph_node_count": 438,
+      "sha256": "012a74283db5ae81d2755bbcac94d0515e1b5fbbd136067ec1c82c5f0bc61148"
+    },
+    {
+      "file": "syn_412_44.csv",
+      "target_task_count": 412,
+      "actual_task_count": 412,
+      "graph_node_count": 447,
+      "sha256": "d8b2a04139d21310adb33ce08e83d2fb0ad01f29d361010cf1f36281434a6f08"
+    },
+    {
+      "file": "syn_413_65.csv",
+      "target_task_count": 413,
+      "actual_task_count": 413,
+      "graph_node_count": 448,
+      "sha256": "87df78e388da1bb8c227c331d5ffb1823ed6df8fa888509889d26c6a894e6d82"
+    },
+    {
+      "file": "syn_415_59.csv",
+      "target_task_count": 415,
+      "actual_task_count": 415,
+      "graph_node_count": 450,
+      "sha256": "606787cf92cb23dbf6d8bcc8a62ed0b3a7ad4a6bc57f3485e1c52ad942ac1b85"
+    },
+    {
+      "file": "syn_416_58.csv",
+      "target_task_count": 416,
+      "actual_task_count": 416,
+      "graph_node_count": 451,
+      "sha256": "76919292079e2f35188469a39a5757f61aff77a945d837e63770c2575bfae4ba"
+    },
+    {
+      "file": "syn_422_96.csv",
+      "target_task_count": 422,
+      "actual_task_count": 422,
+      "graph_node_count": 457,
+      "sha256": "da9ccf5b005885fc8088b42b12f22d2f272070b6e97b32ba34bf170711b842ee"
+    },
+    {
+      "file": "syn_423_112.csv",
+      "target_task_count": 423,
+      "actual_task_count": 423,
+      "graph_node_count": 458,
+      "sha256": "6dd802f0ab6b78beefe1fbf80a6202968c0ebf3ccd84af8678f6db4ae184f2a8"
+    },
+    {
+      "file": "syn_435_111.csv",
+      "target_task_count": 435,
+      "actual_task_count": 435,
+      "graph_node_count": 470,
+      "sha256": "27df17d39f7f3696750db4382f32b87fc2ccabb2bf8f052ed4ae6688714dd75b"
+    },
+    {
+      "file": "syn_440_102.csv",
+      "target_task_count": 440,
+      "actual_task_count": 440,
+      "graph_node_count": 475,
+      "sha256": "47e6607708af9d55bf3deb993cf252f5aabee6f1124579766377c88c077660a1"
+    },
+    {
+      "file": "syn_440_117.csv",
+      "target_task_count": 440,
+      "actual_task_count": 440,
+      "graph_node_count": 475,
+      "sha256": "05b1f605417029a0467eb2eefca5b00f8e111ae2c9375ebf03cddec9917db7ff"
+    },
+    {
+      "file": "syn_444_55.csv",
+      "target_task_count": 444,
+      "actual_task_count": 444,
+      "graph_node_count": 479,
+      "sha256": "ac7482c21dc70d053c57b37107ca2f069768d68877240e59bf88eac7379f8ca9"
+    },
+    {
+      "file": "syn_447_60.csv",
+      "target_task_count": 447,
+      "actual_task_count": 447,
+      "graph_node_count": 482,
+      "sha256": "de4b04a2040ce9e30b2104559f5251d5cc7a127282f4eca3b2717bf26100c172"
+    },
+    {
+      "file": "syn_447_89.csv",
+      "target_task_count": 447,
+      "actual_task_count": 447,
+      "graph_node_count": 482,
+      "sha256": "8bb1b0d160c019b937ea6869eb8f5e859f5c560cd3f020900abb6e6b5660bdf1"
+    },
+    {
+      "file": "syn_449_91.csv",
+      "target_task_count": 449,
+      "actual_task_count": 449,
+      "graph_node_count": 484,
+      "sha256": "602f2fe58114a7e37f53f2b3f499081df8491cb89dc721a764889d3f7ae7562b"
+    },
+    {
+      "file": "syn_451_119.csv",
+      "target_task_count": 451,
+      "actual_task_count": 451,
+      "graph_node_count": 486,
+      "sha256": "533ccc200f88b16ef50515044923893cb0eef58d1827a05ba59bd152d90087f5"
+    },
+    {
+      "file": "syn_452_51.csv",
+      "target_task_count": 452,
+      "actual_task_count": 452,
+      "graph_node_count": 487,
+      "sha256": "119074c57a971a4d4206e4385c3f8661ce93d3bf4a6f96cf33a3b28d55b48e30"
+    },
+    {
+      "file": "syn_452_88.csv",
+      "target_task_count": 452,
+      "actual_task_count": 452,
+      "graph_node_count": 487,
+      "sha256": "84ad4b4bd71095507757cdb68b66d582d61881894bcaf524a4f1c8f6c1243333"
+    },
+    {
+      "file": "syn_457_43.csv",
+      "target_task_count": 457,
+      "actual_task_count": 457,
+      "graph_node_count": 492,
+      "sha256": "e6c9b068f500e99a193225b68d1d215345dd4b46e6a4b0e57f1e1eeb16069646"
+    },
+    {
+      "file": "syn_463_100.csv",
+      "target_task_count": 463,
+      "actual_task_count": 463,
+      "graph_node_count": 498,
+      "sha256": "6e854c60f42da34e08443225b8b42305c2dee26519c019362ff558ac08af7cc3"
+    },
+    {
+      "file": "syn_471_49.csv",
+      "target_task_count": 471,
+      "actual_task_count": 471,
+      "graph_node_count": 506,
+      "sha256": "987e18554b166bd61e08675acaae38ae980a6ceb0fb7f3e549109839f8030572"
+    },
+    {
+      "file": "syn_479_84.csv",
+      "target_task_count": 479,
+      "actual_task_count": 479,
+      "graph_node_count": 514,
+      "sha256": "250fd51400496f6dce9b568919cbbcfd091294c772538da047e714063f9b1376"
+    },
+    {
+      "file": "syn_481_79.csv",
+      "target_task_count": 481,
+      "actual_task_count": 481,
+      "graph_node_count": 516,
+      "sha256": "b5b109b5c829281b8dd9adcdc994fcd6a06f28c4053ade6cb536df8e3cce99dd"
+    },
+    {
+      "file": "syn_498_109.csv",
+      "target_task_count": 498,
+      "actual_task_count": 498,
+      "graph_node_count": 533,
+      "sha256": "fb8bcc029bcaf3daeb4d6ea7452edafc66dcd4749641f06d8687034e52ee2842"
+    },
+    {
+      "file": "syn_501_67.csv",
+      "target_task_count": 501,
+      "actual_task_count": 501,
+      "graph_node_count": 536,
+      "sha256": "ad71277ca97b7b108ec4450e6e8e82f87bbc2467d0cf884ba9ed09e841a7f789"
+    },
+    {
+      "file": "syn_510_85.csv",
+      "target_task_count": 510,
+      "actual_task_count": 510,
+      "graph_node_count": 545,
+      "sha256": "08bcacff747850d7f5cb62226640827487355341714b9f7488fa3d32bfeb5aa3"
+    },
+    {
+      "file": "syn_511_61.csv",
+      "target_task_count": 511,
+      "actual_task_count": 511,
+      "graph_node_count": 546,
+      "sha256": "f5be1fb7c6d124d894c04286991f3d13caeb0120f80f5c5bf050a5188cb12091"
+    },
+    {
+      "file": "syn_512_73.csv",
+      "target_task_count": 512,
+      "actual_task_count": 512,
+      "graph_node_count": 547,
+      "sha256": "c4b26933c8940f769ebf792d49860330b8740193a2b95da7db0ffd5962605539"
+    },
+    {
+      "file": "syn_514_48.csv",
+      "target_task_count": 514,
+      "actual_task_count": 514,
+      "graph_node_count": 549,
+      "sha256": "dac9ef46b5ce939521d77a026700bc5f83fe1f3645baa0fbe378b66a7edcc1ca"
+    },
+    {
+      "file": "syn_516_114.csv",
+      "target_task_count": 516,
+      "actual_task_count": 516,
+      "graph_node_count": 551,
+      "sha256": "98dcccc88c8638b9d39d04bafa1ea646fe0c79736b06e786433e5a657921a86a"
+    },
+    {
+      "file": "syn_519_118.csv",
+      "target_task_count": 519,
+      "actual_task_count": 519,
+      "graph_node_count": 554,
+      "sha256": "d37e519a9beb45e94fd54b372b06bfc4b08d5edfa60bdf033b3c0b19871feac3"
+    },
+    {
+      "file": "syn_519_62.csv",
+      "target_task_count": 519,
+      "actual_task_count": 519,
+      "graph_node_count": 554,
+      "sha256": "d7065e4c932be03664d4e9a5fb93e5cb850e1345e1aefc8e8411d707210af4f1"
+    },
+    {
+      "file": "syn_525_47.csv",
+      "target_task_count": 525,
+      "actual_task_count": 525,
+      "graph_node_count": 560,
+      "sha256": "71fcff4a4511a69dfee3415c0f93cfa2573c98d82756aa418084c5e52dd1597a"
+    },
+    {
+      "file": "syn_535_95.csv",
+      "target_task_count": 535,
+      "actual_task_count": 535,
+      "graph_node_count": 570,
+      "sha256": "2b4042bc27dbf16db951deb187f2ae486c038d0aff821a5decb71c66d11fdcbd"
+    },
+    {
+      "file": "syn_540_46.csv",
+      "target_task_count": 540,
+      "actual_task_count": 540,
+      "graph_node_count": 575,
+      "sha256": "d0e457285471101ec7cfbf7073324f1d82d83e6c8c2b5002b04aea171e113760"
+    },
+    {
+      "file": "syn_542_121.csv",
+      "target_task_count": 542,
+      "actual_task_count": 542,
+      "graph_node_count": 577,
+      "sha256": "9cd41ccbcb4fdb10a72606e4e87c991d114634c777aef9da631771c47d23afd4"
+    },
+    {
+      "file": "syn_542_76.csv",
+      "target_task_count": 542,
+      "actual_task_count": 542,
+      "graph_node_count": 577,
+      "sha256": "89b33683e5fa386035ec2b01161b48ead2a101693074d9e75be592cb478689f7"
+    },
+    {
+      "file": "syn_542_83.csv",
+      "target_task_count": 542,
+      "actual_task_count": 542,
+      "graph_node_count": 577,
+      "sha256": "82078fdabdafc97a167f63c57027717a53ab4847094e6d0e4ffb75c83287be49"
+    },
+    {
+      "file": "syn_548_116.csv",
+      "target_task_count": 548,
+      "actual_task_count": 548,
+      "graph_node_count": 583,
+      "sha256": "e601eae98f42157b6c526035d10c33b5f809c9db1c1bc3c07cf254f6cf0cfce9"
+    },
+    {
+      "file": "syn_550_104.csv",
+      "target_task_count": 550,
+      "actual_task_count": 550,
+      "graph_node_count": 585,
+      "sha256": "11ee49222bb9f6844ec184cebaf06ec7961ec692c80e1fe360642b2885262181"
+    },
+    {
+      "file": "syn_572_87.csv",
+      "target_task_count": 572,
+      "actual_task_count": 572,
+      "graph_node_count": 607,
+      "sha256": "ce7dd62988a2584cfa688285dce643720336740ea35b60ca7b151eb88b029ef3"
+    },
+    {
+      "file": "syn_574_82.csv",
+      "target_task_count": 574,
+      "actual_task_count": 574,
+      "graph_node_count": 609,
+      "sha256": "01aa588b9e30908ad3502c088b87ef75d73917f2a027a3b2b66d056a723f2ca5"
+    },
+    {
+      "file": "syn_576_93.csv",
+      "target_task_count": 576,
+      "actual_task_count": 576,
+      "graph_node_count": 611,
+      "sha256": "5045f002c292a217336895d89690423499f8d5f353ab9662175eeffb0d889ca6"
+    },
+    {
+      "file": "syn_583_92.csv",
+      "target_task_count": 583,
+      "actual_task_count": 583,
+      "graph_node_count": 618,
+      "sha256": "22c73b2005bfbeaf674067a95587027ad949d560ea524ab34c4f53b255cbfe5f"
+    },
+    {
+      "file": "syn_585_107.csv",
+      "target_task_count": 585,
+      "actual_task_count": 585,
+      "graph_node_count": 620,
+      "sha256": "fcd16c84ecf2e4c733fceba24c1adb1bc03b2e7b313091b1f0e6cd60b6882f1d"
+    },
+    {
+      "file": "syn_593_101.csv",
+      "target_task_count": 593,
+      "actual_task_count": 593,
+      "graph_node_count": 628,
+      "sha256": "d7ebb3520f4d3daac5b6268e2e943d6bd55a53294e16a646ce446c7d9c644bbc"
+    },
+    {
+      "file": "syn_594_120.csv",
+      "target_task_count": 594,
+      "actual_task_count": 594,
+      "graph_node_count": 629,
+      "sha256": "8eac573f28cd162c55f0c0fb58ed248f96153e0b65c2806ae7e407b6b7004697"
+    },
+    {
+      "file": "syn_594_90.csv",
+      "target_task_count": 594,
+      "actual_task_count": 594,
+      "graph_node_count": 629,
+      "sha256": "220e76326c88793473f529d6963e0d5d1ef2d6aee0c3cff995de3ff92e9bb9f8"
+    },
+    {
+      "file": "syn_614_72.csv",
+      "target_task_count": 614,
+      "actual_task_count": 614,
+      "graph_node_count": 649,
+      "sha256": "d322505ef2248ca9382e0b5c47838df5801d737962c24e6fb64766f877637432"
+    },
+    {
+      "file": "syn_616_57.csv",
+      "target_task_count": 616,
+      "actual_task_count": 616,
+      "graph_node_count": 651,
+      "sha256": "de34e6168c7541541e53bae4d1d8a261cda4112d165a8aaa02038cb9b021e1fc"
+    },
+    {
+      "file": "syn_616_81.csv",
+      "target_task_count": 616,
+      "actual_task_count": 616,
+      "graph_node_count": 651,
+      "sha256": "721c24d9039f79eab926fb49810c80117d98c02c6df3ec1600c9a69d51c9ab4d"
+    },
+    {
+      "file": "syn_629_74.csv",
+      "target_task_count": 629,
+      "actual_task_count": 629,
+      "graph_node_count": 664,
+      "sha256": "88310d5e8f6a76cf0244b3065ff0d5722a84780f6f22933e758cda6b29c43687"
+    },
+    {
+      "file": "syn_635_98.csv",
+      "target_task_count": 635,
+      "actual_task_count": 635,
+      "graph_node_count": 670,
+      "sha256": "4ac750cf7cf61ed907e5cba5a23e52a92927572e0f240ca825b672d027531710"
+    },
+    {
+      "file": "syn_658_63.csv",
+      "target_task_count": 658,
+      "actual_task_count": 658,
+      "graph_node_count": 693,
+      "sha256": "f9352219ac33d398c49302d68317c2ee153d72ecd51c87f055917806f9e37f49"
+    },
+    {
+      "file": "syn_674_99.csv",
+      "target_task_count": 674,
+      "actual_task_count": 674,
+      "graph_node_count": 709,
+      "sha256": "37e1c6e37c28eebc5c07a564f5b52e3c83c36e06210cba4c2dc3e74b5851dec3"
+    },
+    {
+      "file": "syn_679_54.csv",
+      "target_task_count": 679,
+      "actual_task_count": 679,
+      "graph_node_count": 714,
+      "sha256": "708918d7b0db6a971b4e50bf843578fe4efcc6f3ceac736ac5205dc0a8a847c9"
+    },
+    {
+      "file": "syn_679_71.csv",
+      "target_task_count": 679,
+      "actual_task_count": 679,
+      "graph_node_count": 714,
+      "sha256": "69cdfc0898f85a19c8c1fd38ce36ca3dd6dd479522f8c017f1dc1b9974c3c85e"
+    },
+    {
+      "file": "syn_682_103.csv",
+      "target_task_count": 682,
+      "actual_task_count": 682,
+      "graph_node_count": 746,
+      "sha256": "7e3ad50a3c3119ddc9804f7633e308c9514ded1e9a5417c2b04b11adf7611175"
+    },
+    {
+      "file": "syn_687_66.csv",
+      "target_task_count": 687,
+      "actual_task_count": 687,
+      "graph_node_count": 751,
+      "sha256": "76f00a1d6bc67c703ee0dbcb6f5d1272815d6099e1ab2db0ce1aa4af92014909"
+    },
+    {
+      "file": "syn_695_108.csv",
+      "target_task_count": 695,
+      "actual_task_count": 695,
+      "graph_node_count": 759,
+      "sha256": "8c1d28f59891763c84379951b25e6926323722ed6894e374f136df2caae8204b"
+    },
+    {
+      "file": "syn_701_75.csv",
+      "target_task_count": 701,
+      "actual_task_count": 701,
+      "graph_node_count": 765,
+      "sha256": "e3ab81349c113f65e72bbf75367ca542e599628a9bb35088ed645bf98c55e340"
+    },
+    {
+      "file": "syn_702_56.csv",
+      "target_task_count": 702,
+      "actual_task_count": 702,
+      "graph_node_count": 766,
+      "sha256": "ac67319aec09f8f5884a27cb8adfa89c3731474e2a2e7eee292662c60dac4491"
+    },
+    {
+      "file": "syn_708_64.csv",
+      "target_task_count": 708,
+      "actual_task_count": 708,
+      "graph_node_count": 772,
+      "sha256": "e3fc948927e5ddf00e0e6507194d97ab0dd2d70132ed22d5b31d34392be69b88"
+    },
+    {
+      "file": "syn_709_94.csv",
+      "target_task_count": 709,
+      "actual_task_count": 709,
+      "graph_node_count": 773,
+      "sha256": "4c8cce27caa8c00483b5b9004afd1ee13a521f4b09fcf236a8b76d75ca5e08f9"
+    },
+    {
+      "file": "syn_716_106.csv",
+      "target_task_count": 716,
+      "actual_task_count": 716,
+      "graph_node_count": 780,
+      "sha256": "334b93cfa4fb7ed675de7ca87af5bf0098af12b990989280e1b3a3e72dcea4f4"
+    },
+    {
+      "file": "syn_721_105.csv",
+      "target_task_count": 721,
+      "actual_task_count": 721,
+      "graph_node_count": 785,
+      "sha256": "ff460156e44fe3bbcf8e39a8177d2829a83088cb555ba3f8b7ff79524566138d"
+    },
+    {
+      "file": "syn_727_42.csv",
+      "target_task_count": 727,
+      "actual_task_count": 727,
+      "graph_node_count": 791,
+      "sha256": "d0bf934403de04e6539a6f32ced16fb0f3c36840f1f92cc2e49ea9e45781eff9"
+    },
+    {
+      "file": "syn_732_69.csv",
+      "target_task_count": 732,
+      "actual_task_count": 732,
+      "graph_node_count": 796,
+      "sha256": "510d37f4d4bda66365e6dee6f81ddb571aa3a38bc4cf90f614835a80af9263be"
+    },
+    {
+      "file": "syn_738_113.csv",
+      "target_task_count": 738,
+      "actual_task_count": 738,
+      "graph_node_count": 802,
+      "sha256": "e67a70fbc98f5fa210b3b07fa959b4bd87984c8a890c0f6695370d934201328e"
+    },
+    {
+      "file": "syn_746_52.csv",
+      "target_task_count": 746,
+      "actual_task_count": 746,
+      "graph_node_count": 810,
+      "sha256": "d676f46786a7b27b8e13ebf82117668a186a1cc026b2e3aab6e3bd8a43c4adef"
+    },
+    {
+      "file": "syn_757_80.csv",
+      "target_task_count": 757,
+      "actual_task_count": 757,
+      "graph_node_count": 821,
+      "sha256": "fe5fd3874c4653f2f39e28683805dfa991c82780391378836e021b8adf44ca72"
+    },
+    {
+      "file": "syn_759_70.csv",
+      "target_task_count": 759,
+      "actual_task_count": 759,
+      "graph_node_count": 823,
+      "sha256": "59d78156a526cd688ebe0e2292f9707bae55d0f1431de77b8114add3c168fd32"
+    },
+    {
+      "file": "syn_760_110.csv",
+      "target_task_count": 760,
+      "actual_task_count": 760,
+      "graph_node_count": 824,
+      "sha256": "b7420134f8038857ec95512bd09805188d65c31e988775c41fca8aed26e92deb"
+    },
+    {
+      "file": "syn_766_68.csv",
+      "target_task_count": 766,
+      "actual_task_count": 766,
+      "graph_node_count": 830,
+      "sha256": "9cce5c8191de6fb0b16af69ce58e3205d9214b0b8b78f4ac99d4b1f54ca7c735"
+    },
+    {
+      "file": "syn_773_97.csv",
+      "target_task_count": 773,
+      "actual_task_count": 773,
+      "graph_node_count": 837,
+      "sha256": "76e074d1bdf103e7ca9fd3eeeaa6f795a6db0168e0ac4e3d3e08c4f54fd87531"
+    },
+    {
+      "file": "syn_777_50.csv",
+      "target_task_count": 777,
+      "actual_task_count": 777,
+      "graph_node_count": 841,
+      "sha256": "0e42eaa7645b2848a26935e983709dcc051bc3c54ccd997d8230144b8543488e"
+    },
+    {
+      "file": "syn_779_45.csv",
+      "target_task_count": 779,
+      "actual_task_count": 779,
+      "graph_node_count": 843,
+      "sha256": "331b93f5efc7a46d1e6b54507274e00e8b10380d6d6c9c40146a0c4677c11101"
+    },
+    {
+      "file": "syn_779_53.csv",
+      "target_task_count": 779,
+      "actual_task_count": 779,
+      "graph_node_count": 843,
+      "sha256": "9ab7fb9b31a534f6dc7a6aa629e5873347411c28349ef185a5920ef0f1e35e8e"
+    },
+    {
+      "file": "syn_788_78.csv",
+      "target_task_count": 788,
+      "actual_task_count": 788,
+      "graph_node_count": 852,
+      "sha256": "e8f1dac834c67ddf942c763d5b38eaf24a254076b72d3c65ff1413695850d03c"
+    },
+    {
+      "file": "syn_790_86.csv",
+      "target_task_count": 790,
+      "actual_task_count": 790,
+      "graph_node_count": 854,
+      "sha256": "d57e48ef48b897da4873e25176b07ae703f8ddd5138a9e0b112c993952770798"
+    },
+    {
+      "file": "syn_795_115.csv",
+      "target_task_count": 795,
+      "actual_task_count": 795,
+      "graph_node_count": 859,
+      "sha256": "6fab66e7f402abc1c65d4e2b82b22c2e85014c87eae5df9dba1bc98b3f7b1914"
+    },
+    {
+      "file": "variant_01_tasks_439_template_680.csv",
+      "target_task_count": 439,
+      "actual_task_count": 439,
+      "graph_node_count": 474,
+      "sha256": "54f6604aa4cbccf06fa7c99a9970ca2f80837ab747d2411842af6e3b5ce97f59"
+    },
+    {
+      "file": "variant_02_tasks_587_template_680.csv",
+      "target_task_count": 587,
+      "actual_task_count": 587,
+      "graph_node_count": 622,
+      "sha256": "8d6070d19abf6bb00d8ffcace20078fa7dcd3a9f51155b0fbbd3c102b54da047"
+    },
+    {
+      "file": "variant_03_tasks_509_template_680.csv",
+      "target_task_count": 509,
+      "actual_task_count": 509,
+      "graph_node_count": 544,
+      "sha256": "b6759d2206e13e06d902777de3eb09e12ad610c7c8ab2dc11b0b2fb6f9eca18b"
+    },
+    {
+      "file": "variant_04_tasks_460_template_680.csv",
+      "target_task_count": 460,
+      "actual_task_count": 460,
+      "graph_node_count": 495,
+      "sha256": "e3781d1472e0ee9c8fd99a4db408efc6672ea2f2871e13a077e00cd4060949f1"
+    },
+    {
+      "file": "variant_05_tasks_445_template_680.csv",
+      "target_task_count": 445,
+      "actual_task_count": 445,
+      "graph_node_count": 480,
+      "sha256": "c56330c449f8fa537da033f34a2d53161a56a3057d0d2b36f15d367f78ae8927"
+    },
+    {
+      "file": "variant_06_tasks_479_template_680.csv",
+      "target_task_count": 479,
+      "actual_task_count": 479,
+      "graph_node_count": 514,
+      "sha256": "530782dd71d52d2888dfdca1178176ddac8e56e8fb577d1a2fa0db56c881aa8a"
+    },
+    {
+      "file": "variant_07_tasks_783_template_680.csv",
+      "target_task_count": 783,
+      "actual_task_count": 783,
+      "graph_node_count": 818,
+      "sha256": "1839da8e91d235951832cb5a117c51afdcc7b8e84bb3de65760cb8cf0b90caa9"
+    },
+    {
+      "file": "variant_08_tasks_440_template_680.csv",
+      "target_task_count": 440,
+      "actual_task_count": 440,
+      "graph_node_count": 475,
+      "sha256": "091430ad970c6ad2facb73c581105cf61085cb539fe30db51f81eb8471cb5198"
+    },
+    {
+      "file": "variant_09_tasks_487_template_680.csv",
+      "target_task_count": 487,
+      "actual_task_count": 487,
+      "graph_node_count": 522,
+      "sha256": "f1f072a9cdc5a0795a0a11162a9c1638154ad61f79db3d46d0e93139c9280eb1"
+    },
+    {
+      "file": "variant_10_tasks_423_template_680.csv",
+      "target_task_count": 423,
+      "actual_task_count": 423,
+      "graph_node_count": 458,
+      "sha256": "751e65f3460e5bbe843b3fda46db692a66da86551d08dc53ef04fadf7637a122"
+    },
+    {
+      "file": "variant_11_tasks_474_template_680.csv",
+      "target_task_count": 474,
+      "actual_task_count": 474,
+      "graph_node_count": 509,
+      "sha256": "bfa0590a4f8357f917f80203f708925ee58fa21eb3fdad1779baa942ffc8403f"
+    },
+    {
+      "file": "variant_12_tasks_675_template_680.csv",
+      "target_task_count": 675,
+      "actual_task_count": 675,
+      "graph_node_count": 710,
+      "sha256": "5424188f6c7f2151876cd38346fe16a0907e3d77ddb444edd7601313d86a2f59"
+    },
+    {
+      "file": "variant_13_tasks_448_template_680.csv",
+      "target_task_count": 448,
+      "actual_task_count": 448,
+      "graph_node_count": 483,
+      "sha256": "a6aea3c1c965193056762ed29f458d47a86aedd8620c8e4bb5b6f6f73a0b5430"
+    },
+    {
+      "file": "variant_14_tasks_532_template_680.csv",
+      "target_task_count": 532,
+      "actual_task_count": 532,
+      "graph_node_count": 567,
+      "sha256": "69755f489c466875105e549dc026abe282ece19277a010351e3d54a631b08ca8"
+    },
+    {
+      "file": "variant_15_tasks_760_template_680.csv",
+      "target_task_count": 760,
+      "actual_task_count": 760,
+      "graph_node_count": 795,
+      "sha256": "73b18e04603c9e37ccfd890c71012219203fd738d87157bad0db5340563b8207"
+    },
+    {
+      "file": "variant_16_tasks_612_template_680.csv",
+      "target_task_count": 612,
+      "actual_task_count": 612,
+      "graph_node_count": 647,
+      "sha256": "d73b85b967d75761683b3b499e468b5f9b428a4897d7358574757d2a93d6b6d7"
+    },
+    {
+      "file": "variant_17_tasks_767_template_680.csv",
+      "target_task_count": 767,
+      "actual_task_count": 767,
+      "graph_node_count": 802,
+      "sha256": "6508030a7dfe186f70148e378aa73c1dd715a5ddd37f2f87cdf2467ddfd651bf"
+    },
+    {
+      "file": "variant_18_tasks_578_template_680.csv",
+      "target_task_count": 578,
+      "actual_task_count": 578,
+      "graph_node_count": 613,
+      "sha256": "429ceef0dfb874c456c32ebca7b738e284434908a42b600f0979dbcba0d99f26"
+    },
+    {
+      "file": "variant_19_tasks_765_template_680.csv",
+      "target_task_count": 765,
+      "actual_task_count": 765,
+      "graph_node_count": 800,
+      "sha256": "40df4ac1e139be34a94a77fe9008497aa4f60be900043aa4b18811d3054bf31c"
+    },
+    {
+      "file": "variant_20_tasks_689_template_680.csv",
+      "target_task_count": 689,
+      "actual_task_count": 689,
+      "graph_node_count": 724,
+      "sha256": "ed5080d6cfcf67e5f05f9c8749cd1382c9d333c67b6c6ecf45e3dfe236bfaf19"
+    },
+    {
+      "file": "variant_21_tasks_761_template_680.csv",
+      "target_task_count": 761,
+      "actual_task_count": 761,
+      "graph_node_count": 796,
+      "sha256": "ff1465453045504cf9678bb65b7d305a4b8c819dcf4665dd4607dfe432b1e41e"
+    },
+    {
+      "file": "variant_22_tasks_722_template_680.csv",
+      "target_task_count": 722,
+      "actual_task_count": 722,
+      "graph_node_count": 757,
+      "sha256": "bdab2a9a982553c5a2c06a5c153c067423f1d38a0d03fd76e2a88c6479b18573"
+    },
+    {
+      "file": "variant_23_tasks_416_template_680.csv",
+      "target_task_count": 416,
+      "actual_task_count": 416,
+      "graph_node_count": 451,
+      "sha256": "b7604f8b264aa132bd0ad31511d23e0d627b33a86aef4e66959e7d82b1b41a3f"
+    },
+    {
+      "file": "variant_24_tasks_694_template_680.csv",
+      "target_task_count": 694,
+      "actual_task_count": 694,
+      "graph_node_count": 729,
+      "sha256": "841f9139a513d9e2d0c080cedd6e5b4653766229001cfdd9122c5158e6c2a450"
+    },
+    {
+      "file": "variant_25_tasks_549_template_680.csv",
+      "target_task_count": 549,
+      "actual_task_count": 549,
+      "graph_node_count": 584,
+      "sha256": "496590b2e097caea53111c34ace7a1e0955806552ad2ea34c2458177f60e7733"
+    },
+    {
+      "file": "variant_26_tasks_469_template_680.csv",
+      "target_task_count": 469,
+      "actual_task_count": 469,
+      "graph_node_count": 504,
+      "sha256": "b757a8d2cd3b7885931305c8ab2c230c2d1617496ddf16dd5461ab48beeb6c5b"
+    },
+    {
+      "file": "variant_27_tasks_731_template_680.csv",
+      "target_task_count": 731,
+      "actual_task_count": 731,
+      "graph_node_count": 766,
+      "sha256": "18e28d3f940b85ee2b7bbc771b5113a537357ad6d55a0af4a540bf2c7edbbbde"
+    },
+    {
+      "file": "variant_28_tasks_507_template_680.csv",
+      "target_task_count": 507,
+      "actual_task_count": 507,
+      "graph_node_count": 542,
+      "sha256": "f5339b09e17a0870c9410e009bcbecd1071557a380bc3c8a7fb8bbf2d6d5825c"
+    },
+    {
+      "file": "variant_29_tasks_656_template_680.csv",
+      "target_task_count": 656,
+      "actual_task_count": 656,
+      "graph_node_count": 691,
+      "sha256": "9c7a312755da12af343618bd9c841340d1ea6f31c41f0a6819c874aded0efead"
+    },
+    {
+      "file": "variant_30_tasks_486_template_680.csv",
+      "target_task_count": 486,
+      "actual_task_count": 486,
+      "graph_node_count": 521,
+      "sha256": "1f39576bb26404060dbfc19a15e48ce14ed4b064d358693240e83c46ad831534"
+    },
+    {
+      "file": "variant_31_tasks_646_template_680.csv",
+      "target_task_count": 646,
+      "actual_task_count": 646,
+      "graph_node_count": 681,
+      "sha256": "988f6b734a74e77e674a77f046b869fab18d331bb9589fd09da0bc12a9b4ecaa"
+    },
+    {
+      "file": "variant_32_tasks_652_template_680.csv",
+      "target_task_count": 652,
+      "actual_task_count": 652,
+      "graph_node_count": 687,
+      "sha256": "efa4e902b6e9fc05b74971e83032ea4c9b1ca1253824842b73a0fb886f1b323c"
+    },
+    {
+      "file": "variant_33_tasks_474_template_680.csv",
+      "target_task_count": 474,
+      "actual_task_count": 474,
+      "graph_node_count": 509,
+      "sha256": "8d59e2e987da2b9b3878b6cc9fbba88788d9eafd79a9bc792e5287555ef70bff"
+    },
+    {
+      "file": "variant_34_tasks_519_template_680.csv",
+      "target_task_count": 519,
+      "actual_task_count": 519,
+      "graph_node_count": 554,
+      "sha256": "cac01ca8bfc43cd373ba636fe3295f7652c0659b82721e628241ad84d74f9f24"
+    },
+    {
+      "file": "variant_35_tasks_585_template_680.csv",
+      "target_task_count": 585,
+      "actual_task_count": 585,
+      "graph_node_count": 620,
+      "sha256": "759144cf4b80a339fa3268ee31b4a393a1329040d011900a88dc9140a290fc3e"
+    },
+    {
+      "file": "variant_36_tasks_436_template_680.csv",
+      "target_task_count": 436,
+      "actual_task_count": 436,
+      "graph_node_count": 471,
+      "sha256": "bb50dbea1842b2d0a0c6d6159034b474f3eb88bec47ef28c8fcc62522d01c84d"
+    },
+    {
+      "file": "variant_37_tasks_712_template_680.csv",
+      "target_task_count": 712,
+      "actual_task_count": 712,
+      "graph_node_count": 747,
+      "sha256": "de7c7e72deec84cf236d0817ccf701e02d632b2fbc9c20220be0e3bdea0a1149"
+    },
+    {
+      "file": "variant_38_tasks_553_template_680.csv",
+      "target_task_count": 553,
+      "actual_task_count": 553,
+      "graph_node_count": 588,
+      "sha256": "f90dd055cd213c16680cbb3a2fe2db7b26aab9e0e21f63561d94a144a13912fc"
+    },
+    {
+      "file": "variant_39_tasks_534_template_680.csv",
+      "target_task_count": 534,
+      "actual_task_count": 534,
+      "graph_node_count": 569,
+      "sha256": "949e0d6bd35c00f81e30ffa85f50eb31f26a51c2a1d8c334c9b634e2f708a283"
+    },
+    {
+      "file": "variant_40_tasks_445_template_680.csv",
+      "target_task_count": 445,
+      "actual_task_count": 445,
+      "graph_node_count": 480,
+      "sha256": "2602c002573bad8bcfe2fe2e954b7d1fb1451e742a09c2255230e3b11356b1e6"
+    },
+    {
+      "file": "variant_41_tasks_649_template_680.csv",
+      "target_task_count": 649,
+      "actual_task_count": 649,
+      "graph_node_count": 684,
+      "sha256": "427d4b2f54a5612151227a923fe3757a6bde35a97c5dae81750d808a41bd88d0"
+    },
+    {
+      "file": "variant_42_tasks_608_template_680.csv",
+      "target_task_count": 608,
+      "actual_task_count": 608,
+      "graph_node_count": 643,
+      "sha256": "87042e7335f14d22f93ecee781f5aec71117e18859d892d06446da4cc6d82d4a"
+    },
+    {
+      "file": "variant_43_tasks_476_template_680.csv",
+      "target_task_count": 476,
+      "actual_task_count": 476,
+      "graph_node_count": 511,
+      "sha256": "8026b5778bc45b4d9fd9ee9f0f34ca085ec0c3db62b650a71823fd0bfd957515"
+    },
+    {
+      "file": "variant_44_tasks_705_template_680.csv",
+      "target_task_count": 705,
+      "actual_task_count": 705,
+      "graph_node_count": 740,
+      "sha256": "8bdc439ff9c72c616ebc7bbc0e76d0a58a6a294e5b4f5802968a6d8f1384534f"
+    },
+    {
+      "file": "variant_45_tasks_777_template_680.csv",
+      "target_task_count": 777,
+      "actual_task_count": 777,
+      "graph_node_count": 812,
+      "sha256": "7a385796f744f23a91360b14bf63f5307deb38ae29314ae67fa3169b73cdebb3"
+    },
+    {
+      "file": "variant_46_tasks_543_template_680.csv",
+      "target_task_count": 543,
+      "actual_task_count": 543,
+      "graph_node_count": 578,
+      "sha256": "2e27018266f12e621857aa58e58867a59e8f4820c0dec83c5156eccbecc2eba2"
+    },
+    {
+      "file": "variant_47_tasks_652_template_680.csv",
+      "target_task_count": 652,
+      "actual_task_count": 652,
+      "graph_node_count": 687,
+      "sha256": "878e5b838041fd5314600c596df87f59932717455ce9ae03681304421dcf9786"
+    },
+    {
+      "file": "variant_48_tasks_471_template_680.csv",
+      "target_task_count": 471,
+      "actual_task_count": 471,
+      "graph_node_count": 506,
+      "sha256": "87880eb51c50de66abcfdd420ac4eef3df51ccdb2d045b11343e61fb02c7cffe"
+    },
+    {
+      "file": "variant_49_tasks_489_template_680.csv",
+      "target_task_count": 489,
+      "actual_task_count": 489,
+      "graph_node_count": 524,
+      "sha256": "4bb815224baa32ca4265fefeb9b4d91da5144fb7e6e561ba398dca11da035cdb"
+    },
+    {
+      "file": "variant_50_tasks_586_template_680.csv",
+      "target_task_count": 586,
+      "actual_task_count": 586,
+      "graph_node_count": 621,
+      "sha256": "ffd5afe8338af3bab4a9f1d13c0ecf6bea77003fdeb3642add3b4b808c00aa2c"
+    },
+    {
+      "file": "variant_51_tasks_625_template_680.csv",
+      "target_task_count": 625,
+      "actual_task_count": 625,
+      "graph_node_count": 660,
+      "sha256": "c22659a515b13bafc03d03b90e4923e1d8fd6389fd44c511a08a4cd3f5fd67dd"
+    },
+    {
+      "file": "variant_52_tasks_615_template_680.csv",
+      "target_task_count": 615,
+      "actual_task_count": 615,
+      "graph_node_count": 650,
+      "sha256": "39642340e3f003f40db2a7a317f01c7911f120a231459d2d335162dc4a247c8f"
+    },
+    {
+      "file": "variant_53_tasks_793_template_680.csv",
+      "target_task_count": 793,
+      "actual_task_count": 793,
+      "graph_node_count": 828,
+      "sha256": "ee619ec14aa79eca05e53288a08aeaf74424d20325a46aad8e5fb4a93bd165a3"
+    },
+    {
+      "file": "variant_54_tasks_665_template_680.csv",
+      "target_task_count": 665,
+      "actual_task_count": 665,
+      "graph_node_count": 700,
+      "sha256": "3f1dab40d671bd34ae05784dc814157998735d5be12a05b28a9f3edb7ac3762f"
+    },
+    {
+      "file": "variant_55_tasks_461_template_680.csv",
+      "target_task_count": 461,
+      "actual_task_count": 461,
+      "graph_node_count": 496,
+      "sha256": "4df69f1e07125d370e6e98ad7c9b3cb989de969882fd3d1a63a6be3d4deb99ac"
+    },
+    {
+      "file": "variant_56_tasks_456_template_680.csv",
+      "target_task_count": 456,
+      "actual_task_count": 456,
+      "graph_node_count": 491,
+      "sha256": "65d8afe858100572d2156470ac955cee796a2f7b9a6dca9ebaae624b422b88f6"
+    },
+    {
+      "file": "variant_57_tasks_718_template_680.csv",
+      "target_task_count": 718,
+      "actual_task_count": 718,
+      "graph_node_count": 753,
+      "sha256": "f3850ae4422336a6cce7a16590ae6ef847bc7a6a31e4da0a9ad355ddbb3e3c54"
+    },
+    {
+      "file": "variant_58_tasks_552_template_680.csv",
+      "target_task_count": 552,
+      "actual_task_count": 552,
+      "graph_node_count": 587,
+      "sha256": "1a8e4491d0a440f36454cf13aec23116bcfa471f9602c39fd32a7defdd4a64a8"
+    },
+    {
+      "file": "variant_59_tasks_739_template_680.csv",
+      "target_task_count": 739,
+      "actual_task_count": 739,
+      "graph_node_count": 774,
+      "sha256": "46fda29e212ae738c5c118d612ce33664674f2f95e3edcbe20a015b6461bd84f"
+    },
+    {
+      "file": "variant_60_tasks_547_template_680.csv",
+      "target_task_count": 547,
+      "actual_task_count": 547,
+      "graph_node_count": 582,
+      "sha256": "fd3e5c5fd36481358d80570aead9cd99f271ddff42d64276aae03eabe3183904"
+    },
+    {
+      "file": "variant_61_tasks_614_template_680.csv",
+      "target_task_count": 614,
+      "actual_task_count": 614,
+      "graph_node_count": 649,
+      "sha256": "121881ffc6781eb575f6adfddbbc4d94720932e3afe3317ba5949b24824ea2e9"
+    },
+    {
+      "file": "variant_62_tasks_537_template_680.csv",
+      "target_task_count": 537,
+      "actual_task_count": 537,
+      "graph_node_count": 572,
+      "sha256": "925e2b48321bf528440fed6fe51f14cfe0b199bf388e6b861e9e99179958746d"
+    },
+    {
+      "file": "variant_63_tasks_431_template_680.csv",
+      "target_task_count": 431,
+      "actual_task_count": 431,
+      "graph_node_count": 466,
+      "sha256": "74da1b6a979f8fb16de1c00ffc2882fc1197f89a903257abb3070aa45c52f00f"
+    },
+    {
+      "file": "variant_64_tasks_578_template_680.csv",
+      "target_task_count": 578,
+      "actual_task_count": 578,
+      "graph_node_count": 613,
+      "sha256": "75b26eba229cf17b970bb38d217159cabdabdc6c670830f53392936fc8e5730d"
+    },
+    {
+      "file": "variant_65_tasks_652_template_680.csv",
+      "target_task_count": 652,
+      "actual_task_count": 652,
+      "graph_node_count": 687,
+      "sha256": "20e786e7a4001f4d5016f499e892fedffeac686d3d8c952143856c9515fd5ee4"
+    },
+    {
+      "file": "variant_66_tasks_408_template_680.csv",
+      "target_task_count": 408,
+      "actual_task_count": 408,
+      "graph_node_count": 443,
+      "sha256": "ce2da1cd7379c31cf25bd4538080a7c0ca0a6e74122da1a6d2dc97bff0a05e5a"
+    },
+    {
+      "file": "variant_67_tasks_589_template_680.csv",
+      "target_task_count": 589,
+      "actual_task_count": 589,
+      "graph_node_count": 624,
+      "sha256": "e6d5e4fad211481493fd4044f7c5fbf37030fe6d8aa452d120aa4c6ea95fc227"
+    },
+    {
+      "file": "variant_68_tasks_461_template_680.csv",
+      "target_task_count": 461,
+      "actual_task_count": 461,
+      "graph_node_count": 496,
+      "sha256": "fb686ac3a0a7bfee070f6240d812462a9cde3ae6f54b6808beb78e5bff12bbfd"
+    },
+    {
+      "file": "variant_69_tasks_404_template_680.csv",
+      "target_task_count": 404,
+      "actual_task_count": 404,
+      "graph_node_count": 439,
+      "sha256": "01700aeb6fe6852d56c9a5edf3f51ee1189bfb64ae6460a5289ff295d0a25d8d"
+    },
+    {
+      "file": "variant_70_tasks_478_template_680.csv",
+      "target_task_count": 478,
+      "actual_task_count": 478,
+      "graph_node_count": 513,
+      "sha256": "8b125fa483dfc83910374e74aaa7f2b036196061013460f9a0e6bfbc133bec7b"
+    },
+    {
+      "file": "variant_71_tasks_732_template_680.csv",
+      "target_task_count": 732,
+      "actual_task_count": 732,
+      "graph_node_count": 767,
+      "sha256": "199d50460148488e2ed615ee2fef4f18248659ccba0c5cf0fa9c58f8f1dd4be2"
+    },
+    {
+      "file": "variant_72_tasks_580_template_680.csv",
+      "target_task_count": 580,
+      "actual_task_count": 580,
+      "graph_node_count": 615,
+      "sha256": "c29f7369907451ddc10bf196dcdd02c9dfff504f448f3db431aeebf8edff87ad"
+    },
+    {
+      "file": "variant_73_tasks_437_template_680.csv",
+      "target_task_count": 437,
+      "actual_task_count": 437,
+      "graph_node_count": 472,
+      "sha256": "2c555d942d714397571c6e3475b099b93d5727f4569cce145d1eda59e4991b34"
+    },
+    {
+      "file": "variant_74_tasks_660_template_680.csv",
+      "target_task_count": 660,
+      "actual_task_count": 660,
+      "graph_node_count": 695,
+      "sha256": "90ada6a427320266354e7ab3548a08c1d1aa20022a636d78381b661875cc5305"
+    },
+    {
+      "file": "variant_75_tasks_641_template_680.csv",
+      "target_task_count": 641,
+      "actual_task_count": 641,
+      "graph_node_count": 676,
+      "sha256": "20be3bd4bf870943319a2068a5ce0ae284dc6c9a20847f208f13cdad0129cb8e"
+    },
+    {
+      "file": "variant_76_tasks_723_template_680.csv",
+      "target_task_count": 723,
+      "actual_task_count": 723,
+      "graph_node_count": 758,
+      "sha256": "383f0478bf3e7ff059c1f2d544c50abb1d7e2295cb38a824267212a17bfdbcab"
+    },
+    {
+      "file": "variant_77_tasks_508_template_680.csv",
+      "target_task_count": 508,
+      "actual_task_count": 508,
+      "graph_node_count": 543,
+      "sha256": "fd266da8289446fd2bf3068c64655d0b5fedc9d960d0d9f89f934bd4661e0b78"
+    },
+    {
+      "file": "variant_78_tasks_507_template_680.csv",
+      "target_task_count": 507,
+      "actual_task_count": 507,
+      "graph_node_count": 542,
+      "sha256": "56cbe4fcf46943fbc53bf9cd6cfe400f55dd270cba121e58382160f087f58f36"
+    },
+    {
+      "file": "variant_79_tasks_411_template_680.csv",
+      "target_task_count": 411,
+      "actual_task_count": 411,
+      "graph_node_count": 446,
+      "sha256": "8620162b204d0bf1def858fb01db58f5b17b494b47060a3fd6d825c3d67a2439"
+    },
+    {
+      "file": "variant_80_tasks_575_template_680.csv",
+      "target_task_count": 575,
+      "actual_task_count": 575,
+      "graph_node_count": 610,
+      "sha256": "144fcfecc0b9435f085ee40aaaa79c74df07b97a390c08e3572b19c8486747ee"
+    }
+  ]
+}

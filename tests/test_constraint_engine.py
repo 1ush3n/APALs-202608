@@ -29,6 +29,43 @@ def test_physical_precedence_is_compressed_through_virtual_nodes() -> None:
     assert violation["reason"] == "physical_precedence_station_violation"
 
 
+def test_physical_predecessors_characterize_multilevel_virtual_chain() -> None:
+    engine = ConstraintEngine.build(
+        num_tasks=5,
+        num_stations=2,
+        edges=np.asarray([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=np.int64),
+        durations=[2.0, 0.0, 0.0, 0.0, 3.0],
+        fixed_stations=[-1] * 5,
+    )
+
+    assert engine.physical_predecessors[4] == (0,)
+
+
+def test_physical_predecessors_characterize_multiple_physical_inputs() -> None:
+    engine = ConstraintEngine.build(
+        num_tasks=6,
+        num_stations=2,
+        edges=np.asarray([[0, 1, 2, 3], [3, 3, 4, 4]], dtype=np.int64),
+        durations=[2.0, 2.0, 0.0, 0.0, 3.0, 0.0],
+        fixed_stations=[-1] * 6,
+    )
+
+    assert engine.physical_predecessors[4] == (0, 1)
+
+
+def test_physical_predecessors_characterize_physical_virtual_mixed_branch() -> None:
+    engine = ConstraintEngine.build(
+        num_tasks=7,
+        num_stations=2,
+        edges=np.asarray([[0, 1, 2, 3, 5], [2, 2, 3, 4, 6]], dtype=np.int64),
+        durations=[2.0, 2.0, 0.0, 0.0, 3.0, 2.0, 3.0],
+        fixed_stations=[-1] * 7,
+    )
+
+    assert engine.physical_predecessors[4] == (0, 1)
+    assert engine.physical_predecessors[6] == (5,)
+
+
 def test_virtual_fixed_station_propagates_to_first_physical_successor() -> None:
     engine = _engine(fixed=[-1, 2, -1])
 

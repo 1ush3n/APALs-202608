@@ -10,7 +10,17 @@ import torch
 from configs import Config, configs, load_training_config
 from runtime.artifacts import run_context as create_run_context
 from runtime.artifacts import uses_runs_layout
+from runtime.initial_checkpoint_selection import load_initial_checkpoint_selection_manifest
+from runtime.modes import (
+    BATCHED_V2_REPLAY_MODE,
+    BEHAVIOR_GROUP_EXACT_REPLAY_MODE,
+    FAST_EXACT_REPLAY_MODE,
+    V2_TEAM_SELECTION_MODES,
+    is_fast_exact_mode,
+    is_worker_pointer_v2_mode,
+)
 from runtime.paths import PROJECT_ROOT
+from worker_feature_layout import LOCK_STATE_DIM
 
 
 EXPLICIT_OVERRIDES = {
@@ -38,20 +48,106 @@ STRUCTURAL_FIELDS = {
     "skill_hub_bidirectional", "num_skill_types", "skill_feat_dim",
     "worker_skill_feature_slots",
     "use_input_layer_norm", "use_gat_layer_norm", "use_head_layer_norm",
-    "use_shared_trunk", "policy_action_scope", "workforce_binding_mode",
+    "use_shared_trunk", "policy_action_scope", "policy_observation_scope",
+    "graph_input_scope",
+    "critic_observation_scope", "task_feature_scope", "station_feature_scope",
+    "task_mask_mode", "station_mask_mode", "action_completion_mode", "conditional_team_max_candidates",
+    "conditional_team_gate_bias", "conditional_team_nonbaseline_logit",
+    "conditional_team_scoring_mode", "conditional_team_prior_margin",
+    "conditional_team_prior_weight", "workforce_binding_mode",
     "workforce_preallocation_ratio", "team_selection_mode",
-    "graph_encoder_mode", "actor_context_mode",
+    "worker_pointer_context_version", "worker_pointer_pressure_temperature",
+    "worker_pointer_supply_epsilon", "worker_pointer_wait_discount_mode",
+    "worker_pointer_v2_init_seed_offset",
+    "worker_pointer_v2_explicit_team_state",
+    "worker_pointer_v2_marginal_scarcity",
+    "worker_pointer_v2_marginal_scarcity_clip",
+    "worker_pointer_v2_interaction_residual",
+    "worker_pointer_v2_next_frontier_pressure",
+    "worker_pointer_v2_fast_replay_batching",
+    "worker_pointer_v2_fast_replay_encoder_batch_cap",
+    "reschedule_baseline_identity_conditioning",
+    "conditional_head_baseline_mode",
+    "graph_encoder_mode", "actor_context_mode", "homogeneous_use_type_embedding",
+    "homogeneous_shared_input_projection",
+    "anchor_proposal_mode", "anchor_proposal_prior_margin",
+    "anchor_proposal_gate_bias",
+    "anchor_proposal_train_branch_floor_start",
+    "anchor_proposal_train_branch_floor_end",
+    "anchor_proposal_branch_floor_decay_fraction",
+    "anchor_proposal_require_difference",
 }
 
 _VALID_EXPERIMENT_MODES = {
+    "ablation_protocol": {"legacy", "strict_v1"},
+    "action_completion_mode": {"earliest_finish", "earliest_availability", "min_wait"},
     "policy_action_scope": {
         "operation", "operation_station", "operation_station_worker",
+        "operation_station_gated_team", "operation_station_anchor_proposal_team",
     },
+    "policy_observation_scope": {"full", "task", "task_station"},
+    "graph_input_scope": {"full", "task", "task_station", "match_policy"},
+    "critic_observation_scope": {"full", "task", "task_station", "match_policy"},
+    "task_feature_scope": {"full", "intrinsic"},
+    "station_feature_scope": {"full", "no_worker_resource"},
+    "task_mask_mode": {"resource_aware", "precedence_release_only"},
+    "station_mask_mode": {"resource_aware", "structural_only"},
     "workforce_binding_mode": {"endogenous", "preallocated"},
-    "team_selection_mode": {"autoregressive", "static_topq"},
-    "graph_encoder_mode": {"hetero_gat", "homogeneous_graphsage", "none"},
+    "team_selection_mode": {
+        "autoregressive", "autoregressive_pressure_v2",
+        "autoregressive_pressure_v2_fast_exact", "static_topq",
+    },
+    "graph_encoder_mode": {
+        "hetero_gat",
+        "homogeneous_graphsage",
+        "homogeneous_graphsage_strict",
+        "none",
+    },
     "actor_context_mode": {"attention", "mean_max", "local_only"},
+    "conditional_team_scoring_mode": {
+        "fixed_prior_v1", "relative_heuristic_prior_v1",
+    },
+    "conditional_head_baseline_mode": {"off", "diagnostic", "factorized"},
+    "worker_pointer_v2_fast_replay_batching": {
+        "physical_group", "logical_batch_v1",
+    },
 }
+
+
+def _validate_anchor_proposal_config(config: Config) -> None:
+    """APCF scope 专用校验：禁止迁移到重调度，门控先验与探索下限必须合法。"""
+    if bool(getattr(config, "enable_reschedule_mode", False)):
+        raise ValueError(
+            "operation_station_anchor_proposal_team 仅用于初始调度，"
+            "不得与 enable_reschedule_mode=true 同时启用（未经验证不可迁移到重调度）"
+        )
+    mode = str(getattr(config, "anchor_proposal_mode", "full_team_v1"))
+    if mode != "full_team_v1":
+        raise ValueError(f"anchor_proposal_mode 当前仅支持 full_team_v1，收到 {mode!r}")
+    margin = float(getattr(config, "anchor_proposal_prior_margin", 4.0))
+    if not math.isfinite(margin) or margin <= 0.0:
+        raise ValueError("anchor_proposal_prior_margin 必须是大于 0 的有限数")
+    gate_bias = float(getattr(config, "anchor_proposal_gate_bias", -4.0))
+    if not math.isfinite(gate_bias) or gate_bias >= 0.0:
+        raise ValueError("anchor_proposal_gate_bias 必须严格为负，保证初始确定性选择锚点")
+    floor_start = float(getattr(config, "anchor_proposal_train_branch_floor_start", 0.20))
+    floor_end = float(getattr(config, "anchor_proposal_train_branch_floor_end", 0.02))
+    for name, value in (
+        ("anchor_proposal_train_branch_floor_start", floor_start),
+        ("anchor_proposal_train_branch_floor_end", floor_end),
+    ):
+        if not math.isfinite(value) or not 0.0 <= value < 0.5:
+            raise ValueError(f"{name} 必须在 [0, 0.5) 内")
+    if floor_start < floor_end:
+        raise ValueError("anchor_proposal_train_branch_floor_start 不能小于 floor_end")
+    decay_fraction = float(getattr(config, "anchor_proposal_branch_floor_decay_fraction", 0.40))
+    if not math.isfinite(decay_fraction) or not 0.0 < decay_fraction <= 1.0:
+        raise ValueError("anchor_proposal_branch_floor_decay_fraction 必须在 (0, 1] 内")
+    config.anchor_proposal_prior_margin = margin
+    config.anchor_proposal_gate_bias = gate_bias
+    config.anchor_proposal_train_branch_floor_start = floor_start
+    config.anchor_proposal_train_branch_floor_end = floor_end
+    config.anchor_proposal_branch_floor_decay_fraction = decay_fraction
 
 
 def parse_override_value(raw: str) -> Any:
@@ -163,19 +259,338 @@ def parse_runtime_args(
     return args
 
 
+def resolve_fast_exact_num_envs(
+    config: Config,
+    *,
+    cli_explicit_num_envs: bool,
+) -> int:
+    """解析 Fast-Exact 模式的最终环境数。
+
+    规则：
+    - 仅新模式生效；历史 v2 保持自身已解析的 num_envs；
+    - CLI 显式 --num_envs 时保持 CLI 值（最高优先级）；
+    - 未显式指定时使用平台 fast_exact 默认（Windows 4 / Linux 16）。
+    """
+    if not is_fast_exact_mode(config):
+        return int(config.num_envs)
+    if cli_explicit_num_envs:
+        return int(config.num_envs)
+    return int(
+        getattr(config, "worker_pointer_v2_fast_default_num_envs", 4)
+    )
+
+
+def _validate_strict_ablation_protocol(config: Config) -> None:
+    """校验 strict_v1 的三条信息隔离协议，避免只改标签而遗漏隔离项。"""
+    if config.ablation_protocol != "strict_v1":
+        return
+    if bool(getattr(config, "reschedule_baseline_identity_conditioning", False)):
+        raise ValueError("strict_v1 禁止 reschedule_baseline_identity_conditioning=true")
+    if bool(getattr(config, "worker_pointer_v2_dynamic_eft_features", False)):
+        raise ValueError("strict_v1 消融与对比协议禁止启用 worker_pointer_v2_dynamic_eft_features")
+
+    policy_scope = str(config.policy_observation_scope)
+    critic_scope = str(config.critic_observation_scope)
+    if critic_scope == "match_policy":
+        critic_scope = policy_scope
+    graph_scope = str(config.graph_input_scope)
+    if graph_scope == "match_policy":
+        graph_scope = policy_scope
+
+    if config.policy_action_scope == "operation":
+        expected = (
+            policy_scope == "task"
+            and graph_scope == "task"
+            and critic_scope == "task"
+            and config.task_feature_scope == "intrinsic"
+            and config.action_completion_mode == "min_wait"
+            and config.task_mask_mode == "precedence_release_only"
+            and config.station_mask_mode == "structural_only"
+        )
+    elif config.policy_action_scope == "operation_station":
+        expected = (
+            policy_scope == "task_station"
+            and graph_scope == "task_station"
+            and critic_scope == "task_station"
+            and config.task_feature_scope == "intrinsic"
+            and config.station_feature_scope == "no_worker_resource"
+            and config.task_mask_mode == "precedence_release_only"
+            and config.station_mask_mode == "structural_only"
+            and config.action_completion_mode == "min_wait"
+        )
+    elif config.graph_encoder_mode == "homogeneous_graphsage_strict":
+        expected = (
+            policy_scope == "full"
+            and graph_scope == "full"
+            and critic_scope == "full"
+            and config.homogeneous_use_type_embedding is False
+        )
+    else:
+        raise ValueError(
+            "strict_v1 仅支持 operation、operation_station 或 "
+            "homogeneous_graphsage_strict 协议"
+        )
+    if not expected:
+        raise ValueError("strict_v1 的 action、observation、completion 或 mask 配置不完整")
+
+
 def validate_runtime_config(config: Config) -> None:
+    if bool(getattr(config, "ablation_no_mask", False)):
+        raise ValueError(
+            "ablation_no_mask 已禁用：主 PPO 方法必须保留动作硬约束 mask"
+        )
+    if int(config.update_every_episodes) != 1:
+        raise ValueError("当前训练编排仅支持 update_every_episodes=1")
+    max_stations = LOCK_STATE_DIM - 1
+    if int(config.n_m) > max_stations:
+        raise ValueError(
+            f"工位锁特征仅能表示 0..{max_stations}，n_m 最大为 {max_stations}；"
+            f"收到 {int(config.n_m)}"
+        )
+    if float(config.sample_temperature) != 1.0:
+        raise ValueError(
+            "PPO 采样与重算分布一致性要求 sample_temperature=1.0"
+        )
     for field_name, choices in _VALID_EXPERIMENT_MODES.items():
-        value = str(getattr(config, field_name)).lower()
+        raw_val = getattr(config, field_name)
+        if field_name == "conditional_head_baseline_mode" and (raw_val is False or str(raw_val).lower() in {"false", "0", "none", "off"}):
+            value = "off"
+        else:
+            value = str(raw_val).lower()
         if value not in choices:
             raise ValueError(
                 f"{field_name} 无效: {value!r}；允许值={sorted(choices)}"
             )
         setattr(config, field_name, value)
+    graph_scope = str(config.graph_input_scope)
+    if graph_scope == "match_policy":
+        graph_scope = str(config.policy_observation_scope)
+    if graph_scope != str(config.policy_observation_scope):
+        raise ValueError(
+            "graph_input_scope 必须与 policy_observation_scope 一致，避免图消息传递泄漏未授权节点"
+        )
+    if config.ablation_protocol == "strict_v1":
+        critic_scope = str(config.critic_observation_scope)
+        if critic_scope == "match_policy":
+            critic_scope = str(config.policy_observation_scope)
+        if critic_scope != str(config.policy_observation_scope):
+            raise ValueError(
+                "strict_v1 要求 critic_observation_scope=match_policy 或与 policy_observation_scope 一致"
+            )
+    _validate_strict_ablation_protocol(config)
+    if (
+        config.action_completion_mode in {"earliest_availability", "min_wait"}
+        and config.policy_action_scope not in {"operation", "operation_station"}
+    ):
+        raise ValueError(
+            "action_completion_mode=earliest_availability/min_wait 仅允许用于 "
+            "policy_action_scope=operation 或 operation_station"
+        )
+    marginal_clip = float(config.worker_pointer_v2_marginal_scarcity_clip)
+    if not math.isfinite(marginal_clip) or marginal_clip <= 0.0:
+        raise ValueError(
+            "worker_pointer_v2_marginal_scarcity_clip 必须是大于 0 的有限数"
+        )
+    conditional_value_coef = float(config.conditional_head_value_coef)
+    if not math.isfinite(conditional_value_coef) or conditional_value_coef <= 0.0:
+        raise ValueError(
+            "conditional_head_value_coef 必须是大于 0 的有限数"
+        )
+    conditional_mode = str(config.conditional_head_baseline_mode)
+    if conditional_mode in {"diagnostic", "factorized"}:
+        if config.team_selection_mode not in {
+            "autoregressive_pressure_v2",
+            "autoregressive_pressure_v2_fast_exact",
+        }:
+            raise ValueError(
+                "conditional_head_baseline_mode=diagnostic/factorized 要求 "
+                "team_selection_mode=autoregressive_pressure_v2 或 autoregressive_pressure_v2_fast_exact"
+            )
+        if config.policy_action_scope != "operation_station_worker":
+            raise ValueError(
+                "conditional_head_baseline_mode=diagnostic/factorized 要求 "
+                "policy_action_scope=operation_station_worker"
+            )
+        if bool(config.use_shared_trunk):
+            raise ValueError(
+                "conditional_head_baseline_mode=diagnostic/factorized 不支持 "
+                "use_shared_trunk=true"
+            )
+    if is_worker_pointer_v2_mode(config):
+        if str(getattr(config, "policy_observation_scope", "full")) != "full":
+            raise ValueError(
+                f"{config.team_selection_mode} 要求 policy_observation_scope=full"
+            )
+        if config.policy_action_scope != "operation_station_worker":
+            raise ValueError(
+                f"{config.team_selection_mode} 仅允许 "
+                "policy_action_scope=operation_station_worker"
+            )
+        if is_fast_exact_mode(config) and config.actor_context_mode != "attention":
+            raise ValueError(
+                f"{config.team_selection_mode} 要求 actor_context_mode=attention"
+            )
+        if config.actor_context_mode not in {"attention", "local_only"}:
+            raise ValueError(
+                f"{config.team_selection_mode} 的 actor_context_mode 仅支持 attention 或 local_only"
+            )
+        temperature = float(config.worker_pointer_pressure_temperature)
+        epsilon = float(config.worker_pointer_supply_epsilon)
+        if not math.isfinite(temperature) or temperature <= 0.0:
+            raise ValueError("worker_pointer_pressure_temperature 必须是大于 0 的有限数")
+        if not math.isfinite(epsilon) or epsilon <= 0.0:
+            raise ValueError("worker_pointer_supply_epsilon 必须是大于 0 的有限数")
+        if str(config.worker_pointer_wait_discount_mode) != "physical_wait_exponential_v1":
+            raise ValueError(
+                "worker_pointer_wait_discount_mode 仅支持 physical_wait_exponential_v1"
+            )
+        if int(config.worker_pointer_v2_init_seed_offset) < 0:
+            raise ValueError("worker_pointer_v2_init_seed_offset 不能为负数")
+        eft_clip = float(config.worker_pointer_v2_dynamic_eft_feature_clip)
+        if not math.isfinite(eft_clip) or eft_clip <= 0.0:
+            raise ValueError(
+                "worker_pointer_v2_dynamic_eft_feature_clip 必须是大于 0 的有限数"
+            )
+        if is_fast_exact_mode(config):
+            if str(config.worker_pointer_v2_fast_replay_batching) not in {
+                "physical_group", "logical_batch_v1",
+            }:
+                raise ValueError(
+                    "worker_pointer_v2_fast_replay_batching 仅支持 "
+                    "physical_group 或 logical_batch_v1"
+                )
+            if (
+                str(config.worker_pointer_v2_replay_mode)
+                != FAST_EXACT_REPLAY_MODE
+            ):
+                raise ValueError(
+                    "worker_pointer_v2_replay_mode 仅支持 "
+                    "behavior_group_exact_gpu_template_v2"
+                )
+            if int(config.num_envs) > 16:
+                raise ValueError(
+                    "autoregressive_pressure_v2_fast_exact 的 num_envs 最大为 16 "
+                    f"（Linux 正式配置上限），收到 {int(config.num_envs)}"
+                )
+            if int(config.worker_pointer_v2_rollout_group_upper_bound) > 16:
+                raise ValueError(
+                    "worker_pointer_v2_rollout_group_upper_bound 最大为 16，"
+                    f"收到 {int(config.worker_pointer_v2_rollout_group_upper_bound)}"
+                )
+        elif str(config.worker_pointer_v2_fast_replay_batching) != "physical_group":
+            raise ValueError(
+                "logical_batch_v1 仅支持 autoregressive_pressure_v2_fast_exact"
+            )
+        else:
+            replay_mode = str(config.worker_pointer_v2_replay_mode)
+            if replay_mode == BATCHED_V2_REPLAY_MODE:
+                if bool(config.worker_pointer_v2_behavior_replay):
+                    raise ValueError(
+                        "batched_vectorized_v2 不保存行为组轨迹；请将 "
+                        "worker_pointer_v2_behavior_replay 设为 false"
+                    )
+            elif replay_mode == BEHAVIOR_GROUP_EXACT_REPLAY_MODE:
+                if not bool(config.worker_pointer_v2_behavior_replay):
+                    raise ValueError(
+                        "behavior_group_exact_v1 要求启用 "
+                        "worker_pointer_v2_behavior_replay"
+                    )
+            else:
+                raise ValueError(
+                    "autoregressive_pressure_v2 仅支持 batched_vectorized_v2 或 "
+                    "behavior_group_exact_v1"
+                )
+        if int(config.worker_pointer_v2_logical_batch_cap) < 1:
+            raise ValueError("worker_pointer_v2_logical_batch_cap 必须大于 0")
+        if int(config.worker_pointer_v2_fast_replay_encoder_batch_cap) < 1:
+            raise ValueError(
+                "worker_pointer_v2_fast_replay_encoder_batch_cap 必须大于 0"
+            )
+        if int(config.worker_pointer_v2_rollout_group_upper_bound) < 1:
+            raise ValueError(
+                "worker_pointer_v2_rollout_group_upper_bound 必须大于 0"
+            )
+    if bool(getattr(config, "reschedule_baseline_identity_conditioning", False)):
+        if not bool(getattr(config, "enable_reschedule_mode", False)):
+            raise ValueError(
+                "reschedule_baseline_identity_conditioning=true requires enable_reschedule_mode=true"
+            )
+        if not is_worker_pointer_v2_mode(config):
+            raise ValueError(
+                "reschedule_baseline_identity_conditioning=true requires WorkerPointer v2"
+            )
     ratio = float(getattr(config, "workforce_preallocation_ratio", 1.0))
     if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
         raise ValueError("workforce_preallocation_ratio 必须是 [0, 1] 内的有限数")
     if config.workforce_binding_mode == "preallocated" and ratio <= 0.0:
         raise ValueError("preallocated 模式要求 workforce_preallocation_ratio > 0")
+    candidate_limit = int(getattr(config, "conditional_team_max_candidates", 4))
+    if candidate_limit < 1:
+        raise ValueError("conditional_team_max_candidates 必须大于等于 1")
+    config.conditional_team_max_candidates = candidate_limit
+    for field_name in (
+        "conditional_team_gate_bias",
+        "conditional_team_nonbaseline_logit",
+        "conditional_team_prior_margin",
+        "conditional_team_prior_weight",
+    ):
+        value = float(getattr(config, field_name))
+        if not math.isfinite(value):
+            raise ValueError(f"{field_name} 必须是有限数")
+        setattr(config, field_name, value)
+    if config.conditional_team_nonbaseline_logit >= 0.0:
+        raise ValueError("conditional_team_nonbaseline_logit 必须严格为负数")
+    if config.conditional_team_prior_margin <= 0.0:
+        raise ValueError("conditional_team_prior_margin 必须严格大于 0")
+    if config.conditional_team_prior_weight < 0.0:
+        raise ValueError("conditional_team_prior_weight 必须大于等于 0")
+    if config.policy_action_scope == "operation_station_anchor_proposal_team":
+        _validate_anchor_proposal_config(config)
+    if bool(getattr(config, "best_anchor_distill_enabled", False)):
+        if config.policy_action_scope != "operation_station_gated_team":
+            raise ValueError(
+                "best_anchor_distill_enabled 仅允许用于 "
+                "policy_action_scope=operation_station_gated_team"
+            )
+        if not bool(getattr(config, "async_eval_enabled", False)):
+            raise ValueError("best-anchor 蒸馏要求启用异步四实例 checkpoint 选择")
+        if str(getattr(config, "checkpoint_selection_protocol", "")).strip().lower() != "multiscale_manifest":
+            raise ValueError("best-anchor 蒸馏要求 checkpoint_selection_protocol=multiscale_manifest")
+        if not str(getattr(config, "checkpoint_selection_manifest_path", "")).strip():
+            raise ValueError("best-anchor 蒸馏要求提供 checkpoint_selection_manifest_path")
+        for field_name in (
+            "best_anchor_distill_temperature",
+            "best_anchor_distill_lambda_start",
+            "best_anchor_distill_lambda_end",
+            "best_anchor_distill_min_improvement",
+        ):
+            value = float(getattr(config, field_name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{field_name} 必须是非负有限数")
+            setattr(config, field_name, value)
+        if float(config.best_anchor_distill_temperature) <= 0.0:
+            raise ValueError("best_anchor_distill_temperature 必须大于 0")
+        if int(getattr(config, "best_anchor_distill_ramp_updates", 0)) < 1:
+            raise ValueError("best_anchor_distill_ramp_updates 必须大于 0")
+        external_path = str(
+            getattr(config, "best_anchor_distill_external_checkpoint_path", "")
+        ).strip()
+        if external_path:
+            external_score = float(
+                getattr(config, "best_anchor_distill_external_selection_score", float("nan"))
+            )
+            if not math.isfinite(external_score):
+                raise ValueError(
+                    "外部 best-anchor 教师必须提供 "
+                    "best_anchor_distill_external_selection_score"
+                )
+            if not str(getattr(config, "best_anchor_distill_external_protocol_id", "")).strip():
+                raise ValueError("外部 best-anchor 教师必须提供选择协议 ID")
+            manifest_sha = str(
+                getattr(config, "best_anchor_distill_external_manifest_sha256", "")
+            ).strip().lower()
+            if len(manifest_sha) != 64 or any(char not in "0123456789abcdef" for char in manifest_sha):
+                raise ValueError("外部 best-anchor 教师必须提供合法的 manifest SHA-256")
     if bool(getattr(config, "ablation_no_gat", False)):
         raise ValueError("ablation_no_gat 已移除；请使用 graph_encoder_mode=none")
     if bool(getattr(config, "ablation_no_pointer", False)):
@@ -195,26 +610,93 @@ def validate_runtime_config(config: Config) -> None:
     if int(getattr(config, "eval_mask_mismatch_max_retries_per_time", 16)) < 1:
         raise ValueError("eval_mask_mismatch_max_retries_per_time 必须大于 0")
     if bool(getattr(config, "async_eval_enabled", False)):
-        if str(getattr(config, "async_eval_device", "cpu")).lower() != "cpu":
-            raise ValueError("async_eval_device 当前必须为 cpu，训练进程独占 GPU")
+        is_r5_reschedule_async = (
+            bool(getattr(config, "enable_reschedule_mode", False))
+            and str(getattr(config, "reschedule_async_protocol", "")).strip().lower()
+            == "r5_task_delay_v1"
+        )
+        selection_protocol = str(
+            getattr(config, "checkpoint_selection_protocol", "single_standard")
+        ).strip().lower()
+        if selection_protocol not in {"single_standard", "multiscale_manifest"}:
+            raise ValueError(
+                "checkpoint_selection_protocol 仅支持 single_standard 或 multiscale_manifest"
+            )
+        async_device = str(getattr(config, "async_eval_device", "cpu")).strip().lower()
+        if async_device not in {"cpu", "cuda", "cuda:0"}:
+            raise ValueError("async_eval_device 仅支持 cpu、cuda 或 cuda:0")
         if int(getattr(config, "async_eval_cpu_threads", 4)) < 1:
             raise ValueError("async_eval_cpu_threads 必须大于 0")
         if int(getattr(config, "async_eval_queue_capacity", 4)) < 1:
             raise ValueError("async_eval_queue_capacity 必须大于 0")
+        if int(getattr(config, "async_eval_worker_count", 1)) < 1:
+            raise ValueError("async_eval_worker_count 必须大于 0")
+        max_cuda_workers = 3 if is_r5_reschedule_async else 2
+        if async_device.startswith("cuda") and int(getattr(config, "async_eval_worker_count", 1)) > max_cuda_workers:
+            raise ValueError(
+                "CUDA 异步验证的 async_eval_worker_count 最大为 "
+                f"{max_cuda_workers}"
+            )
+        if int(getattr(config, "async_eval_submit_every_episodes", 1)) < 1:
+            raise ValueError("async_eval_submit_every_episodes 必须大于 0")
         if bool(getattr(config, "enable_reschedule_mode", False)):
+            if selection_protocol != "single_standard":
+                raise ValueError("重调度异步验证不支持 multiscale_manifest checkpoint 选择")
             if not str(getattr(config, "async_eval_instance_id", "")).strip():
                 raise ValueError("重调度异步验证的 async_eval_instance_id 不能为空")
-            if not str(getattr(config, "async_eval_scenario_id", "")).strip():
+            if is_r5_reschedule_async:
+                if async_device != "cuda":
+                    raise ValueError("r5 重调度异步验证必须使用 CUDA，禁止 CPU 验证")
+                if int(getattr(config, "async_eval_worker_count", 1)) != 3:
+                    raise ValueError("r5 重调度异步验证必须配置 3 个 CUDA worker")
+                if int(getattr(config, "async_eval_queue_capacity", 0)) != 3:
+                    raise ValueError("r5 重调度异步验证的队列容量必须为 3")
+                if bool(getattr(config, "async_eval_allow_cpu_fallback", True)):
+                    raise ValueError("r5 重调度异步验证禁止 CUDA OOM 后回退 CPU")
+                scenario_ids = tuple(
+                    str(item).strip()
+                    for item in getattr(config, "async_eval_scenario_ids", [])
+                    if str(item).strip()
+                )
+                if len(scenario_ids) != 3 or len(set(scenario_ids)) != 3:
+                    raise ValueError(
+                        "r5 重调度异步验证必须提供 3 个不重复的场景 ID"
+                    )
+                if {item.split("_", 1)[0].lower() for item in scenario_ids} != {
+                    "low",
+                    "medium",
+                    "high",
+                }:
+                    raise ValueError(
+                        "r5 重调度异步验证场景必须分别包含 low、medium、high"
+                    )
+            elif not str(getattr(config, "async_eval_scenario_id", "")).strip():
                 raise ValueError("重调度异步验证的 async_eval_scenario_id 不能为空")
         else:
             scenarios = [str(item).lower() for item in getattr(config, "eval_scenarios", [])]
             if scenarios != ["standard"]:
                 raise ValueError("初始调度单实例异步验证仅支持 eval_scenarios=[standard]")
-            if not str(getattr(config, "async_eval_initial_data_path", "")).strip():
+            if selection_protocol == "multiscale_manifest":
+                manifest_path = str(
+                    getattr(config, "checkpoint_selection_manifest_path", "")
+                ).strip()
+                if not manifest_path:
+                    raise ValueError(
+                        "multiscale_manifest checkpoint 选择必须配置 checkpoint_selection_manifest_path"
+                    )
+                load_initial_checkpoint_selection_manifest(manifest_path)
+            elif not str(getattr(config, "async_eval_initial_data_path", "")).strip():
                 raise ValueError("初始调度异步验证的 async_eval_initial_data_path 不能为空")
         if not math.isclose(float(getattr(config, "eval_temperature", 0.0)), 0.0, abs_tol=1e-12):
             raise ValueError("异步 best 选择要求 eval_temperature=0.0")
-        if int(getattr(config, "eval_freq", 1)) != 1:
+        eval_freq = int(getattr(config, "eval_freq", 1))
+        if is_r5_reschedule_async:
+            if eval_freq not in {1, 2}:
+                raise ValueError(
+                    "r5 重调度异步验证的 eval_freq 仅支持 1 或 2；"
+                    "使用 2 时必须由每 2 轮提交的完整 low/medium/high 组选择 best"
+                )
+        elif eval_freq != 1:
             raise ValueError("异步验证要求 eval_freq=1，确保每个成功 PPO episode 都参与 best 选择")
         if str(getattr(config, "async_eval_failure_policy", "fail")).lower() != "fail":
             raise ValueError("async_eval_failure_policy 当前仅支持 fail")
@@ -295,6 +777,17 @@ def initialize_training_config(args, argv=None, system_name: str | None = None):
         raise ValueError(f"float32_matmul_precision 无效: {precision}")
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision(precision)
+
+    if (
+        str(getattr(configs, "team_selection_mode", "autoregressive"))
+        == "autoregressive_pressure_v2"
+        and int(configs.num_envs) != 4
+    ):
+        print(
+            "[Runtime][WorkerPointerV2] 警告：最终 num_envs="
+            f"{int(configs.num_envs)}，正式探索训练应通过 CLI 再次覆盖为 4。",
+            flush=True,
+        )
 
     if uses_runs_layout(configs):
         if getattr(args, "resume", False) and not str(getattr(configs, "run_id", "") or "").strip():

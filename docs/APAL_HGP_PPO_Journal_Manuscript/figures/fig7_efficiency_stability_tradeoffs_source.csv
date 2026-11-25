@@ -1,0 +1,9 @@
+﻿Method,Key,Cycle_Span_H,Delta_ref_h,Start_Dev_h,Station_Change_pct,Team_Change_pct,Score_S
+HGP-PPO (Ours),HGP-PPO,976.49,29.51,30.85,2.12,95.6,0.8511
+StabilityAwareRepair,StabilityAwareRepair,993.85,45.22,33.88,1.73,94.76,0.877564
+L2D-PPO-APAL,L2D-PPO-APAL,988.33,42.11,45.54,1.93,95.87,0.915151
+Graph-DDQN-APAL,Graph-DDQN-APAL,978.32,29.63,56.31,2.02,96.05,0.980965
+HybridCPMStabilityRepair,HybridCPMStabilityRepair,964.87,18.79,61.76,1.85,93.53,0.982793
+TaktAwareRepair,TaktAwareRepair,1055.84,106.5,74.9,1.67,2.06,0.9833
+BeamSearchRepair,BeamSearchRepair,1116.52,167.19,108.85,0.54,0.7,1.188985
+IteratedGreedyRepair (IG),IteratedGreedyRepair,1135.94,186.61,148.31,0.65,0.93,1.4407

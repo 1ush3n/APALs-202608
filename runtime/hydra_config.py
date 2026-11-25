@@ -13,7 +13,11 @@ from omegaconf import DictConfig, OmegaConf
 
 from configs import Config
 from runtime.artifacts import run_context, uses_runs_layout
-from runtime.configuration import validate_runtime_config
+from runtime.configuration import (
+    is_fast_exact_mode,
+    resolve_fast_exact_num_envs,
+    validate_runtime_config,
+)
 
 
 class HydraCliError(ValueError):
@@ -32,7 +36,9 @@ class ParsedHydraArgs:
     experiment: str
     hardware: str
     resume: bool
+    resume_checkpoint_path: str
     config_overrides: tuple[str, ...]
+    final_overrides: dict[str, Any] = field(default_factory=dict)
     extra_values: dict[str, Any] = field(default_factory=dict)
     explicit_fields: set[str] = field(default_factory=set)
 
@@ -43,13 +49,22 @@ OLD_CLI_FLAGS = {
     "--trainer",
     "--batch-size",
     "--batch_size",
-    "--num-envs",
     "--max-episodes",
     "--eval-freq",
     "--log-dir",
     "--output-dir",
     "--run-id",
     "--runs-root",
+}
+
+
+FINAL_PRIORITY_CLI_FLAGS = {
+    "--batch_size": "batch_size",
+    "--batch-size": "batch_size",
+    "--num_envs": "num_envs",
+    "--num-envs": "num_envs",
+    "--async_eval_submit_every_episodes": "async_eval_submit_every_episodes",
+    "--async-eval-submit-every-episodes": "async_eval_submit_every_episodes",
 }
 
 
@@ -72,6 +87,8 @@ def _parse_bool(raw: str) -> bool:
 
 
 def _parse_value(raw: str) -> Any:
+    if not raw.strip():
+        return ""
     cfg = OmegaConf.from_dotlist([f"value={raw}"])
     value = OmegaConf.to_container(cfg, resolve=True)["value"]
     return value
@@ -113,6 +130,35 @@ def _check_old_cli(argv: Iterable[str]) -> None:
             )
 
 
+def _extract_final_cli_overrides(
+    argv: list[str],
+) -> tuple[list[str], dict[str, Any]]:
+    """提取需要高于所有 YAML/Hydra 覆盖的兼容 CLI 参数。"""
+    remaining: list[str] = []
+    overrides: dict[str, Any] = {}
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        flag, separator, inline_value = token.partition("=")
+        field_name = FINAL_PRIORITY_CLI_FLAGS.get(flag)
+        if field_name is None:
+            remaining.append(token)
+            index += 1
+            continue
+        if separator:
+            raw_value = inline_value
+        else:
+            index += 1
+            if index >= len(argv) or argv[index].startswith("--"):
+                raise HydraCliError(f"{flag} 缺少参数值")
+            raw_value = argv[index]
+        if not str(raw_value).strip():
+            raise HydraCliError(f"{flag} 缺少参数值")
+        overrides[field_name] = _parse_value(raw_value)
+        index += 1
+    return remaining, overrides
+
+
 def parse_hydra_args(
     argv: list[str] | None = None,
     *,
@@ -121,11 +167,13 @@ def parse_hydra_args(
     system_name: str | None = None,
 ) -> ParsedHydraArgs:
     raw_args = list(sys.argv[1:] if argv is None else argv)
+    raw_args, final_overrides = _extract_final_cli_overrides(raw_args)
     _check_old_cli(raw_args)
 
     experiment = default_experiment
     hardware = hardware_name_for_platform(system_name)
     resume = False
+    resume_checkpoint_path = ""
     config_overrides: list[str] = []
     extra_values: dict[str, Any] = {
         key: spec.default for key, spec in (extra_arguments or {}).items()
@@ -155,6 +203,12 @@ def parse_hydra_args(
         if normalized_key in {"resume", "runtime.resume"}:
             resume = _parse_bool(raw_value)
             continue
+        if normalized_key in {
+            "resume_checkpoint_path",
+            "runtime.resume_checkpoint_path",
+        }:
+            resume_checkpoint_path = str(raw_value).strip()
+            continue
 
         if extra_arguments and leaf in extra_arguments:
             extra_values[leaf] = _parse_value(raw_value)
@@ -174,9 +228,11 @@ def parse_hydra_args(
         experiment=experiment,
         hardware=hardware,
         resume=resume,
+        resume_checkpoint_path=resume_checkpoint_path,
         config_overrides=tuple(config_overrides),
+        final_overrides=final_overrides,
         extra_values=extra_values,
-        explicit_fields=explicit_fields,
+        explicit_fields=explicit_fields | set(final_overrides),
     )
 
 
@@ -209,6 +265,7 @@ def apply_hydra_config(
     *,
     target: Config,
     config_paths: tuple[str, ...],
+    validate: bool = True,
 ) -> set[str]:
     resolved = OmegaConf.to_container(hydra_cfg, resolve=True)
     if not isinstance(resolved, Mapping):
@@ -220,7 +277,8 @@ def apply_hydra_config(
         raise KeyError(f"Hydra 配置包含未知字段: {unknown}")
     target.update_from_dict(flat)
     target.config_paths = config_paths
-    validate_runtime_config(target)
+    if validate:
+        validate_runtime_config(target)
     return set(flat)
 
 
@@ -237,6 +295,23 @@ def _apply_cli_leaf_overrides(target: Config, overrides: Iterable[str]) -> None:
     if updates:
         target.update_from_dict(updates)
         validate_runtime_config(target)
+
+
+def _apply_final_cli_overrides(
+    target: Config,
+    overrides: Mapping[str, Any],
+) -> None:
+    """最后应用兼容 CLI，保证其优先级高于硬件、实验和 Hydra dotlist。"""
+    if not overrides:
+        return
+    unknown = sorted(key for key in overrides if not hasattr(target, key))
+    if unknown:
+        raise KeyError(f"CLI 包含未知配置字段: {unknown}")
+    target.update_from_dict(dict(overrides))
+    if "batch_size" in overrides:
+        # 显式 --batch_size 是最终权威值；平台 cap 仅保护未显式覆盖的运行。
+        target.ppo_batch_size_cap = 0
+    validate_runtime_config(target)
 
 
 def initialize_hydra_runtime(
@@ -261,8 +336,27 @@ def initialize_hydra_runtime(
         str((config_dir / "experiment" / f"{parsed.experiment}.yaml").resolve()),
         str((config_dir / "hardware" / f"{parsed.hardware}.yaml").resolve()),
     )
-    apply_hydra_config(hydra_cfg, target=target, config_paths=config_paths)
+    apply_hydra_config(
+        hydra_cfg,
+        target=target,
+        config_paths=config_paths,
+        validate=False,  # 统一校验延后到 CLI 覆盖应用之后
+    )
+    # 实验 YAML 内容会作为 experiment 组被 Hydra 包进根键（experiment.model.*），
+    # 展平时可能覆盖 CLI 对根 model.* 的覆盖。因此必须先应用 CLI 覆盖，再校验，
+    # 否则 team_selection_mode 等字段会停留在实验 YAML 的旧值上。
     _apply_cli_leaf_overrides(target, parsed.config_overrides)
+    validate_runtime_config(target)
+    # Fast-Exact 平台默认：CLI 未显式 --num_envs 时按平台默认（Windows 4 / Linux 16）解析。
+    if is_fast_exact_mode(target):
+        resolved_num_envs = resolve_fast_exact_num_envs(
+            target,
+            cli_explicit_num_envs="num_envs" in parsed.explicit_fields,
+        )
+        if int(target.num_envs) != resolved_num_envs:
+            target.num_envs = resolved_num_envs
+            validate_runtime_config(target)
+    _apply_final_cli_overrides(target, parsed.final_overrides)
 
     precision = str(target.float32_matmul_precision)
     if torch.cuda.is_available():
@@ -274,6 +368,7 @@ def initialize_hydra_runtime(
 
     runtime_args = Namespace(
         resume=parsed.resume,
+        resume_checkpoint_path=parsed.resume_checkpoint_path,
         explicit_config_fields=parsed.explicit_fields,
         hydra_experiment=parsed.experiment,
         hydra_hardware=parsed.hardware,
@@ -345,11 +440,13 @@ def hydra_help(extra_arguments: Mapping[str, ExtraArgument] | None = None) -> st
         "基本用法:\n"
         "  python train.py experiment=initial_schedule_283\n"
         "  python train.py experiment=initial_schedule_283 train.batch_size=32 train.num_envs=4\n"
+        "  python train.py experiment=initial_worker_pointer_v2_exploratory --batch_size 256\n"
+        "  python train.py experiment=initial_worker_pointer_v2_exploratory --async_eval_submit_every_episodes 2\n"
         "  python train.py experiment=reschedule_task_delay resume=true\n\n"
         "说明:\n"
         "  - Windows/Linux 硬件配置会自动选择，不需要传 hardware=...\n"
         "  - 旧参数 --config、--set、--trainer legacy 已废弃\n"
-        "  - 所有配置覆盖使用 Hydra key=value\n\n"
+        "  - 所有配置覆盖使用 Hydra key=value；--batch_size 与 --async_eval_submit_every_episodes 为最终优先级兼容参数\n\n"
         "脚本专属参数:\n"
         f"{extra_block}\n"
     )

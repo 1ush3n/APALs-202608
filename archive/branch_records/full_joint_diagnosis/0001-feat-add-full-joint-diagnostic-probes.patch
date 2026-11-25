@@ -1,0 +1,1484 @@
+From 91166a5c6db1e98821a68313df35012ffc3ae9fa Mon Sep 17 00:00:00 2001
+From: 1ush3n <281842176lu@gmail.com>
+Date: Fri, 28 Aug 2026 14:40:11 +0800
+Subject: [PATCH 1/3] feat: add full joint diagnostic probes
+
+---
+ diagnostics/__init__.py              |   2 +
+ diagnostics/full_joint.py            | 211 +++++++
+ ppo_agent.py                         | 243 ++++++++
+ scripts/diagnose_full_joint.py       | 844 +++++++++++++++++++++++++++
+ tests/test_full_joint_diagnostics.py |  80 +++
+ 5 files changed, 1380 insertions(+)
+ create mode 100644 diagnostics/__init__.py
+ create mode 100644 diagnostics/full_joint.py
+ create mode 100644 scripts/diagnose_full_joint.py
+ create mode 100644 tests/test_full_joint_diagnostics.py
+
+diff --git a/diagnostics/__init__.py b/diagnostics/__init__.py
+new file mode 100644
+index 0000000..4e66145
+--- /dev/null
++++ b/diagnostics/__init__.py
+@@ -0,0 +1,2 @@
++"""APAL 初始调度诊断工具。"""
++
+diff --git a/diagnostics/full_joint.py b/diagnostics/full_joint.py
+new file mode 100644
+index 0000000..7abc8c1
+--- /dev/null
++++ b/diagnostics/full_joint.py
+@@ -0,0 +1,211 @@
++from __future__ import annotations
++
++import math
++from pathlib import Path
++from typing import Any, Iterable, Mapping, Sequence
++
++
++def canonicalize_action(
++    action: Sequence[Any], *, virtual_task: bool = False
++) -> tuple[int, int, tuple[int, ...]]:
++    """规范化动作，但保留自回归团队的选择顺序。"""
++    if len(action) != 3:
++        raise ValueError(f"动作必须是(task, station, team)，收到 {action!r}")
++    task_id = int(action[0])
++    if virtual_task:
++        return task_id, -1, ()
++    station_id = int(action[1])
++    team = tuple(int(worker_id) for worker_id in action[2])
++    if len(set(team)) != len(team):
++        raise ValueError(f"团队不能包含重复工人: {team!r}")
++    return task_id, station_id, team
++
++
++def compare_actions(expected: Sequence[Any], actual: Sequence[Any]) -> bool:
++    """严格比较 task、station 和有序 worker sequence。"""
++    return canonicalize_action(expected) == canonicalize_action(actual)
++
++
++def _finite_values(values: Iterable[Any]) -> list[float]:
++    finite: list[float] = []
++    for value in values:
++        try:
++            number = float(value)
++        except (TypeError, ValueError):
++            continue
++        if math.isfinite(number):
++            finite.append(number)
++    return finite
++
++
++def summarize_numeric(values: Sequence[Any], *, window: int = 10) -> dict[str, Any]:
++    """统计数值序列，非有限值计数不参与均值、范围和趋势。"""
++    raw = list(values)
++    finite = _finite_values(raw)
++    nan_count = 0
++    inf_count = 0
++    for value in raw:
++        try:
++            number = float(value)
++        except (TypeError, ValueError):
++            nan_count += 1
++            continue
++        if math.isnan(number):
++            nan_count += 1
++        elif math.isinf(number):
++            inf_count += 1
++    if not finite:
++        return {
++            "latest": float("nan"),
++            "mean": float("nan"),
++            "window_mean": float("nan"),
++            "minimum": float("nan"),
++            "maximum": float("nan"),
++            "nan_count": nan_count,
++            "inf_count": inf_count,
++            "trend": "no_finite_value",
++        }
++    recent = finite[-max(1, int(window)) :]
++    trend = "flat"
++    if len(recent) >= 2:
++        rising = all(a <= b for a, b in zip(recent, recent[1:])) and any(
++            a < b for a, b in zip(recent, recent[1:])
++        )
++        falling = all(a >= b for a, b in zip(recent, recent[1:])) and any(
++            a > b for a, b in zip(recent, recent[1:])
++        )
++        if rising:
++            trend = "rising"
++        elif falling:
++            trend = "falling"
++        elif max(recent) - min(recent) > 1.0e-12:
++            trend = "mixed"
++    return {
++        "latest": finite[-1],
++        "mean": sum(finite) / len(finite),
++        "window_mean": sum(recent) / len(recent),
++        "minimum": min(finite),
++        "maximum": max(finite),
++        "nan_count": nan_count,
++        "inf_count": inf_count,
++        "trend": trend,
++    }
++
++
++def team_size_bucket(team_size: int) -> str:
++    """将团队人数映射到 clipping/entropy 诊断分组。"""
++    size = int(team_size)
++    if size < 1:
++        raise ValueError(f"团队人数必须为正数: {size}")
++    return str(size) if size <= 4 else "5+"
++
++
++def summarize_by_team_size(
++    records: Iterable[Mapping[str, Any]],
++    *,
++    value_keys: Sequence[str],
++) -> dict[str, dict[str, Any]]:
++    """按团队人数汇总诊断记录，保留样本数和每个字段的完整统计。"""
++    grouped: dict[str, list[Mapping[str, Any]]] = {}
++    for record in records:
++        bucket = team_size_bucket(int(record["team_size"]))
++        grouped.setdefault(bucket, []).append(record)
++    output: dict[str, dict[str, Any]] = {}
++    for bucket, items in grouped.items():
++        output[bucket] = {
++            "count": len(items),
++            **{
++                key: summarize_numeric([item.get(key) for item in items])
++                for key in value_keys
++            },
++        }
++    return output
++
++
++def logprob_error_summary(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
++    """汇总 task/station/worker/total 的 rollout-replay 绝对误差。"""
++    records = list(rows)
++    result: dict[str, Any] = {}
++    for key in ("task", "station", "worker", "total"):
++        values = [abs(float(row.get(key, float("nan")))) for row in records]
++        finite = _finite_values(values)
++        result[f"max_{key}_error"] = max(finite) if finite else float("nan")
++    result["sample_count"] = len(records)
++    total = result["max_total_error"]
++    worker = result["max_worker_error"]
++    result["passed_fp32"] = bool(
++        math.isfinite(total) and math.isfinite(worker) and max(total, worker) <= 1.0e-5
++    )
++    result["passed_bf16"] = bool(
++        math.isfinite(total) and math.isfinite(worker) and max(total, worker) <= 1.0e-3
++    )
++    return result
++
++
++def validate_protocol_invariants(
++    actual: Mapping[str, Any], expected: Mapping[str, Any]
++) -> list[str]:
++    """逐字段检查实验口径；缺失字段也必须显式报告。"""
++    errors: list[str] = []
++    for key, expected_value in expected.items():
++        actual_value = actual.get(key, "<missing>")
++        if actual_value != expected_value:
++            errors.append(
++                f"{key}: actual={actual_value!r}, expected={expected_value!r}"
++            )
++    return errors
++
++
++def discover_event_files(roots: Iterable[str | Path]) -> list[Path]:
++    """递归发现 TensorBoard event 文件并去重。"""
++    files: set[Path] = set()
++    for raw_root in roots:
++        root = Path(raw_root)
++        if root.is_file() and "tfevents" in root.name:
++            files.add(root.resolve())
++        elif root.is_dir():
++            files.update(
++                path.resolve()
++                for path in root.rglob("events.out.tfevents*")
++                if path.is_file()
++            )
++    return sorted(files)
++
++
++def summarize_tensorboard_events(
++    roots: Iterable[str | Path], *, window: int = 20
++) -> dict[str, Any]:
++    """读取所有 event 文件，按 scalar tag 汇总完整训练/验证曲线。"""
++    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
++
++    event_files = discover_event_files(roots)
++    tag_values: dict[str, list[tuple[int, float]]] = {}
++    tag_files: dict[str, set[str]] = {}
++    for event_file in event_files:
++        accumulator = EventAccumulator(
++            str(event_file), size_guidance={"scalars": 0}
++        )
++        accumulator.Reload()
++        for tag in accumulator.Tags().get("scalars", []):
++            tag_files.setdefault(tag, set()).add(str(event_file))
++            tag_values.setdefault(tag, []).extend(
++                (int(item.step), float(item.value))
++                for item in accumulator.Scalars(tag)
++            )
++    summaries: dict[str, Any] = {}
++    for tag, rows in sorted(tag_values.items()):
++        rows.sort(key=lambda item: item[0])
++        values = [value for _, value in rows]
++        summaries[tag] = {
++            "latest_step": rows[-1][0] if rows else None,
++            "event_count": len(rows),
++            "event_files": sorted(tag_files[tag]),
++            **summarize_numeric(values, window=window),
++        }
++    return {
++        "event_files": [str(path) for path in event_files],
++        "event_file_count": len(event_files),
++        "scalar_tag_count": len(summaries),
++        "scalars": summaries,
++    }
++
+diff --git a/ppo_agent.py b/ppo_agent.py
+index e8bebe6..3ce6390 100644
+--- a/ppo_agent.py
++++ b/ppo_agent.py
+@@ -1817,6 +1817,7 @@ class PPOAgent:
+         *,
+         compute_value: bool = True,
+         manage_optimizer_mode: bool = True,
++        diagnostic_trace: Optional[Dict[str, Any]] = None,
+     ) -> Tuple[Optional[Tuple[int, int, List[int]]], float, float, Optional[torch.Tensor], bool]:
+         """
+         閫夋嫨鍔ㄤ綔 (Select Action)銆?
+@@ -1837,6 +1838,8 @@ class PPOAgent:
+         """
+         self.last_gated_team_trace = None
+         self.last_anchor_proposal_trace = None
++        if diagnostic_trace is not None:
++            diagnostic_trace.clear()
+         
+         if self.use_schedule_free and manage_optimizer_mode:
+             if is_eval:
+@@ -1884,6 +1887,8 @@ class PPOAgent:
+                 task_dist = Categorical(logits=task_logits)
+                 task_action = task_dist.sample()
+                 task_logprob = task_dist.log_prob(task_action)
++            if diagnostic_trace is not None:
++                diagnostic_trace["task_logprob"] = float(task_logprob.item())
+             
+             t_idx = task_action.item()
+             selected_task_emb = x_dict['task'][t_idx].unsqueeze(0) # [1, H]
+@@ -1902,6 +1907,15 @@ class PPOAgent:
+                         state_value = active_policy.get_value(obs, actor_x_dict_encoded=x_dict)
+                 else:
+                     state_value = torch.zeros((), device=self.device)
++                if diagnostic_trace is not None:
++                    diagnostic_trace.update(
++                        {
++                            "station_logprob": 0.0,
++                            "worker_logprobs": [],
++                            "worker_logprob": 0.0,
++                            "total_logprob": float(task_logprob.item()),
++                        }
++                    )
+                 return (
+                     (t_idx, -1, []),
+                     float(task_logprob.item()),
+@@ -1976,6 +1990,8 @@ class PPOAgent:
+                 station_dist = Categorical(logits=station_logits)
+                 station_action = station_dist.sample()
+                 station_logprob = station_dist.log_prob(station_action)
++            if diagnostic_trace is not None:
++                diagnostic_trace["station_logprob"] = float(station_logprob.item())
+ 
+             if action_scope in {
+                 "operation_station",
+@@ -2037,6 +2053,16 @@ class PPOAgent:
+                         return None, 0.0, 0.0, None, True
+                     selected_team = list(completed.team)
+                     action_station_id = completed.station_id
++                if diagnostic_trace is not None:
++                    diagnostic_trace.update(
++                        {
++                            "worker_logprobs": [],
++                            "worker_logprob": float(team_logprob.item()),
++                            "total_logprob": float(
++                                (task_logprob + station_logprob + team_logprob).item()
++                            ),
++                        }
++                    )
+                 if compute_value:
+                     with self.autocast_context():
+                         state_value = active_policy.get_value(
+@@ -2232,6 +2258,14 @@ class PPOAgent:
+                 state_value = torch.zeros((), device=self.device)
+             
+             action_tuple = (t_idx, station_action.item(), team_indices)
++            if diagnostic_trace is not None:
++                diagnostic_trace.update(
++                    {
++                        "worker_logprobs": [float(value.item()) for value in worker_logprobs],
++                        "worker_logprob": float(total_worker_logprob.item()),
++                        "total_logprob": float(action_logprob.item()),
++                    }
++                )
+             
+             # 妫€鏌?action 瀵逛簬 soft penalty 鐨勬湁鏁堟€?
+             is_invalid_action = False
+@@ -2246,6 +2280,215 @@ class PPOAgent:
+             
+         return action_tuple, action_logprob.item(), state_value.item(), specific_station_mask, is_invalid_action
+ 
++    def diagnose_action_logprobs(
++        self,
++        obs: HeteroData,
++        action: Tuple[int, int, List[int]],
++        mask_task: Optional[torch.Tensor] = None,
++        mask_station_matrix: Optional[torch.Tensor] = None,
++        mask_worker: Optional[torch.Tensor] = None,
++        *,
++        temperature: float = 1.0,
++        is_eval: bool = True,
++    ) -> Dict[str, Any]:
++        """在不采样、不更新参数的条件下重算 Full legacy 动作概率。
++
++        该入口只服务于初始 Full 的 rollout/replay identity 诊断；它不改变
++        正式 PPO 更新路径。WorkerPointer v2 使用已有的 behavior replay 入口，
++        不在这里增加第二套 v2 语义。
++        """
++        action_scope = str(
++            getattr(self.config, "policy_action_scope", "operation_station_worker")
++        )
++        if action_scope != "operation_station_worker":
++            raise ValueError(
++                "动作概率诊断仅支持 Full 的 operation_station_worker 口径"
++            )
++        if is_worker_pointer_v2_mode(self.config):
++            raise ValueError(
++                "动作概率诊断的 legacy 入口不接受 WorkerPointer v2；"
++                "请使用现有 v2 behavior replay"
++            )
++        task_id, station_id, team = action
++        task_id = int(task_id)
++        station_id = int(station_id)
++        team = [int(worker_id) for worker_id in team]
++        active_policy = (
++            self.ema_policy
++            if is_eval and getattr(self, "use_ema", False) and hasattr(self, "ema_policy")
++            else self.policy
++        )
++
++        with torch.inference_mode():
++            with self.autocast_context():
++                x_dict, global_context = active_policy(obs)
++
++            with self.autocast_context():
++                task_logits = active_policy.task_head(
++                    x_dict["task"], global_context, mask=None
++                )
++            if temperature != 1.0:
++                task_logits = task_logits / max(float(temperature), 1.0e-5)
++            task_invalid = (
++                mask_task.to(self.device).reshape(task_logits.shape)
++                if mask_task is not None
++                else torch.zeros_like(task_logits, dtype=torch.bool)
++            )
++            task_logits, task_usable = _finalize_action_logits(
++                task_logits, task_invalid, decision="diagnostic.task"
++            )
++            if not bool(task_usable.all()) or bool(task_invalid.reshape(-1)[task_id]):
++                raise ValueError(f"诊断动作的 task 非法或动作空间为空: {task_id}")
++            task_target = torch.tensor(
++                task_id, device=self.device, dtype=torch.long
++            ).reshape(task_logits.shape[:-1])
++            task_dist = Categorical(logits=task_logits)
++            task_logprob = task_dist.log_prob(task_target)
++            task_entropy = task_dist.entropy()
++
++            task_features = obs["task"].x
++            worker_layout = resolve_worker_feature_layout(self.config)
++            task_skill_end = 5 + int(worker_layout.num_skill_types)
++            is_virtual_task = not bool(
++                (task_features[task_id, 5:task_skill_end] > 0.5).any()
++            )
++            if is_virtual_task:
++                if station_id != -1 or team:
++                    raise ValueError("虚拟任务的诊断动作必须使用 station=-1、空团队")
++                return {
++                    "task": float(task_logprob.item()),
++                    "station": 0.0,
++                    "worker": 0.0,
++                    "total": float(task_logprob.item()),
++                    "task_entropy": float(task_entropy.mean().item()),
++                    "station_entropy": 0.0,
++                    "worker_logprobs": [],
++                    "worker_entropy": [],
++                    "worker_max_probability": [],
++                    "legal_worker_count": [],
++                    "team_size": 0,
++                }
++
++            if mask_station_matrix is None:
++                station_invalid = torch.zeros(
++                    (1, x_dict["station"].size(0)),
++                    dtype=torch.bool,
++                    device=self.device,
++                )
++            else:
++                station_invalid = mask_station_matrix[task_id].to(self.device).reshape(1, -1)
++            if station_id < 0 or station_id >= x_dict["station"].size(0):
++                raise ValueError(f"诊断动作的 station 越界: {station_id}")
++            with self.autocast_context():
++                station_logits = active_policy.station_head(
++                    x_dict["task"][task_id].unsqueeze(0),
++                    x_dict["station"].unsqueeze(0),
++                    mask=None,
++                )
++            if temperature != 1.0:
++                station_logits = station_logits / max(float(temperature), 1.0e-5)
++            station_logits, station_usable = _finalize_action_logits(
++                station_logits, station_invalid, decision="diagnostic.station"
++            )
++            if not bool(station_usable.all()) or bool(station_invalid[0, station_id]):
++                raise ValueError(f"诊断动作的 station 非法或动作空间为空: {station_id}")
++            station_dist = Categorical(logits=station_logits)
++            station_logprob = station_dist.log_prob(
++                torch.tensor([station_id], device=self.device, dtype=torch.long)
++            )
++            station_entropy = station_dist.entropy()
++
++            worker_features = obs["worker"].x
++            if worker_features.size(1) != worker_layout.total_dim:
++                raise ValueError(
++                    f"工人特征维度错误: {worker_features.size(1)} != {worker_layout.total_dim}"
++                )
++            worker_skills = worker_features[:, worker_layout.skill_slice]
++            task_type_idx = int(
++                torch.argmax(task_features[task_id, 5:task_skill_end]).item()
++            )
++            current_worker_mask = (
++                mask_worker.to(self.device).clone()
++                if mask_worker is not None
++                else torch.zeros(
++                    worker_features.size(0), dtype=torch.bool, device=self.device
++                )
++            )
++            has_skill = worker_skills[:, task_type_idx] > 0.5
++            worker_locks = torch.argmax(
++                worker_features[:, worker_layout.lock_slice], dim=1
++            )
++            current_worker_mask |= ~has_skill
++            current_worker_mask |= (worker_locks != 0) & (worker_locks != station_id + 1)
++            demand = int(self.get_task_demand(task_features, task_id))
++            if len(team) != demand:
++                raise ValueError(
++                    f"诊断动作团队人数与需求不一致: team={len(team)}, demand={demand}"
++                )
++
++            worker_embeddings = x_dict["worker"].unsqueeze(0)
++            current_team_emb = None
++            worker_logprobs: list[float] = []
++            worker_entropies: list[float] = []
++            worker_max_probabilities: list[float] = []
++            legal_worker_counts: list[int] = []
++            for step, worker_id in enumerate(team, start=1):
++                if worker_id < 0 or worker_id >= worker_features.size(0):
++                    raise ValueError(f"诊断动作的 worker 越界: {worker_id}")
++                if bool(current_worker_mask[worker_id]):
++                    raise ValueError(
++                        f"诊断动作的 worker 在第 {step} 步被 mask: {worker_id}"
++                    )
++                with self.autocast_context():
++                    worker_logits = active_policy.worker_head.forward_choice(
++                        x_dict["task"][task_id].unsqueeze(0),
++                        worker_embeddings,
++                        mask=None,
++                        current_team_emb=current_team_emb,
++                    )
++                if temperature != 1.0:
++                    worker_logits = worker_logits / max(float(temperature), 1.0e-5)
++                worker_invalid = current_worker_mask.reshape(worker_logits.shape)
++                worker_logits, worker_usable = _finalize_action_logits(
++                    worker_logits,
++                    worker_invalid,
++                    decision=f"diagnostic.worker[step={step}]",
++                )
++                if not bool(worker_usable.all()):
++                    raise ValueError(f"诊断动作第 {step} 步 worker 动作空间为空")
++                worker_dist = Categorical(logits=worker_logits)
++                worker_target = torch.tensor(
++                    [worker_id], device=self.device, dtype=torch.long
++                )
++                worker_logprobs.append(float(worker_dist.log_prob(worker_target).item()))
++                worker_entropies.append(float(worker_dist.entropy().item()))
++                legal_probabilities = worker_dist.probs.masked_fill(
++                    worker_invalid, 0.0
++                )
++                worker_max_probabilities.append(
++                    float(legal_probabilities.max().item())
++                )
++                legal_worker_counts.append(int((~current_worker_mask).sum().item()))
++                selected_embeddings = worker_embeddings[0, team[:step], :]
++                current_team_emb = selected_embeddings.mean(dim=0, keepdim=True)
++                current_worker_mask = current_worker_mask.clone()
++                current_worker_mask[worker_id] = True
++
++            worker_logprob = sum(worker_logprobs)
++            return {
++                "task": float(task_logprob.item()),
++                "station": float(station_logprob.item()),
++                "worker": float(worker_logprob),
++                "total": float(task_logprob.item() + station_logprob.item() + worker_logprob),
++                "task_entropy": float(task_entropy.mean().item()),
++                "station_entropy": float(station_entropy.mean().item()),
++                "worker_logprobs": worker_logprobs,
++                "worker_entropy": worker_entropies,
++                "worker_max_probability": worker_max_probabilities,
++                "legal_worker_count": legal_worker_counts,
++                "team_size": len(team),
++            }
++
+     def select_actions_batch(
+         self,
+         obs_list: List[HeteroData],
+diff --git a/scripts/diagnose_full_joint.py b/scripts/diagnose_full_joint.py
+new file mode 100644
+index 0000000..3bd39e1
+--- /dev/null
++++ b/scripts/diagnose_full_joint.py
+@@ -0,0 +1,844 @@
++from __future__ import annotations
++
++import argparse
++import csv
++import hashlib
++import json
++import sys
++from datetime import datetime
++from pathlib import Path
++from typing import Any, Iterable, Mapping
++
++import numpy as np
++import torch
++
++
++PROJECT_ROOT = Path(__file__).resolve().parents[1]
++if str(PROJECT_ROOT) not in sys.path:
++    sys.path.insert(0, str(PROJECT_ROOT))
++
++from configs import configs
++from core.action_completion import EarliestFinishActionCompleter
++from diagnostics.full_joint import (
++    canonicalize_action,
++    compare_actions,
++    logprob_error_summary,
++    summarize_by_team_size,
++    summarize_tensorboard_events,
++    validate_protocol_invariants,
++)
++from environment import AirLineEnv_Graph
++from evaluate_model import restore_checkpoint_saved_config
++from models.hb_gat_pn import HBGATPN
++from ppo_agent import PPOAgent
++from runtime.checkpoints import apply_checkpoint_model_spec, load_checkpoint, load_policy_weights
++from runtime.initial_worker_mapping import apply_initial_worker_mapping
++from runtime.seed import set_seed
++from training.observation import refresh_env_observation
++from worker_feature_layout import resolve_worker_feature_layout
++
++
++DEFAULT_CHECKPOINT = (
++    PROJECT_ROOT
++    / "results"
++    / "01_initial_main"
++    / "joint100_full_joint_seed42_20260719"
++    / "checkpoints"
++    / "best.ckpt"
++)
++DEFAULT_DATA = [
++    "data/283.csv",
++    "data/680.csv",
++    "data/2338.csv",
++    "data/3182.csv",
++]
++
++
++def _resolve_path(raw: str | Path) -> Path:
++    path = Path(raw)
++    return path if path.is_absolute() else PROJECT_ROOT / path
++
++
++def _sha256(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as handle:
++        for chunk in iter(lambda: handle.read(1 << 20), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def _write_json(path: Path, payload: Any) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(
++        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=True),
++        encoding="utf-8",
++    )
++
++
++def _scenario_specs(names: Iterable[str] | None) -> list[dict[str, Any]]:
++    scenarios = [
++        {"name": "standard", "rand_dur": False, "rand_w": False, "dyn_ev": False},
++        {"name": "duration_noise", "rand_dur": True, "rand_w": False, "dyn_ev": False},
++        {"name": "worker_noise", "rand_dur": False, "rand_w": True, "dyn_ev": False},
++        {"name": "dynamic_events", "rand_dur": False, "rand_w": False, "dyn_ev": True},
++    ]
++    if names is None:
++        return scenarios
++    selected = {str(name).strip().lower() for name in names if str(name).strip()}
++    unknown = selected - {item["name"] for item in scenarios}
++    if unknown:
++        raise ValueError(f"未知初始调度场景: {sorted(unknown)}")
++    return [item for item in scenarios if item["name"] in selected]
++
++
++def _set_scenario(config_obj: Any, scenario: Mapping[str, Any]) -> dict[str, Any]:
++    keys = (
++        "enable_dynamic_events",
++        "enable_station_breakdown",
++        "enable_material_delay",
++    )
++    backup = {key: getattr(config_obj, key, False) for key in keys}
++    config_obj.enable_dynamic_events = bool(scenario["dyn_ev"])
++    config_obj.enable_station_breakdown = bool(scenario["dyn_ev"])
++    config_obj.enable_material_delay = bool(scenario["dyn_ev"])
++    return backup
++
++
++def _restore_values(config_obj: Any, values: Mapping[str, Any]) -> None:
++    for key, value in values.items():
++        setattr(config_obj, key, value)
++
++
++def _load_agent(checkpoint_path: Path) -> tuple[Any, PPOAgent, Path]:
++    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
++    restore_checkpoint_saved_config(configs, checkpoint, set())
++    apply_checkpoint_model_spec(configs, checkpoint.model_spec, explicit_fields=set())
++    data_path = _resolve_path(configs.data_file_path)
++    apply_initial_worker_mapping(configs, data_path, explicit_fields=set())
++    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
++    model = HBGATPN(configs).to(device)
++    load_policy_weights(model, checkpoint, strict=True)
++    agent = PPOAgent(
++        model,
++        configs.lr,
++        configs.gamma,
++        configs.k_epochs,
++        configs.eps_clip,
++        device,
++        configs.batch_size,
++        config=configs,
++    )
++    agent.policy.eval()
++    return checkpoint, agent, data_path
++
++
++def _protocol_data_audit(data_path: Path, seed: int) -> dict[str, Any]:
++    env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
++    task_x = env.base_task_x.detach().cpu()
++    worker_x = env.base_worker_x.detach().cpu()
++    layout = resolve_worker_feature_layout(configs)
++    skill_slice = layout.skill_slice
++    task_skills = task_x[:, 5 : 5 + layout.num_skill_types]
++    physical = task_x[:, 0] > 1.0e-8
++    skill_present = task_skills[:, : layout.num_skill_types] > 0.5
++    worker_skills = worker_x[:, skill_slice] > 0.5
++    demands = task_x[:, 16].round().clamp_min(1).to(dtype=torch.int64)
++    shortage: dict[str, int] = {}
++    for skill_id in range(layout.num_skill_types):
++        task_demand = int(demands[physical & skill_present[:, skill_id]].max().item()) if bool(
++            (physical & skill_present[:, skill_id]).any()
++        ) else 0
++        available = int(worker_skills[:, skill_id].sum().item())
++        shortage[str(skill_id)] = available - task_demand
++    return {
++        "path": str(data_path.resolve()),
++        "sha256": _sha256(data_path),
++        "num_tasks": int(task_x.size(0)),
++        "num_workers": int(worker_x.size(0)),
++        "num_skill_types": int(layout.num_skill_types),
++        "physical_task_count": int(physical.sum().item()),
++        "tasks_without_required_skill": int((physical & ~skill_present.any(dim=1)).sum().item()),
++        "workers_by_skill": [int(value) for value in worker_skills.sum(dim=0).tolist()],
++        "worker_shortage_against_max_task_demand": shortage,
++    }
++
++
++def run_protocol_audit(
++    checkpoint_path: Path,
++    data_paths: Iterable[Path],
++    resolved_config: Path | None,
++) -> dict[str, Any]:
++    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
++    restore_checkpoint_saved_config(configs, checkpoint, set())
++    apply_checkpoint_model_spec(configs, checkpoint.model_spec, explicit_fields=set())
++    spec = checkpoint.model_spec
++    spec_values = {
++        key: value
++        for key, value in vars(spec).items()
++        if value is not None
++    }
++    saved_config = checkpoint.metadata.get("config", {})
++    if not isinstance(saved_config, Mapping):
++        saved_config = {}
++    actual = dict(saved_config)
++    actual.update(spec_values)
++    expected = {
++        "policy_action_scope": "operation_station_worker",
++        "policy_observation_scope": "full",
++        "team_selection_mode": "autoregressive",
++        "num_skill_types": 5,
++    }
++    report: dict[str, Any] = {
++        "checkpoint": str(checkpoint_path.resolve()),
++        "checkpoint_size": checkpoint_path.stat().st_size,
++        "checkpoint_sha256": _sha256(checkpoint_path),
++        "format_name": checkpoint.format_name,
++        "protocol_errors": validate_protocol_invariants(actual, expected),
++        "checkpoint_model_spec": spec_values,
++        "saved_config_keys": sorted(saved_config),
++        "training_identity": {
++            key: saved_config.get(key)
++            for key in (
++                "seed",
++                "num_envs",
++                "batch_size",
++                "max_episodes",
++                "total_timesteps",
++                "policy_action_scope",
++                "policy_observation_scope",
++                "team_selection_mode",
++                "workforce_binding_mode",
++                "train_data_path_or_dir",
++                "training_manifest_path",
++            )
++        },
++        "metadata_keys": sorted(checkpoint.metadata),
++        "resolved_config": None,
++        "data_audits": [],
++    }
++    if resolved_config is not None:
++        report["resolved_config"] = {
++            "path": str(resolved_config.resolve()),
++            "size": resolved_config.stat().st_size,
++            "sha256": _sha256(resolved_config),
++        }
++    for data_path in data_paths:
++        if not data_path.is_file():
++            report["data_audits"].append({"path": str(data_path), "error": "文件不存在"})
++            continue
++        try:
++            apply_initial_worker_mapping(
++                configs, data_path, explicit_fields=set()
++            )
++            report["data_audits"].append(_protocol_data_audit(data_path, int(saved_config.get("seed", 42))))
++        except Exception as exc:
++            report["data_audits"].append({"path": str(data_path), "error": repr(exc)})
++    return report
++
++
++def _schedule_metrics(
++    env: AirLineEnv_Graph,
++    total_reward: float,
++    *,
++    failure_reason: str = "",
++    deadlock_count: int = 0,
++) -> dict[str, Any]:
++    schedule = list(env.assigned_tasks)
++    complete = len(schedule) == env.num_tasks
++    legal = False
++    violations: list[str] = []
++    if complete:
++        legality = env.validate_assignments(schedule)
++        legal = bool(legality.is_legal)
++        if not legal:
++            violations = [str(item) for item in legality.violations]
++    if complete and legal:
++        makespan = float(np.max(env.station_wall_clock))
++        balance_std = float(np.std(env.station_loads))
++        reward = float(total_reward)
++    else:
++        makespan = float(env.ideal_makespan * 3.0)
++        balance_std = float(env.ideal_station_load * 3.0)
++        penalty = float(configs.deadlock_penalty_constant * configs.r_coef_makespan * configs.reward_scale * 4)
++        reward = float(total_reward - penalty)
++
++    worker_busy = 0.0
++    station_busy = np.zeros(env.num_stations, dtype=float)
++    skill_busy = np.zeros(resolve_worker_feature_layout(configs).num_skill_types, dtype=float)
++    worker_tasks: dict[int, list[tuple[float, float]]] = {}
++    layout = resolve_worker_feature_layout(configs)
++    worker_skills = env.base_worker_x[:, layout.skill_slice].detach().cpu().numpy() > 0.5
++    for _task_id, station_id, team, start, end in schedule:
++        duration = max(0.0, float(end) - float(start))
++        worker_busy += duration * len(team)
++        if station_id >= 0:
++            station_busy[station_id] += duration
++        for worker_id in team:
++            worker_tasks.setdefault(int(worker_id), []).append((float(start), float(end)))
++            if 0 <= int(worker_id) < worker_skills.shape[0]:
++                skill_busy += duration * worker_skills[int(worker_id)].astype(float)
++    waits: list[float] = []
++    for intervals in worker_tasks.values():
++        previous_end = 0.0
++        for start, end in sorted(intervals):
++            waits.append(max(0.0, start - previous_end))
++            previous_end = max(previous_end, end)
++    worker_util = worker_busy / (env.num_workers * makespan) if makespan > 0 else 0.0
++    station_util = (
++        float(station_busy.sum())
++        / (env.num_stations * int(getattr(configs, "max_slots_per_station", 3)) * makespan)
++        if makespan > 0
++        else 0.0
++    )
++    skill_counts = worker_skills.sum(axis=0).astype(float)
++    skill_util = np.divide(
++        skill_busy,
++        skill_counts * max(makespan, 1.0e-12),
++        out=np.zeros_like(skill_busy),
++        where=skill_counts > 0,
++    )
++    return {
++        "complete": bool(complete),
++        "legal": bool(legal),
++        "failure_reason": str(failure_reason),
++        "violations": violations,
++        "scheduled_tasks": len(schedule),
++        "num_tasks": int(env.num_tasks),
++        "completion_rate": float(len(schedule) / max(1, env.num_tasks)),
++        "deadlock_count": int(deadlock_count),
++        "makespan": makespan,
++        "balance_std": balance_std,
++        "reward": reward,
++        "worker_utilization": float(worker_util),
++        "station_utilization": float(station_util),
++        "avg_worker_wait_h": float(np.mean(waits)) if waits else 0.0,
++        "skill_utilization": [float(value) for value in skill_util.tolist()],
++    }
++
++
++def _canonicalize_assigned(row: Any) -> tuple[int, int, tuple[int, ...]]:
++    """从环境的 task/station/team/start/end 记录中提取动作前三项。"""
++    return canonicalize_action((row[0], row[1], row[2]))
++
++
++def _run_learned_episode(
++    agent: PPOAgent,
++    env: AirLineEnv_Graph,
++    scenario: Mapping[str, Any],
++    seed: int,
++) -> tuple[dict[str, Any], list[dict[str, Any]]]:
++    state = env.reset(
++        randomize_duration=bool(scenario["rand_dur"]),
++        randomize_workers=bool(scenario["rand_w"]),
++        seed=int(seed),
++    )
++    events: list[dict[str, Any]] = []
++    total_reward = 0.0
++    deadlocks = 0
++    failure_reason = ""
++    agent.policy.eval()
++    for step in range(max(1, env.num_tasks * 3)):
++        task_mask, station_mask, worker_mask = env.get_masks()
++        if bool(task_mask.all()):
++            if env.try_wait_for_resources():
++                events.append({"type": "wait"})
++                state = refresh_env_observation(env)
++                continue
++            deadlocks += 1
++            failure_reason = "learned_deadlock"
++            break
++        result = agent.select_action(
++            state.to(agent.device),
++            mask_task=task_mask.to(agent.device),
++            mask_station_matrix=station_mask.to(agent.device),
++            mask_worker=worker_mask.to(agent.device),
++            deterministic=True,
++            temperature=0.0,
++            is_eval=True,
++        )
++        if result[0] is None:
++            failure_reason = "learned_no_action"
++            break
++        action = canonicalize_action(result[0])
++        before_len = len(env.assigned_tasks)
++        state, reward, done, info = env.step(action)
++        total_reward += float(reward)
++        new_rows = env.assigned_tasks[before_len:]
++        actuals = [_canonicalize_assigned(row) for row in new_rows]
++        event = {
++            "type": "action",
++            "step": int(step),
++            "action": list(action[:2]) + [list(action[2])],
++            "executed_actions": [list(item[:2]) + [list(item[2])] for item in actuals],
++            "action_match": any(compare_actions(action, actual) for actual in actuals),
++        }
++        events.append(event)
++        if info.get("invalid_action", False) or info.get("error"):
++            failure_reason = "learned_invalid_action"
++            break
++        if done:
++            break
++    if not failure_reason and len(env.assigned_tasks) != env.num_tasks:
++        failure_reason = "learned_step_limit"
++    metrics = _schedule_metrics(
++        env,
++        total_reward,
++        failure_reason=failure_reason,
++        deadlock_count=deadlocks,
++    )
++    metrics["action_mismatch_count"] = sum(
++        1 for event in events if event.get("type") == "action" and not event["action_match"]
++    )
++    return metrics, events
++
++
++def _run_forced_eft_episode(
++    env: AirLineEnv_Graph,
++    scenario: Mapping[str, Any],
++    seed: int,
++    learned_events: list[Mapping[str, Any]],
++) -> tuple[dict[str, Any], list[dict[str, Any]]]:
++    state = env.reset(
++        randomize_duration=bool(scenario["rand_dur"]),
++        randomize_workers=bool(scenario["rand_w"]),
++        seed=int(seed),
++    )
++    completer = EarliestFinishActionCompleter(configs)
++    total_reward = 0.0
++    deadlocks = 0
++    failure_reason = ""
++    events: list[dict[str, Any]] = []
++    for event in learned_events:
++        if event["type"] == "wait":
++            task_mask, _, _ = env.get_masks()
++            if bool(task_mask.all()):
++                if not env.try_wait_for_resources():
++                    deadlocks += 1
++                    failure_reason = "eft_deadlock"
++                    break
++                state = refresh_env_observation(env)
++                events.append({"type": "wait", "reason": "replayed_no_legal_task"})
++            continue
++
++        task_id, station_id, team = event["action"]
++        action = None
++        for _ in range(max(1, env.num_tasks * 3)):
++            task_mask, station_mask, worker_mask = env.get_masks()
++            if task_id < 0 or task_id >= env.num_tasks:
++                failure_reason = "fixed_task_pair_out_of_range"
++                break
++            if bool(task_mask[task_id]):
++                if not env.try_wait_for_resources():
++                    deadlocks += 1
++                    failure_reason = "eft_deadlock_before_fixed_task"
++                    break
++                state = refresh_env_observation(env)
++                events.append({"type": "wait", "reason": "fixed_task_not_ready"})
++                continue
++            is_virtual = not bool(
++                (state["task"].x[task_id, 5 : 5 + int(configs.num_skill_types)] > 0.5).any()
++            )
++            if is_virtual:
++                if station_id != -1 or team:
++                    failure_reason = "fixed_virtual_action_invalid"
++                    break
++                action = (int(task_id), -1, [])
++                break
++            if station_id < 0 or station_id >= env.num_stations or bool(station_mask[task_id, station_id]):
++                if not env.try_wait_for_resources():
++                    deadlocks += 1
++                    failure_reason = "eft_deadlock_before_fixed_station"
++                    break
++                state = refresh_env_observation(env)
++                events.append({"type": "wait", "reason": "fixed_station_not_ready"})
++                continue
++            completed = completer.complete(
++                state,
++                task_id=int(task_id),
++                station_mask=station_mask[task_id],
++                worker_mask=worker_mask,
++                selected_station=int(station_id),
++            )
++            if completed is None or int(completed.station_id) != int(station_id):
++                if not env.try_wait_for_resources():
++                    deadlocks += 1
++                    failure_reason = "eft_team_infeasible_for_fixed_pair"
++                    break
++                state = refresh_env_observation(env)
++                events.append({"type": "wait", "reason": "eft_team_not_ready"})
++                continue
++            action = (int(task_id), int(station_id), list(completed.team))
++            break
++        if action is None:
++            if not failure_reason:
++                failure_reason = "fixed_pair_wait_limit"
++            break
++        before_len = len(env.assigned_tasks)
++        state, reward, done, info = env.step(action)
++        total_reward += float(reward)
++        new_rows = env.assigned_tasks[before_len:]
++        actuals = [_canonicalize_assigned(row) for row in new_rows]
++        events.append(
++            {
++                "type": "action",
++                "action": list(canonicalize_action(action)[:2]) + [list(canonicalize_action(action)[2])],
++                "executed_actions": [list(item[:2]) + [list(item[2])] for item in actuals],
++                "action_match": any(compare_actions(action, actual) for actual in actuals),
++            }
++        )
++        if info.get("invalid_action", False) or info.get("error"):
++            failure_reason = "eft_invalid_action"
++            break
++        if done:
++            break
++    if not failure_reason and len(env.assigned_tasks) != env.num_tasks:
++        failure_reason = "fixed_trace_exhausted"
++    metrics = _schedule_metrics(
++        env,
++        total_reward,
++        failure_reason=failure_reason,
++        deadlock_count=deadlocks,
++    )
++    metrics["action_mismatch_count"] = sum(
++        1 for event in events if event.get("type") == "action" and not event["action_match"]
++    )
++    return metrics, events
++
++
++def _pair_rates(
++    learned_events: list[Mapping[str, Any]], eft_events: list[Mapping[str, Any]]
++) -> tuple[float, float]:
++    learned_actions = [item for item in learned_events if item["type"] == "action"]
++    eft_actions = [item for item in eft_events if item["type"] == "action"]
++    count = min(len(learned_actions), len(eft_actions))
++    if count == 0:
++        return float("nan"), float("nan")
++    sequence_diffs = 0
++    set_diffs = 0
++    for learned, eft in zip(learned_actions[:count], eft_actions[:count]):
++        learned_action = canonicalize_action(learned["action"])
++        eft_action = canonicalize_action(eft["action"])
++        sequence_diffs += learned_action[2] != eft_action[2]
++        set_diffs += set(learned_action[2]) != set(eft_action[2])
++    return sequence_diffs / count, set_diffs / count
++
++
++def run_worker_ab(
++    checkpoint_path: Path,
++    data_paths: Iterable[Path],
++    scenarios: Iterable[Mapping[str, Any]],
++    seeds: Iterable[int],
++    output_dir: Path,
++) -> dict[str, Any]:
++    _, agent, _ = _load_agent(checkpoint_path)
++    rows: list[dict[str, Any]] = []
++    traces: list[dict[str, Any]] = []
++    backups = _set_scenario(configs, {"dyn_ev": False})
++    try:
++        for data_path in data_paths:
++            for scenario in scenarios:
++                for seed in seeds:
++                    apply_initial_worker_mapping(
++                        configs, data_path, explicit_fields=set()
++                    )
++                    set_seed(int(seed))
++                    learned_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
++                    learned_metrics, learned_events = _run_learned_episode(
++                        agent, learned_env, scenario, int(seed)
++                    )
++                    set_seed(int(seed))
++                    eft_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
++                    eft_metrics, eft_events = _run_forced_eft_episode(
++                        eft_env, scenario, int(seed), learned_events
++                    )
++                    sequence_rate, set_rate = _pair_rates(learned_events, eft_events)
++                    rows.append(
++                        {
++                            "data": str(data_path),
++                            "scenario": scenario["name"],
++                            "seed": int(seed),
++                            "learned": learned_metrics,
++                            "eft_fixed_pair": eft_metrics,
++                            "makespan_improvement_rate": (
++                                (learned_metrics["makespan"] - eft_metrics["makespan"])
++                                / learned_metrics["makespan"]
++                                if learned_metrics["makespan"] > 0
++                                else float("nan")
++                            ),
++                            "team_sequence_difference_rate": sequence_rate,
++                            "team_set_difference_rate": set_rate,
++                        }
++                    )
++                    traces.append(
++                        {
++                            "data": str(data_path),
++                            "scenario": scenario["name"],
++                            "seed": int(seed),
++                            "learned_events": learned_events,
++                            "eft_events": eft_events,
++                        }
++                    )
++    finally:
++        _restore_values(configs, backups)
++    report = {
++        "protocol": "same_checkpoint_same_task_station_fixed_pair_deterministic",
++        "checkpoint": str(checkpoint_path.resolve()),
++        "rows": rows,
++    }
++    _write_json(output_dir / "worker_ab.json", report)
++    _write_json(output_dir / "worker_ab_traces.json", traces)
++    return report
++
++
++def run_identity(
++    checkpoint_path: Path,
++    data_paths: Iterable[Path],
++    scenarios: Iterable[Mapping[str, Any]],
++    seeds: Iterable[int],
++    output_dir: Path,
++    max_actions: int,
++) -> dict[str, Any]:
++    _, agent, _ = _load_agent(checkpoint_path)
++    rows: list[dict[str, Any]] = []
++    failures: list[dict[str, Any]] = []
++    backups = _set_scenario(configs, {"dyn_ev": False})
++    try:
++        for data_path in data_paths:
++            for scenario in scenarios:
++                for seed in seeds:
++                    apply_initial_worker_mapping(
++                        configs, data_path, explicit_fields=set()
++                    )
++                    set_seed(int(seed))
++                    env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
++                    state = env.reset(
++                        randomize_duration=bool(scenario["rand_dur"]),
++                        randomize_workers=bool(scenario["rand_w"]),
++                        seed=int(seed),
++                    )
++                    action_count = 0
++                    while action_count < max_actions:
++                        task_mask, station_mask, worker_mask = env.get_masks()
++                        if bool(task_mask.all()):
++                            if env.try_wait_for_resources():
++                                state = refresh_env_observation(env)
++                                continue
++                            failures.append({"data": str(data_path), "scenario": scenario["name"], "seed": int(seed), "reason": "deadlock"})
++                            break
++                        trace: dict[str, Any] = {}
++                        result = agent.select_action(
++                            state.to(agent.device),
++                            mask_task=task_mask.to(agent.device),
++                            mask_station_matrix=station_mask.to(agent.device),
++                            mask_worker=worker_mask.to(agent.device),
++                            deterministic=False,
++                            temperature=1.0,
++                            is_eval=True,
++                            diagnostic_trace=trace,
++                        )
++                        if result[0] is None:
++                            failures.append({"data": str(data_path), "scenario": scenario["name"], "seed": int(seed), "reason": "no_action"})
++                            break
++                        action = canonicalize_action(result[0])
++                        replay = agent.diagnose_action_logprobs(
++                            state.to(agent.device),
++                            action,
++                            mask_task=task_mask.to(agent.device),
++                            mask_station_matrix=station_mask.to(agent.device),
++                            mask_worker=worker_mask.to(agent.device),
++                            temperature=1.0,
++                            is_eval=True,
++                        )
++                        old_workers = [float(value) for value in trace.get("worker_logprobs", [])]
++                        new_workers = [float(value) for value in replay.get("worker_logprobs", [])]
++                        worker_error = max(
++                            [abs(a - b) for a, b in zip(old_workers, new_workers)]
++                            + [abs(len(old_workers) - len(new_workers))],
++                        )
++                        old_total = float(trace.get("total_logprob", result[1]))
++                        actual_task_error = abs(float(trace.get("task_logprob", 0.0)) - replay["task"])
++                        actual_station_error = abs(float(trace.get("station_logprob", 0.0)) - replay["station"])
++                        total_error = abs(old_total - replay["total"])
++                        before_len = len(env.assigned_tasks)
++                        state, _reward, done, info = env.step(action)
++                        actuals = [
++                            _canonicalize_assigned(row)
++                            for row in env.assigned_tasks[before_len:]
++                        ]
++                        row = {
++                            "data": str(data_path),
++                            "scenario": scenario["name"],
++                            "seed": int(seed),
++                            "step": int(action_count),
++                            "team_size": int(len(action[2])),
++                            "task": actual_task_error,
++                            "station": actual_station_error,
++                            "worker": worker_error,
++                            "total": total_error,
++                            "action_mismatch": int(
++                                not any(compare_actions(action, actual) for actual in actuals)
++                            ),
++                            "info_invalid_action": bool(info.get("invalid_action", False)),
++                            "worker_entropy_sum": float(sum(replay.get("worker_entropy", []))),
++                            "worker_entropy_mean": float(
++                                np.mean(replay.get("worker_entropy", []))
++                                if replay.get("worker_entropy")
++                                else 0.0
++                            ),
++                            "worker_max_probability_mean": float(
++                                np.mean(replay.get("worker_max_probability", []))
++                                if replay.get("worker_max_probability")
++                                else 0.0
++                            ),
++                            "legal_worker_count_mean": float(
++                                np.mean(replay.get("legal_worker_count", []))
++                                if replay.get("legal_worker_count")
++                                else 0.0
++                            ),
++                        }
++                        rows.append(row)
++                        action_count += 1
++                        if done:
++                            break
++                    else:
++                        failures.append({"data": str(data_path), "scenario": scenario["name"], "seed": int(seed), "reason": "action_limit"})
++    finally:
++        _restore_values(configs, backups)
++    report = {
++        "protocol": "random_rollout_then_no_update_single_state_replay",
++        "checkpoint": str(checkpoint_path.resolve()),
++        "logprob": logprob_error_summary(rows),
++        "team_size_summary": summarize_by_team_size(
++            [row for row in rows if int(row["team_size"]) > 0],
++            value_keys=(
++                "worker_entropy_sum",
++                "worker_entropy_mean",
++                "worker_max_probability_mean",
++                "legal_worker_count_mean",
++                "worker",
++                "total",
++            ),
++        ),
++        "action_mismatch_count": sum(int(row["action_mismatch"]) for row in rows),
++        "rows": rows,
++        "failures": failures,
++    }
++    _write_json(output_dir / "identity.json", report)
++    return report
++
++
++def run_tflogs(
++    train_roots: Iterable[Path], async_roots: Iterable[Path], output_dir: Path
++) -> dict[str, Any]:
++    report = {
++        "training": summarize_tensorboard_events(train_roots),
++        "async_eval": summarize_tensorboard_events(async_roots),
++    }
++    _write_json(output_dir / "tflogs_all_scalars.json", report)
++    return report
++
++
++def _write_worker_csv(path: Path, rows: list[Mapping[str, Any]]) -> None:
++    fields = [
++        "data",
++        "scenario",
++        "seed",
++        "learned_makespan",
++        "eft_makespan",
++        "makespan_improvement_rate",
++        "learned_reward",
++        "eft_reward",
++        "learned_completion_rate",
++        "eft_completion_rate",
++        "learned_legal",
++        "eft_legal",
++        "team_sequence_difference_rate",
++        "team_set_difference_rate",
++    ]
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open("w", newline="", encoding="utf-8-sig") as handle:
++        writer = csv.DictWriter(handle, fieldnames=fields)
++        writer.writeheader()
++        for row in rows:
++            learned = row["learned"]
++            eft = row["eft_fixed_pair"]
++            writer.writerow(
++                {
++                    "data": row["data"],
++                    "scenario": row["scenario"],
++                    "seed": row["seed"],
++                    "learned_makespan": learned["makespan"],
++                    "eft_makespan": eft["makespan"],
++                    "makespan_improvement_rate": row["makespan_improvement_rate"],
++                    "learned_reward": learned["reward"],
++                    "eft_reward": eft["reward"],
++                    "learned_completion_rate": learned["completion_rate"],
++                    "eft_completion_rate": eft["completion_rate"],
++                    "learned_legal": learned["legal"],
++                    "eft_legal": eft["legal"],
++                    "team_sequence_difference_rate": row["team_sequence_difference_rate"],
++                    "team_set_difference_rate": row["team_set_difference_rate"],
++                }
++            )
++
++
++def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description="APAL Full 初始调度诊断")
++    parser.add_argument("--mode", choices=("protocol", "worker-ab", "identity", "tflogs"), required=True)
++    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
++    parser.add_argument("--data", type=Path, action="append", default=None)
++    parser.add_argument("--scenario", action="append", default=None)
++    parser.add_argument("--seed", type=int, action="append", default=None)
++    parser.add_argument("--resolved-config", type=Path, default=None)
++    parser.add_argument("--output-dir", type=Path, default=None)
++    parser.add_argument("--train-root", type=Path, action="append", default=None)
++    parser.add_argument("--async-root", type=Path, action="append", default=None)
++    parser.add_argument("--max-actions", type=int, default=1000)
++    return parser.parse_args(argv)
++
++
++def main(argv: list[str] | None = None) -> int:
++    args = _parse_args(argv)
++    output_dir = args.output_dir or (
++        PROJECT_ROOT
++        / "diagnostics"
++        / "full_joint"
++        / f"{args.mode.replace('-', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
++    )
++    output_dir.mkdir(parents=True, exist_ok=True)
++    data_paths = [_resolve_path(path) for path in (args.data or [Path(item) for item in DEFAULT_DATA])]
++    seeds = args.seed or [42]
++    scenarios = _scenario_specs(args.scenario)
++    if args.mode == "protocol":
++        report = run_protocol_audit(
++            _resolve_path(args.checkpoint),
++            data_paths,
++            None if args.resolved_config is None else _resolve_path(args.resolved_config),
++        )
++        _write_json(output_dir / "protocol.json", report)
++    elif args.mode == "worker-ab":
++        report = run_worker_ab(
++            _resolve_path(args.checkpoint), data_paths, scenarios, seeds, output_dir
++        )
++        _write_worker_csv(output_dir / "worker_ab.csv", report["rows"])
++    elif args.mode == "identity":
++        run_identity(
++            _resolve_path(args.checkpoint),
++            data_paths,
++            scenarios,
++            seeds,
++            output_dir,
++            max(1, int(args.max_actions)),
++        )
++    else:
++        train_roots = [_resolve_path(path) for path in (args.train_root or [])]
++        async_roots = [_resolve_path(path) for path in (args.async_root or [])]
++        if not train_roots and not async_roots:
++            raise ValueError("tflogs 模式至少需要 --train-root 或 --async-root")
++        run_tflogs(train_roots, async_roots, output_dir)
++    print(f"[FullJointDiagnostics] output={output_dir.resolve()}", flush=True)
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/test_full_joint_diagnostics.py b/tests/test_full_joint_diagnostics.py
+new file mode 100644
+index 0000000..b3335c6
+--- /dev/null
++++ b/tests/test_full_joint_diagnostics.py
+@@ -0,0 +1,80 @@
++from __future__ import annotations
++
++import math
++
++from diagnostics.full_joint import (
++    canonicalize_action,
++    compare_actions,
++    logprob_error_summary,
++    summarize_numeric,
++    summarize_by_team_size,
++    team_size_bucket,
++    validate_protocol_invariants,
++)
++
++
++def test_action_comparison_preserves_autoregressive_worker_order() -> None:
++    action = (3, 2, [5, 1])
++
++    assert canonicalize_action(action) == (3, 2, (5, 1))
++    assert compare_actions(action, (3, 2, [5, 1]))
++    assert not compare_actions(action, (3, 2, [1, 5]))
++    assert canonicalize_action((7, 4, [9]), virtual_task=True) == (7, -1, ())
++
++
++def test_numeric_summary_reports_nonfinite_values_and_direction() -> None:
++    summary = summarize_numeric([1.0, 2.0, 3.0, float("nan"), float("inf")])
++
++    assert summary["latest"] == 3.0
++    assert summary["mean"] == 2.0
++    assert summary["minimum"] == 1.0
++    assert summary["maximum"] == 3.0
++    assert summary["nan_count"] == 1
++    assert summary["inf_count"] == 1
++    assert summary["trend"] == "rising"
++
++
++def test_team_size_grouping_and_logprob_error_summary() -> None:
++    assert [team_size_bucket(k) for k in (1, 2, 3, 4, 5, 9)] == [
++        "1",
++        "2",
++        "3",
++        "4",
++        "5+",
++        "5+",
++    ]
++    grouped = summarize_by_team_size(
++        [
++            {"team_size": 1, "joint_clip": 0.1},
++            {"team_size": 5, "joint_clip": 0.5},
++        ],
++        value_keys=("joint_clip",),
++    )
++    assert grouped["1"]["count"] == 1
++    assert grouped["5+"]["joint_clip"]["mean"] == 0.5
++
++    errors = logprob_error_summary(
++        [
++            {"task": 1.0e-6, "station": 2.0e-6, "worker": 4.0e-6, "total": 3.0e-6},
++            {"task": 2.0e-6, "station": 1.0e-6, "worker": 5.0e-6, "total": 4.0e-6},
++        ]
++    )
++    assert errors["max_total_error"] == 4.0e-6
++    assert errors["max_worker_error"] == 5.0e-6
++    assert errors["passed_fp32"]
++
++
++def test_protocol_invariants_are_explicit() -> None:
++    metadata = {
++        "policy_action_scope": "operation_station_worker",
++        "policy_observation_scope": "full",
++        "team_selection_mode": "autoregressive",
++        "num_skill_types": 5,
++    }
++
++    assert validate_protocol_invariants(metadata, metadata) == []
++    errors = validate_protocol_invariants(
++        {**metadata, "team_selection_mode": "static_topq"}, metadata
++    )
++    assert errors == ["team_selection_mode: actual='static_topq', expected='autoregressive'"]
++
+-- 
+2.53.0.windows.1
+

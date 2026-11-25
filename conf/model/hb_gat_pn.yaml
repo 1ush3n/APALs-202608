@@ -19,8 +19,30 @@ model:
   use_attention_critic: true
   use_autoregressive_worker: true
   policy_action_scope: operation_station_worker
+  action_completion_mode: earliest_finish
+  policy_observation_scope: full
+  graph_input_scope: match_policy
+  critic_observation_scope: match_policy
+  task_feature_scope: full
+  task_mask_mode: resource_aware
+  station_mask_mode: resource_aware
+  ablation_protocol: legacy
+  conditional_team_max_candidates: 4
+  conditional_team_gate_bias: -4.0
+  conditional_team_nonbaseline_logit: -8.0
+  conditional_team_scoring_mode: fixed_prior_v1
+  conditional_team_prior_margin: 4.0
+  conditional_team_prior_weight: 1.0
+  conditional_head_baseline_mode: "off"
   workforce_binding_mode: endogenous
   workforce_preallocation_ratio: 1.0
   team_selection_mode: autoregressive
+  worker_pointer_v2_explicit_team_state: false
+  worker_pointer_v2_marginal_scarcity: false
+  worker_pointer_v2_marginal_scarcity_clip: 10.0
+  worker_pointer_v2_interaction_residual: false
+  worker_pointer_v2_next_frontier_pressure: false
   graph_encoder_mode: hetero_gat
   actor_context_mode: attention
+  homogeneous_use_type_embedding: true
+  homogeneous_shared_input_projection: false

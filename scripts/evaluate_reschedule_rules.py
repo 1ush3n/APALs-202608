@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from baselines.heuristic.reschedule_rules import DEFAULT_RULE_METHODS, rule_registry
 from configs import configs
 from runtime.artifacts import resolve_run_output_dir, write_run_context_files, write_run_manifest
+from runtime.initial_worker_mapping import apply_initial_worker_mapping
 from runtime.hydra_config import (
     ExtraArgument,
     HydraCliError,
@@ -32,7 +33,11 @@ from runtime.hydra_config import (
 )
 from runtime.paths import resolve_workspace_path
 from runtime.reschedule_eval import ensure_reschedule_baseline_available, ensure_reschedule_eval_scenarios_available
-from runtime.reschedule_manifest import load_reschedule_manifest
+from runtime.reschedule_manifest import (
+    REAL_INSTANCE_IDS,
+    load_reschedule_manifest,
+    validate_r5_manifest_assets,
+)
 from utils.reschedule import load_reschedule_scenarios
 
 
@@ -67,8 +72,31 @@ RULE_EXTRA_ARGS = {
     "output_dir": ExtraArgument(default=None, help="输出目录；缺省写入本次 run 的 eval/reschedule_rules"),
 }
 
+RULE_EXTRA_ARGS.update(
+    beam_width=ExtraArgument(default=4, help=RULE_EXTRA_ARGS["beam_width"].help),
+    beam_branch_factor=ExtraArgument(default=4, help=RULE_EXTRA_ARGS["beam_branch_factor"].help),
+    beam_levels=ExtraArgument(default=4, help=RULE_EXTRA_ARGS["beam_levels"].help),
+    beam_patience=ExtraArgument(default=2, help=RULE_EXTRA_ARGS["beam_patience"].help),
+    ig_iterations=ExtraArgument(default=80, help=RULE_EXTRA_ARGS["ig_iterations"].help),
+    sa_iterations=ExtraArgument(default=120, help=RULE_EXTRA_ARGS["sa_iterations"].help),
+)
 PARTIAL_FILE_NAME = "reschedule_rule_eval_partial.csv"
 RESUME_STATE_FILE_NAME = "reschedule_rule_resume_state.json"
+R5_STOCHASTIC_METHODS = frozenset(
+    {
+        "RandomRepair",
+        "Beam",
+        "BeamSearch",
+        "BeamSearchRepair",
+        "IG",
+        "DestroyRepair",
+        "IteratedGreedy",
+        "IteratedGreedyRepair",
+        "SA",
+        "SimulatedAnnealing",
+        "SimulatedAnnealingRepair",
+    }
+)
 
 
 def _normalize_methods(raw: Any) -> list[str]:
@@ -91,6 +119,16 @@ def _normalize_methods(raw: Any) -> list[str]:
 def _scenario_level_from_id(scenario_id: str) -> str:
     head = str(scenario_id).split("_", 1)[0]
     return head if head in {"low", "medium", "high"} else "custom"
+
+
+def _scenario_stage_from_id(scenario_id: str) -> str:
+    parts = str(scenario_id).split("_", 1)
+    stage = parts[1] if len(parts) == 2 else ""
+    return stage if stage in {"early", "middle", "late"} else "custom"
+
+
+def _solver_seed_count(method_name: str, *, r5: bool) -> int:
+    return 3 if r5 and str(method_name) in R5_STOCHASTIC_METHODS else 1
 
 
 def _as_id_list(value: Any) -> list[str]:
@@ -140,6 +178,29 @@ def _summarize(df: pd.DataFrame, group_cols: list[str]) -> list[dict[str, Any]]:
     return grouped.to_dict(orient="records")
 
 
+def _summarize_solver_seeds(df: pd.DataFrame) -> list[dict[str, Any]]:
+    if df.empty or "solver_seed_index" not in df.columns:
+        return []
+    group_cols = [
+        column
+        for column in ("instance_id", "scenario_id", "scenario_level", "scenario_stage", "method")
+        if column in df.columns
+    ]
+    metric_cols = [
+        column
+        for column in ("selection_score", "score", "makespan", "eligible", "duration_sec")
+        if column in df.columns
+    ]
+    if not group_cols or not metric_cols:
+        return []
+    grouped = df.groupby(group_cols, dropna=False)[metric_cols].agg(["mean", "std"]).reset_index()
+    grouped.columns = [
+        "_".join(str(part) for part in column if str(part)) if isinstance(column, tuple) else str(column)
+        for column in grouped.columns
+    ]
+    return grouped.fillna(0.0).to_dict(orient="records")
+
+
 def _resolve_parallel_workers(value: Any) -> int:
     workers = int(value)
     if workers < 0:
@@ -156,6 +217,7 @@ def _job_key(job: dict[str, Any]) -> str:
             str(job["scenario_id"]),
             str(job["method_name"]),
             str(int(job["seed"])),
+            str(int(job.get("solver_seed_index", 0))),
         ]
     )
 
@@ -168,8 +230,10 @@ def _resume_signature(jobs: list[dict[str, Any]], signature_payload: dict[str, A
             "instance_id": str(job.get("instance_id", "")),
             "scenario_id": str(job["scenario_id"]),
             "scenario_level": str(job["scenario_level"]),
+            "scenario_stage": str(job.get("scenario_stage", "custom")),
             "method": str(job["method_name"]),
             "seed": int(job["seed"]),
+            "solver_seed_index": int(job.get("solver_seed_index", 0)),
             "data_path": str(job["data_path"]),
             "baseline_path": str(job["baseline_path"]),
             "scenario_path": str(job["scenario_path"]),
@@ -276,8 +340,15 @@ def _format_progress_row(row: dict[str, Any], completed: int, total: int, *, ela
     )
 
 
-def _apply_rule_job_config(config_snapshot: dict[str, Any], *, baseline_path: str, scenario_path: str) -> None:
+def _apply_rule_job_config(
+    config_snapshot: dict[str, Any],
+    *,
+    data_path: str,
+    baseline_path: str,
+    scenario_path: str,
+) -> None:
     configs.update_from_dict(config_snapshot)
+    apply_initial_worker_mapping(configs, data_path, explicit_fields=set())
     configs.enable_dynamic_events = False
     configs.enable_station_breakdown = False
     configs.enable_material_delay = False
@@ -313,6 +384,7 @@ def _evaluate_rule_job(job: dict[str, Any]) -> dict[str, Any]:
     try:
         _apply_rule_job_config(
             dict(job["config_snapshot"]),
+            data_path=str(job["data_path"]),
             baseline_path=str(job["baseline_path"]),
             scenario_path=str(job["scenario_path"]),
         )
@@ -339,6 +411,10 @@ def _evaluate_rule_job(job: dict[str, Any]) -> dict[str, Any]:
         else:
             row = run_solver()
         row["method"] = str(job["method_name"])
+        row["scenario_level"] = str(job["scenario_level"])
+        row["scenario_stage"] = str(job.get("scenario_stage", "custom"))
+        row["solver_seed_index"] = int(job.get("solver_seed_index", 0))
+        row["solver_seed"] = int(job["seed"])
         row["_job_key"] = str(job["_job_key"])
         row["_order"] = int(job["order"])
         row["_instance_id"] = str(job.get("instance_id", ""))
@@ -706,11 +782,18 @@ def evaluate_reschedule_rules_manifest(
     """按 manifest 实例批量评估规则，保证与 PPO manifest 评估使用同一数据、baseline 和场景。"""
 
     manifest = load_reschedule_manifest(manifest_path)
+    is_r5 = str(manifest.payload.get("reschedule_protocol", "")).strip() == "r5_task_delay_v1"
     ids = _as_id_list(instance_ids)
     if not ids:
         ids = [entry.instance_id for entry in manifest.filter(split="eval", source="real")]
     if not ids:
         raise ValueError("manifest 中没有可用于评估的 real/eval 实例，请显式传 instance_ids")
+    if is_r5:
+        validate_r5_manifest_assets(manifest)
+        if tuple(ids) != REAL_INSTANCE_IDS:
+            raise ValueError(f"r5 正式规则评估必须精确使用四个真实实例: {REAL_INSTANCE_IDS}")
+        if num_runs is not None:
+            raise ValueError("r5 正式规则评估必须读取每个真实实例的全部 9 个固定场景")
 
     root = Path(output_dir) if output_dir is not None else None
     method_names = _normalize_methods(methods)
@@ -754,32 +837,38 @@ def evaluate_reschedule_rules_manifest(
         if num_runs is not None:
             scenario_items = scenario_items[: max(1, int(num_runs))]
         scenario_counts[instance_id] = len(scenario_items)
+        if is_r5 and scenario_counts[instance_id] != 9:
+            raise ValueError(f"r5 实例 {instance_id} 必须恰好包含 9 个场景")
         for scenario_idx, (scenario_id, scenario) in enumerate(scenario_items):
             level = _scenario_level_from_id(scenario_id)
+            stage = _scenario_stage_from_id(scenario_id)
             for method_idx, method_name in enumerate(method_names):
-                jobs.append(
-                    {
-                        "order": order,
-                        "instance_order": instance_order,
-                        "instance_id": instance_id,
-                        "data_path": str(entry.data_path),
-                        "baseline_path": str(entry.baseline_schedule_path),
-                        "scenario_path": str(entry.scenario_path),
-                        "scenario": scenario,
-                        "scenario_idx": scenario_idx,
-                        "scenario_id": scenario_id,
-                        "scenario_level": level,
-                        "method_idx": method_idx,
-                        "method_name": method_name,
-                        "seed": int(seed) + scenario_idx * 1000 + method_idx,
-                        "verbose": verbose,
-                        "verify_static_cache": bool(verify_static_cache),
-                        "suppress_worker_stdout": True,
-                        "search_kwargs": search_kwargs,
-                        "config_snapshot": config_snapshot,
-                    }
-                )
-                order += 1
+                for solver_seed_index in range(_solver_seed_count(method_name, r5=is_r5)):
+                    jobs.append(
+                        {
+                            "order": order,
+                            "instance_order": instance_order,
+                            "instance_id": instance_id,
+                            "data_path": str(entry.data_path),
+                            "baseline_path": str(entry.baseline_schedule_path),
+                            "scenario_path": str(entry.scenario_path),
+                            "scenario": scenario,
+                            "scenario_idx": scenario_idx,
+                            "scenario_id": scenario_id,
+                            "scenario_level": level,
+                            "scenario_stage": stage,
+                            "method_idx": method_idx,
+                            "method_name": method_name,
+                            "seed": int(seed) + instance_order * 10000 + scenario_idx * 1000 + method_idx * 10 + solver_seed_index,
+                            "solver_seed_index": solver_seed_index,
+                            "verbose": verbose,
+                            "verify_static_cache": bool(verify_static_cache),
+                            "suppress_worker_stdout": True,
+                            "search_kwargs": search_kwargs,
+                            "config_snapshot": config_snapshot,
+                        }
+                    )
+                    order += 1
 
     job_rows = _run_rule_jobs(
         jobs,
@@ -799,6 +888,7 @@ def evaluate_reschedule_rules_manifest(
             "seed": int(seed),
             "search_kwargs": search_kwargs,
             "verify_static_cache": bool(verify_static_cache),
+            "solver_seed_policy": "r5_stochastic_methods_three_seeds" if is_r5 else "single_seed",
         },
     )
 
@@ -856,19 +946,27 @@ def evaluate_reschedule_rules_manifest(
                     f"mk={row['makespan']:.2f} dur={row['duration_sec']:.2f}s"
                 )
 
+    solver_seed_summary = _summarize_solver_seeds(pd.DataFrame(rows))
+    if is_r5 and sum(scenario_counts.values()) != 36:
+        raise ValueError("r5 正式规则评估必须恰好包含 36 个场景")
     payload = {
         "manifest_path": str(resolve_workspace_path(manifest_path).resolve()),
         "instance_ids": ids,
         "methods": method_names,
+        "scenario_count": int(sum(scenario_counts.values())),
         "row_count": len(rows),
+        "solver_run_count": len(rows),
+        "solver_seed_policy": "r5_stochastic_methods_three_seeds" if is_r5 else "single_seed",
         "rows": rows,
         "summary_by_instance_method": method_rows,
+        "solver_seed_summary": solver_seed_summary,
         "instances": instance_summaries,
     }
     if root is not None:
         root.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(rows).to_csv(root / "reschedule_rule_eval_by_instance.csv", index=False)
         pd.DataFrame(method_rows).to_csv(root / "reschedule_rule_summary_by_instance_method.csv", index=False)
+        pd.DataFrame(solver_seed_summary).to_csv(root / "reschedule_rule_solver_seed_summary.csv", index=False)
         (root / "reschedule_rule_manifest_summary.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",

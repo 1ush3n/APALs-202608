@@ -1,0 +1,20 @@
+\section{Discussion and Conclusion}
+\label{sec:discussion}
+
+\subsection{What the current evidence supports}
+
+The current initial-scheduling experiments support the central modeling direction. HGP-PPO improves over flat PPO and DQN on all four APAL scales, indicating that a flat state-action representation is insufficient for the coupled operation-station-worker APAL structure. The degradation of w/o GAT and w/o attention pooling also suggests that graph-structured resource encoding and bottleneck-aware context aggregation contribute to scheduling quality.
+
+The current results also support a practical efficiency argument, but only in a bounded form. HGP-PPO requires offline training and has higher per-instance inference cost than simple dispatching rules. However, it remains much faster than high-budget search on large APAL instances while achieving substantially better makespan than flat learning baselines. The final paper should therefore present HGP-PPO as a learned scheduling policy with a quality-efficiency trade-off, not as a universally fastest solver.
+
+\subsection{What remains unproven}
+
+Several claims are not yet fully supported. First, Skill Hub needs direct evidence. The manuscript can argue that worker-skill-operation factorization is semantically appropriate, but the final paper must show whether it reduces edge count, memory, and rollout time without hurting makespan. Second, dynamic rescheduling is not yet a completed strength claim. The neural rescheduler is runnable on the fixed manifest, but the strict eligible-rate score is invalidated by one station-slot violation on the largest instance. Third, current rescheduling behavior changes many stations and teams, so the stability objective should be strengthened before making an engineering deployment claim.
+
+\subsection{Limitations}
+
+The present work has four main limitations. The first is evidence maturity: several experiments are still in progress, and some ablations do not yet share the same statistical protocol. The second is baseline fairness: search baselines depend strongly on budget, so the final comparison must report both quality and runtime under clearly fixed budgets. The third is dynamic realism: current disturbance manifests cover important scenarios, but final claims require mixed disturbances and cross-distribution tests. The fourth is deployment robustness: all schedules must pass the same hard feasibility checker, and any ineligible schedule must be reported through eligible rate and selection score.
+
+\subsection{Conclusion}
+
+This manuscript develops a graph reinforcement learning framework for aircraft pulse assembly line scheduling and rescheduling. By representing APAL as a heterogeneous graph and decoding operation-station-worker-team actions autoregressively, HGP-PPO targets the coupled constraints that distinguish APAL from generic FJSP/JSSP. Current initial-scheduling evidence is promising and supports the APAL-specific graph-policy design. Current rescheduling evidence is useful but not final, because strict feasibility still fails in one large-scale scenario. The next writing and experimental step is therefore clear: complete the Skill Hub, mask, pointer, robustness, and efficiency evidence chain, then revise the claims from provisional to submission-ready.

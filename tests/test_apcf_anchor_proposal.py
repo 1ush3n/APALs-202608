@@ -1,0 +1,896 @@
+# -*- coding: utf-8 -*-
+"""APCF 锚点条件完整团队提议与反事实门控的正式测试。
+
+覆盖协议（论文实现计划）要求：
+  1) 提议团队合法性：技能匹配、锁定语义（0=空 / station+1）、worker_mask 排除；
+  2) 存在合法替代时提议 P ≠ 锚点 H（汉明距离 ≥ 1）；
+  3) 温度 0 + 未预训练（价值头零初始化、门控负偏置）必选锚点分支；
+  4) z=0 时重算对数概率仍计入完整提议链（Σ log q + log π̃）；
+  5) 单环境与批量路径生成完全一致（掩码/门控/轨迹）；
+  6) 预训练 checkpoint 可被 runtime.checkpoints 加载并还原模型语义；
+  7) 回归：既有 scope 的 PPO 更新有限性不因 APCF 改动退化。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
+
+from configs import Config, configs
+from environment import AirLineEnv_Graph
+from models.hb_gat_pn import HBGATPN
+from ppo_agent import PPOAgent, FrozenAnchorProposalTrace
+from runtime.configuration import validate_runtime_config
+from tests.runtime_safety import temporary_config, seed_everything
+from training.memory import Memory
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATA_PATH = PROJECT_ROOT / "data" / "283.csv"
+
+
+def _apcf_overrides(**extra) -> dict[str, object]:
+    values = {
+        "policy_action_scope": "operation_station_anchor_proposal_team",
+        "hidden_dim": 32,
+        "num_gat_layers": 1,
+        "num_heads": 2,
+        "use_shared_trunk": True,
+        "use_schedule_free": False,
+        "use_ema": False,
+        "enable_dynamic_events": False,
+        "randomize_durations": False,
+        "n_w": 80,
+        "batch_size": 4,
+        "accumulation_steps": 1,
+        "k_epochs": 1,
+        "anchor_proposal_prior_margin": 4.0,
+        "anchor_proposal_gate_bias": -4.0,
+        "anchor_proposal_train_branch_floor_start": 0.20,
+        "anchor_proposal_train_branch_floor_end": 0.02,
+        "anchor_proposal_branch_floor_decay_fraction": 0.40,
+        "anchor_proposal_require_difference": True,
+    }
+    values.update(extra)
+    return values
+
+
+def _make_agent(**extra) -> PPOAgent:
+    overrides = _apcf_overrides(**extra)
+    with temporary_config(configs, overrides):
+        model = HBGATPN(configs)
+        agent = PPOAgent(
+            model,
+            lr=1.0e-4,
+            gamma=0.99,
+            k_epochs=1,
+            eps_clip=0.2,
+            device=torch.device("cpu"),
+            batch_size=int(overrides["batch_size"]),
+            total_timesteps=1,
+            config=configs,
+        )
+        return agent, overrides
+
+
+def _advance_to_ready_physical_task(
+    env: AirLineEnv_Graph,
+) -> tuple[object, tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    obs = env.reset(seed=42)
+    for _ in range(env.num_tasks):
+        masks = env.get_masks()
+        ready = torch.nonzero(~masks[0], as_tuple=False).reshape(-1).tolist()
+        physical = [
+            int(task_id)
+            for task_id in ready
+            if int(env.task_static_feat[int(task_id), 1].item()) >= 0
+        ]
+        if physical:
+            selected = min(physical)
+            forced_task_mask = torch.ones_like(masks[0])
+            forced_task_mask[selected] = False
+            return obs, (forced_task_mask, masks[1], masks[2])
+        assert ready, "推进虚拟节点时不应出现资源等待"
+        obs, _reward, done, info = env.step((min(ready), -1, []))
+        assert not done
+        assert info.get("virtual_task", False)
+    raise AssertionError("未能推进到首个可调度物理工序")
+
+
+def _proposal_masks_from_obs(
+    agent: PPOAgent,
+    obs: object,
+    task_id: int,
+    station_id: int,
+    worker_mask: torch.Tensor | None,
+) -> torch.Tensor:
+    """复刻 PPO 提议分支的非法掩码（True=非法），供测试断言合法性。"""
+    from worker_feature_layout import resolve_worker_feature_layout
+
+    layout = resolve_worker_feature_layout(agent.config)
+    worker_feats = obs["worker"].x
+    skills = worker_feats[:, layout.skill_slice]
+    task_skill_vec = obs["task"].x[task_id, 5 : 5 + skills.size(1)]
+    skill_idx = int(torch.argmax(task_skill_vec).item())
+    has_skill = skills[:, skill_idx] > 0.5
+    locks = torch.argmax(worker_feats[:, layout.lock_slice], dim=1)
+    lock_ok = (locks == 0) | (locks == (station_id + 1))
+    illegal = (~has_skill) | (~lock_ok)
+    if worker_mask is not None:
+        illegal = illegal | worker_mask.to(device=illegal.device, dtype=torch.bool)
+    return illegal
+
+
+def _write_apcf_pretrain_checkpoint(
+    path: Path,
+    *,
+    model: HBGATPN,
+    config: Config,
+    manifest_sha256: str | None,
+) -> None:
+    """写入满足 runtime checkpoint 格式的最小 APCF 预训练 checkpoint。"""
+    from runtime.checkpoints import build_checkpoint_metadata
+
+    payload = {
+        "state_dict": model.state_dict(),
+        "apal_metadata": build_checkpoint_metadata(config),
+        "apal_pretrain_metadata": {},
+    }
+    if manifest_sha256 is not None:
+        payload["apal_pretrain_metadata"]["manifest_sha256"] = manifest_sha256
+    torch.save(payload, path)
+
+
+def _write_cf_manifest(path: Path) -> str:
+    """写入 APCF 运行时可识别的最小反事实 manifest，并返回文件 SHA-256。"""
+    path.write_text(
+        json.dumps({"kind": "initial_anchor_proposal_counterfactual_v1"}),
+        encoding="utf-8",
+    )
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("temperature", (0.0, 1.0))
+def test_apcf_proposal_is_legal_and_differs_from_anchor(temperature: float) -> None:
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        action, logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=False,
+            temperature=temperature,
+        )
+    assert action is not None and not invalid
+    task_id, station_id, team = int(action[0]), int(action[1]), [int(w) for w in action[2]]
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    assert trace.task_id == task_id and trace.station_id == station_id
+
+    # 团队必须恰好为工序需求人数、无重复成员。
+    assert len(team) == len(set(team))
+    assert len(team) == len(trace.anchor_team)
+
+    # 合法性：技能匹配、锁定语义、worker_mask 排除。
+    illegal = _proposal_masks_from_obs(agent, obs, task_id, station_id, masks[2])
+    for worker_id in team:
+        assert not bool(illegal[worker_id].item()), f"工人 {worker_id} 不合法"
+
+    # 存在合法替代时，提议链存在（P≠H 由首步强制非锚点保证）。
+    if trace.proposal_available:
+        assert len(trace.proposal_worker_sequence) == len(trace.anchor_team)
+        assert len(set(trace.proposal_worker_sequence) - set(trace.anchor_team)) >= 1
+        assert trace.hamming_distance >= 1
+    assert torch.isfinite(torch.tensor(logprob))
+
+
+def test_apcf_temperature_zero_selects_anchor_without_pretrain() -> None:
+    """温度 0 + 价值头零初始化 + 门控负偏置 → 严格选择锚点分支。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=True,
+            temperature=0.0,
+        )
+    assert action is not None and not invalid
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    assert trace.selected_branch == 0, "未预训练时温度 0 必须选择锚点分支"
+    assert tuple(int(w) for w in action[2]) == trace.anchor_team
+
+
+def test_apcf_z0_recompute_includes_full_proposal_chain() -> None:
+    """即使 z=0 执行锚点，重算对数概率也必须包含完整提议链。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+
+    # 训练采样下 z 按 ε 下限混合分布采样（未预训练 p(z=1)≈0.21），
+    # 重采样直到采到 z=0 分支且存在合法提议，保证覆盖"z=0 仍计入提议链"语义。
+    selected: tuple[FrozenAnchorProposalTrace, float] | None = None
+    for _attempt in range(40):
+        with temporary_config(configs, overrides):
+            action, logprob, _value, _smask, invalid = agent.select_action(
+                obs,
+                mask_task=masks[0],
+                mask_station_matrix=masks[1],
+                mask_worker=masks[2],
+                deterministic=False,
+                temperature=1.0,
+            )
+        assert action is not None and not invalid
+        trace = agent.last_anchor_proposal_trace
+        assert isinstance(trace, FrozenAnchorProposalTrace)
+        if trace.proposal_available and trace.selected_branch == 0:
+            selected = (trace, float(logprob))
+            break
+    assert selected is not None, "40 次重采样仍未采到 z=0 分支，测试环境异常"
+    trace, _logprob = selected
+    assert trace.selected_branch == 0, "应选择锚点分支"
+
+    # 用冻结轨迹在当前策略下重算（模拟 PPO update 重算路径）。
+    model = agent.policy
+    encoded, _context = model(obs)
+    task_emb = encoded["task"][trace.task_id].unsqueeze(0)
+    station_emb = encoded["station"][trace.station_id].unsqueeze(0)
+    worker_embs = encoded["worker"]
+    recomputed, entropy, _ = agent._recompute_anchor_proposal_logprobs(
+        task_embeddings=task_emb,
+        station_embeddings=station_emb,
+        worker_embeddings=worker_embs.unsqueeze(0),
+        frozen_traces=[trace],
+    )
+    assert torch.isfinite(recomputed).all()
+    assert torch.isfinite(entropy).all()
+    # 提议链严格为负（log q < 0），且 z=0 时完整对数概率 != 0，
+    # 证明提议链即使未被执行也计入了 PPO 的 log π。
+    assert recomputed[0].item() < 0.0
+
+    # 手动逐项复算提议链 + z=0 门控对数概率，验证与重算一致。
+    from torch.distributions import Categorical
+
+    num_workers = worker_embs.size(0)
+    manual_lp = torch.zeros((), device=worker_embs.device)
+    for j, chosen in enumerate(trace.proposal_worker_sequence):
+        step_mask = torch.full(
+            (1, num_workers), True, device=worker_embs.device, dtype=torch.bool
+        )
+        step_mask[0, list(trace.per_step_worker_ids[j])] = False
+        context = (
+            worker_embs[list(trace.proposal_worker_sequence[:j]), :].mean(
+                dim=0, keepdim=True
+            )
+            if j > 0
+            else None
+        )
+        scores = model.anchor_team_head.forward_choice(
+            task_emb,
+            station_emb,
+            worker_embs[list(trace.anchor_team), :].mean(dim=0, keepdim=True),
+            worker_embs.unsqueeze(0),
+            mask=step_mask,
+            current_team_emb=context,
+        )
+        dist = Categorical(logits=scores.float())
+        manual_lp = manual_lp + dist.log_prob(
+            torch.tensor([[chosen]], device=worker_embs.device)
+        )[0]
+    # z=0 分支门控对数概率（混合分布，ε=当前探索下限）。
+    proposal_emb = worker_embs[list(trace.proposal_worker_sequence), :].mean(
+        dim=0, keepdim=True
+    )
+    branch_logits, _delta, _g = model.anchor_proposal_gate(
+        task_emb,
+        station_emb,
+        worker_embs[list(trace.anchor_team), :].mean(dim=0, keepdim=True),
+        proposal_emb,
+        torch.tensor(list(trace.gate_features), dtype=torch.float32).reshape(1, -1),
+        torch.tensor([[float(trace.hamming_distance)]], dtype=torch.float32),
+    )
+    eps = max(float(trace.branch_floor), 0.0)
+    soft = torch.softmax(branch_logits.float(), dim=1)
+    mixed = eps + (1.0 - 2.0 * eps) * soft
+    bdist = Categorical(probs=mixed)
+    manual_lp = manual_lp + bdist.log_prob(
+        torch.tensor([[0]], device=worker_embs.device)
+    )[0]
+    assert torch.allclose(recomputed[0], manual_lp, atol=1.0e-4)
+
+
+def test_apcf_sampled_proposal_logprob_matches_ppo_recompute() -> None:
+    """采样期必须把完整 proposal 链与门控分支共同写入旧对数概率。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+
+    # 先用确定性 operation/station 决策取得一个可行的二元动作；随后只检验
+    # APCF 团队分支的行为策略对数概率，不混入 operation/station 的概率项。
+    with temporary_config(configs, overrides):
+        action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=True,
+            temperature=0.0,
+        )
+    assert action is not None and not invalid
+    task_id, station_id = int(action[0]), int(action[1])
+
+    model = agent.policy
+    encoded, _context = model(obs)
+    task_emb = encoded["task"][task_id].unsqueeze(0)
+    station_emb = encoded["station"][station_id].unsqueeze(0)
+    worker_embs = encoded["worker"]
+    with temporary_config(configs, overrides):
+        sampled = agent._select_anchor_proposal_team(
+            model,
+            obs=obs,
+            task_id=task_id,
+            station_id=station_id,
+            worker_mask=masks[2],
+            task_emb=task_emb,
+            station_emb=station_emb,
+            worker_embs=worker_embs,
+            deterministic=False,
+            temperature=1.0,
+            branch_floor=agent._current_anchor_branch_floor(),
+        )
+    assert sampled is not None
+    _team, sampled_team_logprob, trace = sampled
+    assert trace.proposal_available
+
+    recomputed, _entropy, _diagnostics = agent._recompute_anchor_proposal_logprobs(
+        task_embeddings=task_emb,
+        station_embeddings=station_emb,
+        worker_embeddings=worker_embs.unsqueeze(0),
+        frozen_traces=[trace],
+    )
+    assert torch.allclose(
+        sampled_team_logprob.reshape(()), recomputed[0], atol=1.0e-5
+    )
+
+
+def test_apcf_rollout_trace_exposes_finite_learning_diagnostics() -> None:
+    """APCF rollout trace 只保存轻量标量，但必须足够判断提议器与门控是否学习。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        _action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=False,
+            temperature=1.0,
+        )
+    assert not invalid
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    for field_name in (
+        "proposal_pointer_logprob",
+        "proposal_pointer_entropy_mean",
+        "predicted_delta_a",
+        "gate_value",
+        "raw_branch_logit_gap",
+    ):
+        assert torch.isfinite(torch.tensor(getattr(trace, field_name)))
+
+    memory = Memory()
+    memory.anchor_proposal_traces.append(trace)
+    metrics = PPOAgent._anchor_proposal_rollout_metrics(memory)
+    for metric_name in (
+        "APCF/RolloutProposalPointerLogprobMean",
+        "APCF/RolloutProposalPointerEntropyMean",
+        "APCF/RolloutPredictedDeltaAMean",
+        "APCF/RolloutGateValueMean",
+        "APCF/RolloutRawBranchLogitGapMean",
+    ):
+        assert metric_name in metrics
+        assert torch.isfinite(torch.tensor(metrics[metric_name]))
+
+
+def test_apcf_single_and_batch_paths_agree() -> None:
+    """单环境 select_action 与批量 select_actions_batch 生成一致。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    envs = [AirLineEnv_Graph(DATA_PATH, seed=42) for _ in range(2)]
+    prepared = [_advance_to_ready_physical_task(env) for env in envs]
+    observations = [item[0] for item in prepared]
+    masks = [item[1] for item in prepared]
+    with temporary_config(configs, overrides):
+        results = agent.select_actions_batch(
+            observations,
+            [item[0] for item in masks],
+            [item[1] for item in masks],
+            [item[2] for item in masks],
+            deterministic=True,
+            temperature=0.0,
+        )
+        assert len(results) == 2
+        for env, result in zip(envs, results, strict=True):
+            action, logprob, _value, _smask, invalid = result
+            assert action is not None and not invalid
+            assert torch.isfinite(torch.tensor(logprob))
+            _obs, _reward, _done, info = env.step(action)
+            assert not info.get("invalid_action", False)
+        assert len(agent.last_anchor_proposal_traces) == 2
+        for trace in agent.last_anchor_proposal_traces:
+            assert isinstance(trace, FrozenAnchorProposalTrace)
+            assert trace.selected_branch == 0
+            assert trace.proposal_available
+
+
+def test_apcf_memory_trace_count_matches_states() -> None:
+    """PPO update 前 memory 中锚点轨迹数与状态数必须一致（对齐校验）。"""
+    seed_everything(42)
+    agent, overrides = _make_agent(batch_size=1)
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        action, logprob, value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=False,
+            temperature=1.0,
+        )
+    assert action is not None and not invalid
+    memory = Memory()
+    memory.states.append(env.get_state_snapshot())
+    memory.actions.append(action)
+    memory.logprobs.append(logprob)
+    memory.values.append(value)
+    memory.masks.append(masks)
+    memory.anchor_proposal_traces.append(agent.last_anchor_proposal_trace)
+    _obs, reward, done, info = env.step(action)
+    assert not info.get("invalid_action", False)
+    memory.rewards.append(float(reward))
+    memory.is_terminals.append(bool(done))
+    with temporary_config(configs, overrides):
+        metrics = agent.update(memory, env, current_ep=1)
+    assert torch.isfinite(torch.tensor(metrics["Loss/Total"]))
+
+
+def test_apcf_config_validation_rejects_bad_margin_and_floor() -> None:
+    """运行时配置校验：margin/门控偏置/探索下限非法值必须拒绝。"""
+    cfg = Config()
+    cfg.policy_action_scope = "operation_station_anchor_proposal_team"
+    cfg.anchor_proposal_prior_margin = 4.0
+    cfg.anchor_proposal_gate_bias = -4.0
+    cfg.anchor_proposal_train_branch_floor_start = 0.20
+    cfg.anchor_proposal_train_branch_floor_end = 0.02
+    cfg.anchor_proposal_branch_floor_decay_fraction = 0.40
+    validate_runtime_config(cfg)
+
+    cfg.anchor_proposal_prior_margin = 0.0
+    with pytest.raises(ValueError):
+        validate_runtime_config(cfg)
+    cfg.anchor_proposal_prior_margin = 4.0
+    cfg.anchor_proposal_gate_bias = 1.0
+    with pytest.raises(ValueError):
+        validate_runtime_config(cfg)
+    cfg.anchor_proposal_gate_bias = -4.0
+    cfg.anchor_proposal_train_branch_floor_end = 0.60
+    with pytest.raises(ValueError):
+        validate_runtime_config(cfg)
+
+
+def test_apcf_encoder_is_frozen_and_heads_trainable_in_pretrain() -> None:
+    """预训练模块冻结编码器、仅训练双头：requires_grad 语义正确。"""
+    import sys
+
+    from training.cf_pretrain import CFPretrainLightningModule
+
+    sys.path.insert(0, str(PROJECT_ROOT))
+    agent, overrides = _make_agent()
+    with temporary_config(configs, overrides):
+        module = CFPretrainLightningModule(
+            agent.policy,
+            configs,
+            manifest_path=str(PROJECT_ROOT / "data" / "nonexistent_manifest.json"),
+            manifest_sha256="dummy-sha256-for-frozen-semantics-test",
+        )
+    model = module.policy
+    trainable_names = {
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    assert trainable_names, "预训练必须存在可训练参数"
+    for name in trainable_names:
+        assert name.startswith("anchor_team_head") or name.startswith(
+            "anchor_proposal_gate"
+        ), f"非双头参数 {name} 不得可训练"
+
+
+def test_apcf_pretrain_reports_sign_and_gate_accuracy(tmp_path: Path) -> None:
+    """反事实预训练的验证指标必须区分收益预测与门控分支是否可判定。"""
+    from training.cf_pretrain import CFPretrainLightningModule
+
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=False,
+            temperature=1.0,
+        )
+    assert action is not None and not invalid
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    assert trace.proposal_available
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    torch.save(obs, tmp_path / "obs.pt")
+    np.savez(tmp_path / "masks.npz", worker_mask=masks[2].numpy())
+    group = {
+        "obs_pt": "obs.pt",
+        "npz": "masks.npz",
+        "task_id": int(action[0]),
+        "station_id": int(action[1]),
+        "anchor_team": tuple(trace.anchor_team),
+        "candidates": [
+            {
+                "team": tuple(trace.proposal_worker_sequence),
+                "source": "test",
+                "relative_gain": 0.01,
+            }
+        ],
+    }
+    with temporary_config(
+        configs,
+        {**overrides, "anchor_proposal_cf_manifest_path": str(manifest_path)},
+    ):
+        module = CFPretrainLightningModule(
+            agent.policy,
+            configs,
+            manifest_path=manifest_path,
+        )
+        metrics = module._compute_group_losses(group, torch.device("cpu"))
+    for metric_name in ("delta_sign_accuracy", "gate_branch_accuracy"):
+        assert metric_name in metrics
+        assert torch.isfinite(metrics[metric_name])
+        assert 0.0 <= float(metrics[metric_name].item()) <= 1.0
+
+
+def test_apcf_pretrain_manifest_sha256_is_recorded_and_verified() -> None:
+    """预训练 checkpoint 必须记录 source manifest 的 SHA-256 供 PPO 侧校验。"""
+    import sys
+
+    from training.cf_pretrain import CFPretrainLightningModule, _sha256_file
+
+    sys.path.insert(0, str(PROJECT_ROOT))
+    manifest_path = PROJECT_ROOT / "data" / "283.csv"
+    expected = _sha256_file(manifest_path)
+    agent, overrides = _make_agent()
+    with temporary_config(configs, overrides):
+        module = CFPretrainLightningModule(
+            agent.policy,
+            configs,
+            manifest_path=str(manifest_path),
+            manifest_sha256="",
+        )
+    assert module.manifest_sha256 == expected
+
+
+def test_apcf_cold_start_rejects_pretrain_checkpoint_without_manifest_sha(
+    tmp_path: Path,
+) -> None:
+    """冷启动不得加载缺失反事实 manifest SHA-256 的预训练 checkpoint。"""
+    from train_lightning import _maybe_load_apcf_pretrain
+
+    manifest_path = tmp_path / "manifest.json"
+    _write_cf_manifest(manifest_path)
+    checkpoint_path = tmp_path / "pretrain.ckpt"
+    agent, overrides = _make_agent()
+    with temporary_config(
+        configs,
+        {
+            **overrides,
+            "anchor_proposal_cf_manifest_path": str(manifest_path),
+            "anchor_proposal_pretrain_checkpoint_path": str(checkpoint_path),
+        },
+    ):
+        _write_apcf_pretrain_checkpoint(
+            checkpoint_path,
+            model=agent.policy,
+            config=configs,
+            manifest_sha256=None,
+        )
+        target = HBGATPN(configs)
+        with pytest.raises(RuntimeError, match="manifest_sha256"):
+            _maybe_load_apcf_pretrain(target, torch.device("cpu"), resume=False)
+
+
+def test_apcf_cold_start_records_exact_pretrain_checkpoint_sha(
+    tmp_path: Path,
+) -> None:
+    """成功冷启动必须把实际加载的预训练文件哈希写入运行时 checkpoint 元数据。"""
+    from runtime.checkpoints import build_checkpoint_metadata
+    from train_lightning import _maybe_load_apcf_pretrain
+
+    manifest_path = tmp_path / "manifest.json"
+    manifest_sha = _write_cf_manifest(manifest_path)
+    checkpoint_path = tmp_path / "pretrain.ckpt"
+    agent, overrides = _make_agent()
+    with temporary_config(
+        configs,
+        {
+            **overrides,
+            "anchor_proposal_cf_manifest_path": str(manifest_path),
+            "anchor_proposal_pretrain_checkpoint_path": str(checkpoint_path),
+        },
+    ):
+        _write_apcf_pretrain_checkpoint(
+            checkpoint_path,
+            model=agent.policy,
+            config=configs,
+            manifest_sha256=manifest_sha,
+        )
+        target = HBGATPN(configs)
+        _maybe_load_apcf_pretrain(target, torch.device("cpu"), resume=False)
+        expected = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+        metadata = build_checkpoint_metadata(configs)
+        assert metadata["apcf_pretrain_source_sha256"] == expected
+
+
+def test_apcf_experiment_pins_counterfactual_asset_paths() -> None:
+    """正式 APCF YAML 必须明确指定反事实 manifest 与预训练 checkpoint。"""
+    import yaml
+
+    payload = yaml.safe_load(
+        (PROJECT_ROOT / "conf" / "experiment" / "initial_anchor_proposal_cf_v1.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    model = payload["model"]
+    assert model["anchor_proposal_cf_manifest_path"] == (
+        "data/initial_anchor_proposal_cf_v1/manifest.json"
+    )
+    assert model["anchor_proposal_pretrain_checkpoint_path"] == (
+        "checkpoints/apcf_pretrain_v1.ckpt"
+    )
+
+
+def test_apcf_old_scope_checkpoint_is_rejected_for_anchor_proposal_scope() -> None:
+    """无 APCF 双头的旧 scope checkpoint 不得加载进 APCF 模型（strict）。"""
+    from runtime.checkpoints import load_policy_weights
+
+    # 构造旧 scope（operation_station_worker）模型与 APCF 模型各一份。
+    legacy_overrides = {
+        "policy_action_scope": "operation_station_worker",
+        "hidden_dim": 32,
+        "num_gat_layers": 1,
+        "num_heads": 2,
+        "use_shared_trunk": True,
+        "use_schedule_free": False,
+        "use_ema": False,
+        "enable_dynamic_events": False,
+        "randomize_durations": False,
+        "n_w": 80,
+        "batch_size": 4,
+        "accumulation_steps": 1,
+        "k_epochs": 1,
+    }
+    with temporary_config(configs, legacy_overrides):
+        legacy_model = HBGATPN(configs)
+    legacy_state = {
+        key: value
+        for key, value in legacy_model.state_dict().items()
+        if key.startswith("policy.")
+    } or legacy_model.state_dict()
+
+    from dataclasses import dataclass
+
+    @dataclass
+    class _FakeCheckpoint:
+        state_dict: dict
+
+    agent, overrides = _make_agent()
+    apcf_model = agent.policy
+    with pytest.raises(Exception) as exc_info:
+        load_policy_weights(apcf_model, _FakeCheckpoint(legacy_state), strict=True)
+    message = str(exc_info.value)
+    assert "anchor_team_head" in message or "anchor_proposal_gate" in message
+
+
+def test_apcf_trace_alignment_failfast_on_mismatch() -> None:
+    """PPO 重算前必须对 trace 与实际 task/station/团队逐项比对，错位立即报错。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=True,
+            temperature=0.0,
+        )
+    assert action is not None and not invalid
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    actual_tasks = [int(action[0])]
+    actual_stations = [int(action[1])]
+    actual_teams = [[int(w) for w in action[2]]]
+    # 一致时通过。
+    agent._validate_apcf_trace_alignment(
+        [trace],
+        actual_tasks=actual_tasks,
+        actual_stations=actual_stations,
+        actual_teams=actual_teams,
+    )
+    # 错位 task：必须报错。
+    with pytest.raises(RuntimeError, match="错位"):
+        agent._validate_apcf_trace_alignment(
+            [trace],
+            actual_tasks=[actual_tasks[0] + 1],
+            actual_stations=actual_stations,
+            actual_teams=actual_teams,
+        )
+    # 错位团队：必须报错。
+    bad_team = actual_teams[0].copy()
+    bad_team[0] = (bad_team[0] + 1) % env.num_workers
+    with pytest.raises(RuntimeError, match="执行团队"):
+        agent._validate_apcf_trace_alignment(
+            [trace],
+            actual_tasks=actual_tasks,
+            actual_stations=actual_stations,
+            actual_teams=[bad_team],
+        )
+
+
+def test_apcf_bc_team_is_canonical_non_anchor_first() -> None:
+    """BC 目标顺序规范：非锚点成员优先、其余按锚点顺序（与运行期首步非锚点一致）。"""
+    from scripts.build_anchor_proposal_cf_data import _canonical_bc_team
+
+    anchor = (3, 7, 11)
+    # 非锚点 9 优先，其余锚点成员按锚点顺序 (3, 11)。
+    team = (3, 9, 11)
+    assert _canonical_bc_team(team, anchor) == (9, 3, 11)
+    # 全部为锚点成员时保持锚点顺序。
+    assert _canonical_bc_team(anchor, anchor) == (3, 7, 11)
+    # 两个非锚点按原相对顺序优先，再按锚点顺序。
+    team3 = (11, 5, 9, 3)
+    assert _canonical_bc_team(team3, anchor) == (5, 9, 3, 11)
+
+
+def test_apcf_resume_guard_rejects_legacy_scope_checkpoint(tmp_path: Path) -> None:
+    """resume 时旧 scope checkpoint 不得静默降级 APCF 配置。"""
+    from runtime.checkpoints import ModelSpec
+
+    agent, overrides = _make_agent()
+    _ = agent
+    legacy_spec = ModelSpec(
+        resource_graph_mode="skill_hub_bidirectional",
+        policy_action_scope="operation_station_worker",
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_sha = _write_cf_manifest(manifest_path)
+    with temporary_config(
+        configs,
+        {
+            **overrides,
+            "anchor_proposal_cf_manifest_path": str(manifest_path),
+        },
+    ):
+        with pytest.raises(RuntimeError, match="APCF 配置不兼容"):
+            from train_lightning import _guard_resume_scope_against_apcf
+
+            _guard_resume_scope_against_apcf(legacy_spec)
+        apcf_spec = ModelSpec(
+            resource_graph_mode="skill_hub_bidirectional",
+            policy_action_scope="operation_station_anchor_proposal_team",
+            anchor_proposal_mode="full_team_v1",
+            anchor_proposal_prior_margin=4.0,
+            anchor_proposal_gate_bias=-4.0,
+            anchor_proposal_train_branch_floor_start=0.20,
+            anchor_proposal_train_branch_floor_end=0.02,
+            anchor_proposal_branch_floor_decay_fraction=0.40,
+            anchor_proposal_require_difference=True,
+            anchor_proposal_cf_manifest_sha256=manifest_sha,
+        )
+        _guard_resume_scope_against_apcf(apcf_spec)  # 不报错
+
+
+def test_apcf_resume_guard_rejects_counterfactual_manifest_mismatch(
+    tmp_path: Path,
+) -> None:
+    """APCF resume 不得混用不同反事实 manifest 的 PPO checkpoint。"""
+    from runtime.checkpoints import ModelSpec
+    from train_lightning import _guard_resume_scope_against_apcf
+
+    manifest_path = tmp_path / "manifest.json"
+    _write_cf_manifest(manifest_path)
+    _agent, overrides = _make_agent()
+    mismatched_spec = ModelSpec(
+        resource_graph_mode="skill_hub_bidirectional",
+        policy_action_scope="operation_station_anchor_proposal_team",
+        anchor_proposal_mode="full_team_v1",
+        anchor_proposal_require_difference=True,
+        anchor_proposal_cf_manifest_sha256="0" * 64,
+    )
+    with temporary_config(
+        configs,
+        {
+            **overrides,
+            "anchor_proposal_cf_manifest_path": str(manifest_path),
+        },
+    ):
+        with pytest.raises(RuntimeError, match="manifest SHA-256 不一致"):
+            _guard_resume_scope_against_apcf(mismatched_spec)
+
+
+def test_apcf_model_spec_records_anchor_proposal_semantics() -> None:
+    """ModelSpec 必须记录 APCF 先验/门控/强制差异/探索退火语义。"""
+    from runtime.checkpoints import build_model_spec
+
+    agent, overrides = _make_agent()
+    _ = agent
+    with temporary_config(configs, overrides):
+        spec = build_model_spec(configs)
+    assert spec.policy_action_scope == "operation_station_anchor_proposal_team"
+    assert spec.anchor_proposal_mode == "full_team_v1"
+    assert spec.anchor_proposal_prior_margin == 4.0
+    assert spec.anchor_proposal_gate_bias == -4.0
+    assert spec.anchor_proposal_train_branch_floor_start == 0.20
+    assert spec.anchor_proposal_train_branch_floor_end == 0.02
+    assert spec.anchor_proposal_branch_floor_decay_fraction == 0.40
+    assert spec.anchor_proposal_require_difference is True
+
+
+def test_apcf_raw_proposal_select_rate_uses_raw_argmax() -> None:
+    """RolloutRawProposalSelectRate 必须基于 raw argmax 分支（不再恒为 0）。"""
+    seed_everything(42)
+    agent, overrides = _make_agent()
+    env = AirLineEnv_Graph(DATA_PATH, seed=42)
+    obs, masks = _advance_to_ready_physical_task(env)
+    with temporary_config(configs, overrides):
+        _action, _logprob, _value, _smask, invalid = agent.select_action(
+            obs,
+            mask_task=masks[0],
+            mask_station_matrix=masks[1],
+            mask_worker=masks[2],
+            deterministic=False,
+            temperature=1.0,
+        )
+    assert not invalid
+    trace = agent.last_anchor_proposal_trace
+    assert isinstance(trace, FrozenAnchorProposalTrace)
+    assert trace.raw_argmax_branch in (0, 1)
+    from training.memory import Memory
+
+    memory = Memory()
+    memory.anchor_proposal_traces.append(trace)
+    metrics = PPOAgent._anchor_proposal_rollout_metrics(memory)
+    assert "APCF/RolloutRawProposalSelectRate" in metrics

@@ -115,6 +115,7 @@ def test_graph_and_actor_context_modes_preserve_node_shapes(
 )
 def test_each_action_scope_emits_a_complete_legal_environment_action(
     action_scope: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     overrides = _small_overrides(policy_action_scope=action_scope)
     with temporary_config(configs, overrides):
@@ -133,6 +134,11 @@ def test_each_action_scope_emits_a_complete_legal_environment_action(
             total_timesteps=1,
             config=configs,
         )
+        if action_scope == "operation_station_worker":
+            def fail_if_called(*_args, **_kwargs):
+                raise AssertionError("Full 路径不得调用动作补全器")
+
+            monkeypatch.setattr(agent.action_completer, "complete", fail_if_called)
         action, logprob, _value, _station_mask, invalid = agent.select_action(
             obs,
             mask_task=masks[0],
@@ -192,7 +198,12 @@ def test_batched_action_decoding_preserves_legality_for_every_scope(
 
 @pytest.mark.parametrize(
     "action_scope",
-    ("operation", "operation_station", "operation_station_worker"),
+    (
+        "operation",
+        "operation_station",
+        "operation_station_worker",
+        "operation_station_anchor_proposal_team",
+    ),
 )
 def test_ppo_update_is_finite_for_every_action_scope(action_scope: str) -> None:
     overrides = _small_overrides(policy_action_scope=action_scope, batch_size=1)
@@ -225,6 +236,8 @@ def test_ppo_update_is_finite_for_every_action_scope(action_scope: str) -> None:
         memory.logprobs.append(logprob)
         memory.values.append(value)
         memory.masks.append(masks)
+        if action_scope == "operation_station_anchor_proposal_team":
+            memory.anchor_proposal_traces.append(agent.last_anchor_proposal_trace)
         _obs, reward, done, info = env.step(action)
         assert not info.get("invalid_action", False)
         memory.rewards.append(float(reward))

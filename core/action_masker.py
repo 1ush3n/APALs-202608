@@ -23,6 +23,16 @@ class ActionMasker:
         """
         env = self.env
         from configs import configs
+
+        task_mask_mode = str(getattr(configs, "task_mask_mode", "resource_aware"))
+        station_mask_mode = str(
+            getattr(configs, "station_mask_mode", "resource_aware")
+        )
+        if task_mask_mode == "precedence_release_only" or station_mask_mode == "structural_only":
+            return self._get_strict_masks(
+                task_mask_mode=task_mask_mode,
+                station_mask_mode=station_mask_mode,
+            )
         
         # 1. Worker Queue 拥堵判定与可用性掩码
         enable_queue_mask = getattr(configs, 'enable_worker_queue_mask', False)
@@ -65,6 +75,74 @@ class ActionMasker:
                 f"🚨 [Mask Alignment Error] Vectorized Worker Mask 不一致！\nVectorized: {worker_mask_v.cpu()}\n旧循环: {worker_mask_l.cpu()}"
                 
         return task_mask_res, station_mask_res, worker_mask_res
+
+    def _get_strict_masks(
+        self,
+        *,
+        task_mask_mode: str,
+        station_mask_mode: str,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """只按任务释放和站位永久结构生成 strict mask。"""
+        env = self.env
+        from configs import configs
+
+        device = env.worker_skill_matrix.device
+        task_mask = torch.ones(env.num_tasks, dtype=torch.bool, device=device)
+        station_mask = torch.ones(
+            (env.num_tasks, env.num_stations), dtype=torch.bool, device=device
+        )
+        worker_mask = torch.zeros(env.num_workers, dtype=torch.bool, device=device)
+
+        ready_indices = np.where(env.task_status == 1)[0]
+        if hasattr(env, "task_material_ready"):
+            ready_indices = ready_indices[
+                time_reached_numpy(
+                    env.task_material_ready[ready_indices],
+                    env.current_time,
+                    release_time_tolerance(configs),
+                )
+            ]
+
+        # strict 工序掩码：ready 任务不因当前工人/站位状态被屏蔽。
+        if task_mask_mode == "precedence_release_only":
+            task_mask[torch.as_tensor(ready_indices, device=device)] = False
+
+        # structural station mask 只保留 min/max/fixed 永久工艺约束。
+        for task_id in ready_indices:
+            min_station = int(
+                env.constraint_engine.minimum_station(
+                    int(task_id), env.task_station_map
+                )
+            )
+            fixed_station = int(env.fixed_stations[task_id])
+            max_station = int(env.max_allowed_stations[task_id])
+            enable_mes = getattr(configs, "enable_mes_decoding", False)
+            mes_jump = getattr(configs, "mes_max_station_jump", None)
+            if enable_mes and mes_jump is not None:
+                max_station = min(max_station, min_station + max(0, int(mes_jump)))
+            if fixed_station != -1:
+                candidates = (
+                    [fixed_station]
+                    if min_station <= fixed_station <= max_station
+                    else []
+                )
+            else:
+                candidates = list(
+                    range(
+                        max(0, min_station),
+                        min(env.num_stations, max_station + 1),
+                    )
+                )
+            for station_id in candidates:
+                if 0 <= station_id < env.num_stations:
+                    station_mask[task_id, station_id] = False
+
+        if task_mask_mode != "precedence_release_only":
+            valid_structural = ~station_mask.any(dim=1)
+            task_mask[torch.as_tensor(ready_indices, device=device)] = ~valid_structural[
+                torch.as_tensor(ready_indices, device=device)
+            ]
+        return task_mask, station_mask, worker_mask
 
     def _get_masks_tensorized(self, queue_ok: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -110,10 +188,17 @@ class ActionMasker:
         
         fixed = torch.from_numpy(env.fixed_stations[ready_indices_cpu]).to(device=t_device, dtype=torch.long)
         max_allowed = torch.from_numpy(env.max_allowed_stations[ready_indices_cpu]).to(device=t_device, dtype=torch.long)
-        
+
+        enable_mes = getattr(configs, "enable_mes_decoding", False)
+        mes_jump = getattr(configs, "mes_max_station_jump", None)
+        if enable_mes and mes_jump is not None:
+            max_allowed_eff = torch.minimum(max_allowed, min_stations + max(0, int(mes_jump)))
+        else:
+            max_allowed_eff = max_allowed
+
         # 2. 产生站位合法区间掩码: [len(ready_indices), num_stations]
         stations = torch.arange(env.num_stations, device=t_device)[None, :]
-        in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed[:, None])
+        in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed_eff[:, None])
         in_range_fixed = (
             (stations == fixed[:, None])
             & (stations >= min_stations[:, None])
@@ -209,10 +294,17 @@ class ActionMasker:
                 
         fixed = env.fixed_stations[ready_indices]
         max_allowed = env.max_allowed_stations[ready_indices]
-        
+
+        enable_mes = getattr(configs, "enable_mes_decoding", False)
+        mes_jump = getattr(configs, "mes_max_station_jump", None)
+        if enable_mes and mes_jump is not None:
+            max_allowed_eff = np.minimum(max_allowed, min_stations + max(0, int(mes_jump)))
+        else:
+            max_allowed_eff = max_allowed
+
         # 2. 产生站位合法区间掩码: [len(ready_indices), num_stations]
         stations = np.arange(env.num_stations)[None, :]
-        in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed[:, None])
+        in_range_normal = (stations >= min_stations[:, None]) & (stations <= max_allowed_eff[:, None])
         in_range_fixed = (
             (stations == fixed[:, None])
             & (stations >= min_stations[:, None])
@@ -296,6 +388,10 @@ class ActionMasker:
             
             valid_stations = False
             max_station = env.max_allowed_stations[t]
+            enable_mes = getattr(configs, "enable_mes_decoding", False)
+            mes_jump = getattr(configs, "mes_max_station_jump", None)
+            if enable_mes and mes_jump is not None:
+                max_station = min(max_station, min_station + max(0, int(mes_jump)))
             station_range = (
                 [fixed]
                 if fixed != -1 and min_station <= fixed <= max_station

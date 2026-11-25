@@ -1,0 +1,67 @@
+[
+  {
+    "id": "c1",
+    "title": "IMPALA: Scalable Distributed Deep-RL with Importance Weighted Actor-Learner Architectures",
+    "author": "Lasse Espeholt et al.",
+    "venue": "ICML",
+    "year": 2018,
+    "figure": 3,
+    "page": 5,
+    "url": "https://proceedings.mlr.press/v80/espeholt18a.html",
+    "pdfurl": "https://proceedings.mlr.press/v80/espeholt18a/espeholt18a.pdf",
+    "label": "左右并列展示网络深度",
+    "note": "两组网络都从同一游戏画面向上展开。右侧仅把反复使用的残差块放大一次，读者可直接比较两套网络的共同出口与不同深度。"
+  },
+  {
+    "id": "c2",
+    "title": "Learning Latent Dynamics for Planning from Pixels",
+    "author": "Danijar Hafner et al.",
+    "venue": "ICML",
+    "year": 2019,
+    "figure": 2,
+    "page": 4,
+    "url": "https://proceedings.mlr.press/v97/hafner19a.html",
+    "pdfurl": "https://proceedings.mlr.press/v97/hafner19a/hafner19a.pdf",
+    "label": "用同一时间网格比较三种模型",
+    "note": "三个面板沿相同的时间位置放置节点。方形和圆形区分状态类型，实线和虚线区分连接，改变拓扑时仍能逐列对照。"
+  },
+  {
+    "id": "c3",
+    "title": "Temporal Difference Learning for Model Predictive Control",
+    "author": "Nicklas A. Hansen et al.",
+    "venue": "ICML",
+    "year": 2022,
+    "figure": 2,
+    "page": 4,
+    "url": "https://proceedings.mlr.press/v162/hansen22a.html",
+    "pdfurl": "https://proceedings.mlr.press/v162/hansen22a/hansen22a.pdf",
+    "label": "沿时间轴重复局部预测结构",
+    "note": "三个时间步各占一列，潜状态沿中央蓝线向右推进。每列下方用同一组图标标出价值、奖励和动作，一行小图例即可解释全部输出。"
+  },
+  {
+    "id": "c4",
+    "title": "Data-Efficient Reinforcement Learning with Self-Predictive Representations",
+    "author": "Max Schwarzer et al.",
+    "venue": "ICLR",
+    "year": 2021,
+    "figure": 2,
+    "page": 3,
+    "url": "https://openreview.net/forum?id=uCQfPZwRaUu",
+    "pdfurl": "https://openreview.net/pdf?id=uCQfPZwRaUu",
+    "label": "用两条色带保持分支身份",
+    "note": "在线分支沿上排展开，目标分支占下排。同色跨越编码、投影和预测步骤，右侧花括号将两路表示汇到同一个损失。"
+  },
+  {
+    "id": "c5",
+    "title": "EfficientZero V2: Mastering Discrete and Continuous Control with Limited Data",
+    "author": "Shengjie Wang et al.",
+    "venue": "ICML",
+    "year": 2024,
+    "figure": 2,
+    "page": 3,
+    "url": "https://proceedings.mlr.press/v235/wang24at.html",
+    "pdfurl": "https://raw.githubusercontent.com/mlresearch/v235/main/assets/wang24at/wang24at.pdf",
+    "label": "用模块同名连接总图和放大图",
+    "note": "左侧训练图把搜索画成一个紫色模块；右侧面板用相同名称展开搜索的采样、筛选与输出。重复命名让读者可以在两个层次间来回查找。"
+  }
+]

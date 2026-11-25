@@ -17,6 +17,7 @@ import random
 from environment import AirLineEnv_Graph
 from data_loader import load_data
 from configs import configs
+from runtime.five_skill_schema import REQUIRED_SKILL_IDS, validate_explicit_five_skill_csv
 from runtime.hydra_config import (
     ExtraArgument,
     HydraCliError,
@@ -294,9 +295,23 @@ def validate_generated_dataset(
     *,
     min_length: int,
     max_length: int,
+    require_explicit_skill_columns: bool = True,
+    required_skill_ids: tuple[int, ...] | None = tuple(sorted(REQUIRED_SKILL_IDS)),
 ) -> dict[str, int]:
-    """校验生成数据的任务规模、DAG、边索引及技能人数覆盖。"""
+    """校验生成数据的任务规模、DAG、边索引及技能人数覆盖。
+
+    ``require_explicit_skill_columns`` 仅供正式五技能数据协议使用。开启后，
+    缺少 ``专业编码`` 或 ``工种`` 会立即失败，禁止 DataLoader 的历史兼容
+    回退把全部物理工序解释为工种 0。
+    """
     frame = pd.read_csv(dataset_path, dtype=str)
+    if require_explicit_skill_columns:
+        missing_columns = sorted({"专业编码", "工种"} - set(frame.columns))
+        if missing_columns:
+            raise ValueError(
+                f"正式五技能训练图缺少显式语义字段: {missing_columns}; "
+                "拒绝使用单技能兼容回退"
+            )
     task_count = int((frame["类型"].astype(int) == 2).sum())
     if not min_length <= task_count <= max_length:
         raise ValueError(f"真实工序数 {task_count} 不在 [{min_length}, {max_length}]")
@@ -322,7 +337,29 @@ def validate_generated_dataset(
         if demand > skill_capacity[skill]:
             raise ValueError(f"技能 {skill} 的需求人数 {demand} 超过工人池容量")
 
-    return {"task_count": task_count, "graph_node_count": graph_node_count}
+    if required_skill_ids is not None:
+        physical = frame[frame["类型"].astype(int).eq(2)]
+        observed_skills = set(pd.to_numeric(physical["工种"], errors="raise").astype(int))
+        required_skills = set(int(skill_id) for skill_id in required_skill_ids)
+        missing_skills = sorted(required_skills - observed_skills)
+        if missing_skills:
+            raise ValueError(
+                f"正式训练图缺少工种 {missing_skills}; "
+                f"实际工种={sorted(observed_skills)}"
+            )
+
+    return {
+        "task_count": task_count,
+        "graph_node_count": graph_node_count,
+        "active_skill_count": len(
+            set(
+                pd.to_numeric(
+                    frame.loc[frame["类型"].astype(int).eq(2), "工种"],
+                    errors="raise",
+                ).astype(int)
+            )
+        ),
+    }
 
 
 def generate_bucket(
@@ -335,6 +372,9 @@ def generate_bucket(
     time_var: float,
     seed: int,
     worker_pool_path: Path,
+    require_explicit_skill_columns: bool = False,
+    required_skill_ids: tuple[int, ...] | None = None,
+    copy_template_to_output: bool = True,
 ) -> dict:
     """从唯一 APAL 基准模板确定性生成一个窄规模训练池。"""
     if min_length <= 0 or max_length < min_length:
@@ -348,8 +388,13 @@ def generate_bucket(
     random.seed(seed)
     np.random.seed(seed)
 
+    if not require_explicit_skill_columns:
+        raise ValueError("正式数据生成不允许关闭显式五技能校验")
+    validate_explicit_five_skill_csv(template, require_all_skills=True)
+
     baseline_path = output_dir / f"baseline_{template.name}"
-    shutil.copy2(template, baseline_path)
+    if copy_template_to_output:
+        shutil.copy2(template, baseline_path)
     records: list[GeneratedDatasetRecord] = []
 
     for sample_idx in range(1, num_samples + 1):
@@ -363,6 +408,8 @@ def generate_bucket(
             worker_pool_path,
             min_length=min_length,
             max_length=max_length,
+            require_explicit_skill_columns=require_explicit_skill_columns,
+            required_skill_ids=required_skill_ids,
         )
         records.append(
             GeneratedDatasetRecord(
@@ -380,14 +427,18 @@ def generate_bucket(
         template_ref = template.name
     manifest = {
         "version": 1,
+        "kind": "initial_schedule_training_manifest",
+        "protocol": "explicit_fiveskill_v1",
         "template": template_ref,
         "template_sha256": _sha256(template),
-        "baseline_file": baseline_path.name,
+        "baseline_file": baseline_path.name if copy_template_to_output else "",
         "min_length": min_length,
         "max_length": max_length,
         "num_samples": num_samples,
         "time_var": time_var,
         "seed": seed,
+        "require_explicit_skill_columns": bool(require_explicit_skill_columns),
+        "required_skill_ids": None if required_skill_ids is None else list(required_skill_ids),
         "files": [asdict(record) for record in records],
     }
     (output_dir / "manifest.json").write_text(
@@ -434,6 +485,7 @@ def main(argv: list[str] | None = None):
         try:
             drop_cnt, add_cnt = generate_random_dataset(template_path, out_path, target_len, args.time_var)
             
+            validate_explicit_five_skill_csv(out_path, require_all_skills=True)
             # --- 合法性验证 ---
             # 通过尝试实例化环境，如果能顺利通过拓扑排序，就证明 DAG 完全合法，无死锁环
             env = AirLineEnv_Graph(data_path_or_dir=out_path, seed=args.seed)

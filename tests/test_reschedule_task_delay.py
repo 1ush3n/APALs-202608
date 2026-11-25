@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -23,7 +24,11 @@ from tests.runtime_safety import temporary_config
 from runtime.reschedule_eval import MaskEnvironmentMismatchError, evaluate_reschedule_model
 from utils.gpu_graph_manager import GPUBatchGraphManager
 from utils.vector_env import EnvCreator, VectorEnv
-from utils.reschedule import load_baseline_schedule, load_reschedule_scenarios
+from utils.reschedule import (
+    calculate_reschedule_objective_terms,
+    load_baseline_schedule,
+    load_reschedule_scenarios,
+)
 from baselines.heuristic.reschedule_rules import BeamSearchRepairRule
 
 
@@ -170,6 +175,30 @@ def test_reschedule_config_loads_and_isolates_experiment() -> None:
     assert cfg.reschedule_use_objective_delta_reward is True
 
 
+def test_reweighted_stability_config_overrides_only_objective_weights() -> None:
+    cfg = Config()
+    load_config_files(
+        [
+            str(
+                PROJECT_ROOT
+                / "conf"
+                / "experiment"
+                / "reschedule_task_delay_r5_reweighted_stability.yaml"
+            )
+        ],
+        target=cfg,
+    )
+
+    assert cfg.experiment_name == "reschedule_task_delay_r5_reweighted_stability"
+    assert cfg.r_coef_makespan == pytest.approx(0.20)
+    assert cfg.r_coef_std == pytest.approx(0.0)
+    assert cfg.reschedule_takt_violation_weight == pytest.approx(3.0)
+    assert cfg.reschedule_stability_start_weight == pytest.approx(4.0)
+    assert cfg.reschedule_stability_station_weight == pytest.approx(4.0)
+    assert cfg.reschedule_stability_team_weight == pytest.approx(0.3)
+    assert cfg.reschedule_use_objective_delta_reward is True
+
+
 def test_baseline_loader_computes_takt_from_schedule(tmp_path: Path) -> None:
     baseline_path = tmp_path / "baseline.csv"
     df = _write_greedy_baseline(baseline_path)
@@ -177,6 +206,38 @@ def test_baseline_loader_computes_takt_from_schedule(tmp_path: Path) -> None:
     baseline = load_baseline_schedule(baseline_path)
     assert baseline.makespan == float(df["End"].max())
     assert len(baseline.tasks) == len(df)
+
+
+def test_reschedule_objective_terms_apply_reweighted_makespan() -> None:
+    terms = calculate_reschedule_objective_terms(
+        makespan=10.0,
+        balance_std=3.0,
+        takt_h=4.0,
+        takt_violation_h=2.0,
+        start_deviation_mean_h=1.0,
+        station_change_rate=0.5,
+        team_change_rate=0.25,
+        config_obj=SimpleNamespace(
+            r_coef_makespan=0.2,
+            r_coef_std=0.0,
+            reschedule_takt_violation_weight=3.0,
+            reschedule_stability_start_weight=4.0,
+            reschedule_stability_station_weight=4.0,
+            reschedule_stability_team_weight=0.3,
+        ),
+        ideal_station_load=5.0,
+    )
+
+    assert terms == pytest.approx(
+        {
+            "score_makespan": 0.5,
+            "score_balance": 0.0,
+            "score_takt_violation": 1.5,
+            "score_start_stability": 1.0,
+            "score_station_change": 2.0,
+            "score_team_change": 0.075,
+        }
+    )
 
 
 def test_dense_objective_reward_telescopes_to_final_objective(tmp_path: Path) -> None:

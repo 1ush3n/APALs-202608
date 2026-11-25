@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 import torch
 import yaml
 
@@ -57,7 +58,7 @@ def test_registered_predecessor_corrections_are_applied_to_all_target_datasets()
             assert predecessors == correction["retained_predecessors"]
 
 
-def test_legacy_type_column_is_not_reused_as_skill(tmp_path) -> None:
+def test_legacy_csv_without_explicit_skill_schema_is_rejected(tmp_path) -> None:
     legacy_path = tmp_path / "legacy_without_skill_column.csv"
     pd.DataFrame(
         {
@@ -69,12 +70,8 @@ def test_legacy_type_column_is_not_reused_as_skill(tmp_path) -> None:
         }
     ).to_csv(legacy_path, index=False)
 
-    try:
-        loaded = load_data(legacy_path)["task_df"]
-        assert loaded["node_type"].tolist() == [1, 2]
-        assert loaded["skill_type"].tolist() == [-1, 0]
-    finally:
-        legacy_path.unlink(missing_ok=True)
+    with pytest.raises(ValueError, match="历史无工种 CSV 不可运行"):
+        load_data(legacy_path)
 
 
 def test_virtual_nodes_have_no_skill_hub_edge() -> None:

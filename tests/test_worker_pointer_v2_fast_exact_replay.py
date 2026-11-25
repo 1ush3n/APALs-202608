@@ -1,0 +1,750 @@
+# -*- coding: utf-8 -*-
+"""WorkerPointer v2 Fast-Exact 阶段二C：PPO 同形 GPU group 重放集成合同。
+
+覆盖：
+- Fast-Exact 重放更新跑通（GPU builder + 布局元数据 + actor-only 预检复用）；
+- 首次同形合同 actor-only 预检（不计算 critic）且输出复用于首次 PPO 计算；
+- 首次同形合同 fail-closed（backward 前抛错，参数不被污染）；
+- 返回指标全部有限且梯度覆盖正常。
+"""
+
+from __future__ import annotations
+
+import dataclasses
+
+import pytest
+import torch
+
+from configs import configs
+from environment import AirLineEnv_Graph
+from models.hb_gat_pn import HBGATPN
+from ppo_agent import PPOAgent
+from tests.runtime_safety import temporary_config
+from tests.test_joint_experiment_architecture import (
+    DATA_PATH,
+    _advance_to_ready_physical_task,
+    _small_overrides,
+)
+from tests.test_worker_pointer_v2_fast_exact_rollout import _fast_exact_config
+from training.memory import Memory
+from training.v2_fast_exact_batch import GPUExactBatchBuilder
+from training.worker_pointer_v2_behavior import make_behavior_traces
+
+_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _fast_exact_overrides() -> dict:
+    return _small_overrides(
+        team_selection_mode="autoregressive_pressure_v2_fast_exact",
+        policy_action_scope="operation_station_worker",
+        actor_context_mode="attention",
+        worker_pointer_v2_replay_mode="behavior_group_exact_gpu_template_v2",
+        worker_pointer_v2_rollout_group_upper_bound=16,
+        worker_pointer_v2_strict_gpu_replay=True,
+        num_envs=4,
+    )
+
+
+def _make_agent(*, k_epochs: int = 1) -> PPOAgent:
+    return PPOAgent(
+        HBGATPN(configs),
+        lr=1.0e-4,
+        gamma=0.99,
+        k_epochs=k_epochs,
+        eps_clip=0.2,
+        device=_DEVICE,
+        batch_size=4,
+        total_timesteps=1,
+        config=configs,
+    )
+
+
+def _rollout_single_step(agent: PPOAgent, env: AirLineEnv_Graph) -> tuple:
+    """执行一次 fast-exact 决策，构造与动作对齐的 memory 与目标张量。"""
+    obs, (t_mask, s_mask, w_mask) = _advance_to_ready_physical_task(env)
+    results = agent.select_actions_batch(
+        obs_list=[obs],
+        mask_task_list=[t_mask],
+        mask_station_matrix_list=[s_mask],
+        mask_worker_list=[w_mask],
+        deterministic=False,
+        temperature=1.0,
+        is_eval=False,
+    )
+    action, logprob, value, _, is_invalid = results[0]
+    assert not is_invalid
+
+    memory = Memory()
+    memory.states.append(env.get_state_snapshot())
+    memory.actions.append(action)
+    if isinstance(logprob, (list, tuple)):
+        logprob = float(logprob[0])
+    memory.logprobs.append(float(logprob))
+    memory.values.append(float(value))
+    memory.masks.append((t_mask, s_mask, w_mask))
+    traces = make_behavior_traces(
+        group_id=(0, 0),
+        env_indices=[0],
+        behavior_logprobs=agent.last_v2_behavior_logprobs,
+    )
+    assert len(traces) == 1
+    memory.worker_pointer_v2_behavior_traces.append(traces[0])
+
+    team = list(action[2])
+    max_team = int(getattr(configs, "max_team_size", 5))
+    padded = team + [-1] * (max_team - len(team))
+    b_task = torch.tensor([int(action[0])], dtype=torch.long)
+    b_station = torch.tensor([int(action[1])], dtype=torch.long)
+    b_team = torch.tensor([padded[:max_team]], dtype=torch.long)
+    old_logprobs = torch.tensor([float(logprob)], dtype=torch.float32)
+    rewards = torch.tensor([0.0], dtype=torch.float32)
+    advantages = torch.tensor([1.0], dtype=torch.float32)
+    return memory, b_task, b_station, b_team, old_logprobs, rewards, advantages
+
+
+def test_fast_exact_replay_update_runs_with_gpu_builder() -> None:
+    with temporary_config(configs, _fast_exact_overrides()):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = _make_agent()
+        (
+            memory,
+            b_task,
+            b_station,
+            b_team,
+            old_logprobs,
+            rewards,
+            advantages,
+        ) = _rollout_single_step(agent, env)
+        builder = GPUExactBatchBuilder(
+            config=configs, env=env, device=_DEVICE
+        )
+
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        assert metrics["V2/FastExact/BehaviorReplayGroups"] == 1.0
+        assert metrics["V2/FastExact/BehaviorReplaySamples"] == 1.0
+        assert metrics["V2/FastExact/PrecheckReusedGroups"] == 0.0
+        assert metrics["PPO/UpdateSteps"] == 1.0
+        assert metrics["Gradient/Finite"] == 1.0
+        assert metrics["Gradient/V2Coverage"] > 0.0
+        assert metrics["V2/FirstContractTotalMaxAE"] <= 1.0e-4
+        for value in metrics.values():
+            assert torch.isfinite(torch.tensor(value)), f"非有限指标: {value}"
+
+
+def test_fast_exact_profile_reports_replay_stage_metrics() -> None:
+    overrides = _fast_exact_overrides()
+    overrides["worker_pointer_v2_fast_exact_profile"] = True
+    with temporary_config(configs, overrides):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = _make_agent()
+        (
+            memory,
+            b_task,
+            b_station,
+            b_team,
+            old_logprobs,
+            rewards,
+            advantages,
+        ) = _rollout_single_step(agent, env)
+        builder = GPUExactBatchBuilder(config=configs, env=env, device=_DEVICE)
+
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        expected = (
+            "PhysicalGroupCount",
+            "PhysicalGroupMeanSize",
+            "PhysicalGroupP50Size",
+            "PhysicalGroupP95Size",
+            "BuilderCalls",
+            "BuilderMs",
+            "EncoderCalls",
+            "EncoderMs",
+            "ActionHeadCalls",
+            "ActionHeadMs",
+            "WorkerPointerCalls",
+            "WorkerPointerMs",
+            "PrecheckMs",
+            "FormalReplayCalls",
+            "FormalReplayMs",
+            "BackwardMs",
+            "OptimizerMs",
+            "ReplaySamplesPerSec",
+        )
+        for suffix in expected:
+            key = f"V2/FastExact/Profile/{suffix}"
+            assert key in metrics
+            assert torch.isfinite(torch.tensor(metrics[key]))
+
+
+def test_fast_exact_factorized_replay_update_uses_component_contract() -> None:
+    overrides = _fast_exact_overrides()
+    overrides["conditional_head_baseline_mode"] = "factorized"
+    with temporary_config(configs, overrides):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = _make_agent()
+        (
+            memory,
+            b_task,
+            b_station,
+            b_team,
+            old_logprobs,
+            rewards,
+            advantages,
+        ) = _rollout_single_step(agent, env)
+        component_logprobs = agent.last_v2_behavior_logprobs[0]
+        conditional_values = agent.last_v2_behavior_values[0]
+        assert component_logprobs is not None
+        assert conditional_values is not None
+        memory.old_task_logprob.append(float(component_logprobs[0]))
+        memory.old_station_logprob.append(float(component_logprobs[1]))
+        memory.old_team_logprob.append(float(component_logprobs[2]))
+        memory.old_V_task.append(float(conditional_values[0]))
+        memory.old_V_station.append(float(conditional_values[1]))
+        memory.old_V_worker.append(float(conditional_values[2]))
+        builder = GPUExactBatchBuilder(
+            config=configs, env=env, device=_DEVICE
+        )
+
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        assert metrics["PPO/UpdateSteps"] == 1.0
+        assert metrics["Gradient/Finite"] == 1.0
+        assert metrics["Gradient/V2Coverage"] > 0.0
+
+
+def test_fast_exact_actor_only_precheck_skips_critic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """首次同形合同为 actor-only：预检阶段不得调用 critic，且结果被复用。"""
+    with temporary_config(configs, _fast_exact_overrides()):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = _make_agent()
+        (
+            memory,
+            b_task,
+            b_station,
+            b_team,
+            old_logprobs,
+            rewards,
+            advantages,
+        ) = _rollout_single_step(agent, env)
+        builder = GPUExactBatchBuilder(
+            config=configs, env=env, device=_DEVICE
+        )
+
+        original_get_value = agent.policy.get_value
+        get_value_calls: list[torch.Tensor] = []
+
+        def counting_get_value(batch, *args, **kwargs):
+            get_value_calls.append(batch)
+            return original_get_value(batch, *args, **kwargs)
+
+        monkeypatch.setattr(agent.policy, "get_value", counting_get_value)
+        # 预检阶段：get_value 不应被调用。
+        actor_only = agent._replay_v2_fast_exact_group(
+            agent._build_v2_fast_exact_group(
+                memory=memory,
+                memory_indices=[0],
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                old_logprobs=old_logprobs,
+                rewards=rewards,
+                advantages=advantages,
+                fast_exact_builder=builder,
+            ),
+            actor_only=True,
+        )
+        assert len(get_value_calls) == 0
+        assert len(actor_only) == 1
+
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+        # 预检不调用 critic；正式带梯度前向调用一次。
+        assert metrics["V2/FastExact/PrecheckReusedGroups"] == 0.0
+        assert len(get_value_calls) == 1
+
+
+def test_fast_exact_actor_prepass_is_recomputed_after_optimizer_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """策略参数更新后不得复用首次合同产生的 actor-only 输出。"""
+    with temporary_config(configs, _fast_exact_overrides()):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = _make_agent(k_epochs=2)
+        (
+            memory,
+            b_task,
+            b_station,
+            b_team,
+            old_logprobs,
+            rewards,
+            advantages,
+        ) = _rollout_single_step(agent, env)
+        builder = GPUExactBatchBuilder(
+            config=configs, env=env, device=_DEVICE
+        )
+
+        original_replay = agent._replay_v2_fast_exact_group
+        actor_only_calls = 0
+
+        def counting_replay(fast_batch, *, actor_only=False):
+            nonlocal actor_only_calls
+            if actor_only:
+                actor_only_calls += 1
+            return original_replay(fast_batch, actor_only=actor_only)
+
+        monkeypatch.setattr(
+            agent,
+            "_replay_v2_fast_exact_group",
+            counting_replay,
+        )
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        # 第一次来自合同预检；第二次来自 optimizer.step 后的新策略重算。
+        assert actor_only_calls == 1
+        assert metrics["V2/FastExact/PrecheckGroups"] == 1.0
+        assert metrics["V2/FastExact/PrecheckReusedGroups"] == 0.0
+        assert metrics["PPO/UpdateSteps"] == 2.0
+
+
+def _two_sample_memory(agent: PPOAgent, env_a: AirLineEnv_Graph, env_b: AirLineEnv_Graph) -> tuple[Memory, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    first = _rollout_single_step(agent, env_a)
+    second = _rollout_single_step(agent, env_b)
+    memory = Memory()
+    for source, group_id in ((first[0], (0, 0)), (second[0], (1, 0))):
+        memory.states.extend(source.states)
+        memory.actions.extend(source.actions)
+        memory.logprobs.extend(source.logprobs)
+        memory.masks.extend(source.masks)
+        memory.values.extend(source.values)
+        memory.worker_pointer_v2_behavior_traces.extend(
+            [dataclasses.replace(source.worker_pointer_v2_behavior_traces[0], group_id=group_id)]
+        )
+    return (
+        memory,
+        torch.cat((first[1], second[1])),
+        torch.cat((first[2], second[2])),
+        torch.cat((first[3], second[3])),
+        torch.tensor([first[4].item(), second[4].item()]),
+        torch.tensor([0.0, 0.0]),
+        torch.tensor([1.0, 1.0]),
+    )
+
+
+@pytest.mark.parametrize("precision", ["32-true", "bf16-mixed"])
+def test_fast_exact_logical_batch_v1_matches_physical_reference(
+    monkeypatch: pytest.MonkeyPatch,
+    precision: str,
+) -> None:
+    if precision == "bf16-mixed" and not torch.cuda.is_available():
+        pytest.skip("bf16 parity 测试需要 CUDA 设备")
+    overrides = _fast_exact_overrides()
+    overrides["worker_pointer_v2_fast_replay_batching"] = "logical_batch_v1"
+    overrides["worker_pointer_v2_logical_batch_cap"] = 2
+    overrides["lightning_precision"] = precision
+    with temporary_config(configs, overrides):
+        env_a = AirLineEnv_Graph(DATA_PATH, seed=42)
+        env_b = AirLineEnv_Graph(DATA_PATH, seed=43)
+        agent = _make_agent()
+        memory, b_task, b_station, b_team, old_logprobs, rewards, advantages = (
+            _two_sample_memory(agent, env_a, env_b)
+        )
+        builder = GPUExactBatchBuilder(config=configs, env=env_a, device=_DEVICE)
+
+        physical_outputs = []
+        for index in (0, 1):
+            physical_batch = agent._build_v2_fast_exact_group(
+                memory=memory,
+                memory_indices=[index],
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                old_logprobs=old_logprobs,
+                rewards=rewards,
+                advantages=advantages,
+                fast_exact_builder=builder,
+            )
+            physical_outputs.append(agent._replay_v2_fast_exact_group(physical_batch))
+        logical_batch = agent._build_v2_fast_exact_group(
+            memory=memory,
+            memory_indices=[0, 1],
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            old_logprobs=old_logprobs,
+            rewards=rewards,
+            advantages=advantages,
+            fast_exact_builder=builder,
+        )
+        logical_outputs = agent._replay_v2_fast_exact_group(logical_batch)
+
+        tolerance = 1.0e-3 if precision == "bf16-mixed" else 1.0e-4
+        for index, physical_group in enumerate(physical_outputs):
+            for key in ("task", "station", "team", "state_value", "entropy", "normalized_entropy"):
+                torch.testing.assert_close(
+                    logical_outputs[index][key].float(),
+                    physical_group[0][key].float(),
+                    rtol=0.0,
+                    atol=tolerance,
+                )
+
+        replay_calls: list[tuple[int, bool]] = []
+        original_replay = agent._replay_v2_fast_exact_group
+
+        def capture_replay(fast_batch, *, actor_only=False):
+            replay_calls.append((fast_batch.group_size, actor_only))
+            return original_replay(fast_batch, actor_only=actor_only)
+
+        monkeypatch.setattr(agent, "_replay_v2_fast_exact_group", capture_replay)
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env_a,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        assert (2, False) in replay_calls
+        assert metrics["V2/FastExact/PhysicalGroupCount"] == 2.0
+        if precision == "bf16-mixed":
+            assert metrics["PointerV2/AutocastBF16"] == 1.0
+            assert metrics["V2/FirstContractTotalMaxAE"] <= 1.0e-3
+        else:
+            assert metrics["PointerV2/AutocastBF16"] == 0.0
+            assert metrics["V2/FirstContractTotalMaxAE"] <= 1.0e-4
+
+
+def test_fast_exact_logical_batch_v1_mixed_datasets_bucketed_correctly_and_matches_physical_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """生产 400-800 混合数据集场景：同一 logical batch 内不同 dataset_idx 必须正确分桶、不跨图混淆且保持 exact 等价。"""
+    overrides = _fast_exact_overrides()
+    overrides["worker_pointer_v2_fast_replay_batching"] = "logical_batch_v1"
+    overrides["worker_pointer_v2_logical_batch_cap"] = 4
+    overrides["worker_pointer_v2_fast_replay_encoder_batch_cap"] = 16
+    dataset_paths = [DATA_PATH, DATA_PATH.parent / "680.csv"]
+    with temporary_config(configs, overrides):
+        env = AirLineEnv_Graph(dataset_paths, seed=42)
+        agent = _make_agent()
+
+        # 生成 4 个样本：数据集 0 产生 2 个，数据集 1 产生 2 个
+        env.switch_dataset(0)
+        res0 = _rollout_single_step(agent, env)
+        res1 = _rollout_single_step(agent, env)
+        env.switch_dataset(1)
+        res2 = _rollout_single_step(agent, env)
+        res3 = _rollout_single_step(agent, env)
+
+        memory = Memory()
+        for source, group_id in (
+            (res0[0], (0, 0)),
+            (res1[0], (0, 1)),
+            (res2[0], (1, 0)),
+            (res3[0], (1, 1)),
+        ):
+            memory.states.extend(source.states)
+            memory.actions.extend(source.actions)
+            memory.logprobs.extend(source.logprobs)
+            memory.masks.extend(source.masks)
+            memory.values.extend(source.values)
+            memory.worker_pointer_v2_behavior_traces.extend(
+                [dataclasses.replace(source.worker_pointer_v2_behavior_traces[0], group_id=group_id)]
+            )
+
+        b_task = torch.cat([res0[1], res1[1], res2[1], res3[1]])
+        b_station = torch.cat([res0[2], res1[2], res2[2], res3[2]])
+        b_team = torch.cat([res0[3], res1[3], res2[3], res3[3]])
+        old_logprobs = torch.tensor([res0[4].item(), res1[4].item(), res2[4].item(), res3[4].item()])
+        rewards = torch.tensor([0.0, 0.0, 0.0, 0.0])
+        advantages = torch.tensor([1.0, 1.0, 1.0, 1.0])
+
+        builder = GPUExactBatchBuilder(config=configs, env=env, device=_DEVICE)
+
+        # 1. 逐样本 Physical Replay 基准
+        physical_outputs = []
+        for idx in range(4):
+            pbatch = agent._build_v2_fast_exact_group(
+                memory=memory,
+                memory_indices=[idx],
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                old_logprobs=old_logprobs,
+                rewards=rewards,
+                advantages=advantages,
+                fast_exact_builder=builder,
+            )
+            physical_outputs.append(agent._replay_v2_fast_exact_group(pbatch)[0])
+
+        # 2. 逻辑分桶 Replay：数据集 0 (indices 0, 1) 与 数据集 1 (indices 2, 3)
+        lbatch0 = agent._build_v2_fast_exact_group(
+            memory=memory,
+            memory_indices=[0, 1],
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            old_logprobs=old_logprobs,
+            rewards=rewards,
+            advantages=advantages,
+            fast_exact_builder=builder,
+        )
+        loutputs0 = agent._replay_v2_fast_exact_group(lbatch0)
+
+        lbatch1 = agent._build_v2_fast_exact_group(
+            memory=memory,
+            memory_indices=[2, 3],
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            old_logprobs=old_logprobs,
+            rewards=rewards,
+            advantages=advantages,
+            fast_exact_builder=builder,
+        )
+        loutputs1 = agent._replay_v2_fast_exact_group(lbatch1)
+
+        combined_logical = loutputs0 + loutputs1
+        for idx in range(4):
+            for key in ("task", "station", "team", "state_value", "entropy", "normalized_entropy"):
+                torch.testing.assert_close(
+                    combined_logical[idx][key].float(),
+                    physical_outputs[idx][key].float(),
+                    rtol=0.0,
+                    atol=1.0e-4,
+                )
+
+        # 3. 完整 Update 过程验证分桶融合与指标健全
+        formal_replay_calls: list[tuple[int, bool]] = []
+        original_replay = agent._replay_v2_fast_exact_group
+
+        def capture_replay(fast_batch, *, actor_only=False):
+            formal_replay_calls.append((fast_batch.group_size, actor_only))
+            return original_replay(fast_batch, actor_only=actor_only)
+
+        monkeypatch.setattr(agent, "_replay_v2_fast_exact_group", capture_replay)
+
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env,
+            current_ep=1,
+            advantages=advantages,
+            rewards=rewards,
+            old_logprobs=old_logprobs,
+            b_task=b_task,
+            b_station=b_station,
+            b_team=b_team,
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        # 4 个 physical group 被分桶融合为 2 次 formal replay 调用 (每个大小为 2)
+        formal_fused_calls = [c for c in formal_replay_calls if not c[1]]
+        assert len(formal_fused_calls) == 2
+        assert all(call[0] == 2 for call in formal_fused_calls)
+        assert metrics["V2/FastExact/PhysicalGroupCount"] == 4.0
+        assert metrics["V2/FirstContractTotalMaxAE"] <= 1.0e-4
+        assert metrics["Gradient/Finite"] == 1.0
+
+
+def test_fast_exact_formal_graphs_survive_multiple_physical_groups() -> None:
+    with temporary_config(configs, _fast_exact_overrides()):
+        env_a = AirLineEnv_Graph(DATA_PATH, seed=42)
+        env_b = AirLineEnv_Graph(DATA_PATH, seed=43)
+        agent = _make_agent()
+        first = _rollout_single_step(agent, env_a)
+        second = _rollout_single_step(agent, env_b)
+
+        memory = Memory()
+        for source, group_id in ((first[0], (0, 0)), (second[0], (1, 0))):
+            memory.states.extend(source.states)
+            memory.actions.extend(source.actions)
+            memory.logprobs.extend(source.logprobs)
+            memory.masks.extend(source.masks)
+            memory.values.extend(source.values)
+            memory.worker_pointer_v2_behavior_traces.extend(
+                [dataclasses.replace(source.worker_pointer_v2_behavior_traces[0], group_id=group_id)]
+            )
+
+        builder = GPUExactBatchBuilder(config=configs, env=env_a, device=_DEVICE)
+        metrics = agent._run_v2_fast_exact_replay_update(
+            memory,
+            env_a,
+            current_ep=1,
+            advantages=torch.tensor([1.0, 1.0]),
+            rewards=torch.tensor([0.0, 0.0]),
+            old_logprobs=torch.tensor([first[4].item(), second[4].item()]),
+            b_task=torch.cat((first[1], second[1])),
+            b_station=torch.cat((first[2], second[2])),
+            b_team=torch.cat((first[3], second[3])),
+            action_scope="operation_station_worker",
+            fast_exact_builder=builder,
+        )
+
+        assert metrics["V2/FastExact/BehaviorReplayGroups"] == 2.0
+        assert metrics["PPO/UpdateSteps"] == 1.0
+
+
+def test_fast_exact_loss_scale_preserves_previous_accumulated_gradient() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([0.0]))
+    parameter.grad = torch.tensor([3.0])
+    gradient_before_batch = ((parameter, parameter.grad.detach().clone()),)
+    parameter.grad = torch.tensor([7.0])
+
+    PPOAgent._rescale_fast_exact_gradient_delta(gradient_before_batch, 0.1)
+
+    assert parameter.grad is not None
+    assert parameter.grad.item() == pytest.approx(3.4)
+
+
+def test_fast_exact_replay_fails_closed_on_contract_break() -> None:
+    with temporary_config(configs, _fast_exact_overrides()):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = _make_agent()
+        (
+            memory,
+            b_task,
+            b_station,
+            b_team,
+            old_logprobs,
+            rewards,
+            advantages,
+        ) = _rollout_single_step(agent, env)
+        trace = memory.worker_pointer_v2_behavior_traces[0]
+        corrupted = dataclasses.replace(trace, station_lp=trace.station_lp + 0.5)
+        memory.worker_pointer_v2_behavior_traces[0] = corrupted
+        before = {
+            name: param.detach().cpu().clone()
+            for name, param in agent.policy.named_parameters()
+        }
+        builder = GPUExactBatchBuilder(
+            config=configs, env=env, device=_DEVICE
+        )
+        with pytest.raises(ValueError, match="station"):
+            agent._run_v2_fast_exact_replay_update(
+                memory,
+                env,
+                current_ep=1,
+                advantages=advantages,
+                rewards=rewards,
+                old_logprobs=old_logprobs,
+                b_task=b_task,
+                b_station=b_station,
+                b_team=b_team,
+                action_scope="operation_station_worker",
+                fast_exact_builder=builder,
+            )
+        for name, param in agent.policy.named_parameters():
+            assert torch.equal(param.detach().cpu(), before[name]), (
+                f"fail-closed 后参数被更新: {name}"
+            )
+
+
+def test_fast_exact_update_rethrows_after_oom_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fast-Exact + strict_gpu_replay：OOM 回滚后必须重新抛出，绝不静默跳过。"""
+    with temporary_config(configs, _fast_exact_overrides()):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = _make_agent()
+
+        def boom(*_args: object, **_kwargs: object) -> dict[str, float]:
+            raise RuntimeError(
+                "CUDA out of memory. Tried to allocate 128.00 MiB"
+            )
+
+        monkeypatch.setattr(agent, "_update_once", boom)
+        with pytest.raises(RuntimeError, match="CUDA OOM"):
+            agent.update(Memory(), env=env, current_ep=1)
+
+
+def test_fast_exact_update_dispatches_to_fast_exact_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fast-Exact 配置下 _update_once 必须分派到 _run_v2_fast_exact_replay_update。"""
+    with temporary_config(configs, _fast_exact_overrides()):
+        env = AirLineEnv_Graph(DATA_PATH, seed=42)
+        agent = _make_agent()
+        memory, _b_task, _b_station, _b_team, _old_lp, _r, _adv = (
+            _rollout_single_step(agent, env)
+        )
+        memory.rewards = [0.0]
+        memory.is_terminals = [False]
+
+        dispatched: list[str] = []
+
+        def fake_fast_exact_replay(*_args: object, **_kwargs: object) -> dict[str, float]:
+            dispatched.append("called")
+            return {"V2/FastExact/BehaviorReplayGroups": 1.0}
+
+        monkeypatch.setattr(
+            agent, "_run_v2_fast_exact_replay_update", fake_fast_exact_replay
+        )
+        agent._update_once(memory, env, current_ep=1)
+        assert dispatched == ["called"]

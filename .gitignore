@@ -23,11 +23,20 @@ build/
 # 模型 Checkpoint & 训练产物
 # ============================================================
 /checkpoints/
-/results/
+/results/*
+!/results/02_reschedule_main/
+/results/02_reschedule_main/*
+!/results/02_reschedule_main/r5_eval_full_x_bic_120ep/
+/results/02_reschedule_main/r5_eval_full_x_bic_120ep/*
+!/results/02_reschedule_main/r5_eval_full_x_bic_120ep/reschedule_eval_summary.json
 /tf-logs/
 /runs/
 /tmp/
 /data/generated/
+# APCF generated counterfactual assets: retained locally/server-side, never versioned in Git.
+/data/.apcf_*/
+/data/initial_anchor_proposal_cf_v1/
+/downloads/
 wandb/
 *.pth
 *.ckpt
@@ -43,10 +52,19 @@ wandb/
 # ============================================================
 /scratch/
 /pytest_tmp/
+/.pytest_tmp*/
 /docs/*
 !/docs/
 !/docs/使用说明.md
 !/docs/命令使用手册.md
+!/docs/APAL_HGP_PPO_Journal_Manuscript/
+/docs/APAL_HGP_PPO_Journal_Manuscript/00_Advisor_Review_Package/*.pdf
+/docs/APAL_HGP_PPO_Journal_Manuscript/01_Manuscript_TSMC_English_10p/main_tsmc_10p.pdf
+/docs/APAL_HGP_PPO_Journal_Manuscript/01_Manuscript_TSMC_English_10p/main_tsmc_11p.pdf
+/docs/APAL_HGP_PPO_Journal_Manuscript/01_Manuscript_TSMC_English_10p/main_tsmc_12p.pdf
+/docs/APAL_HGP_PPO_Journal_Manuscript/01_Manuscript_TSMC_English_10p/main_tsmc_review_10p.pdf
+/docs/APAL_HGP_PPO_Journal_Manuscript/99_Archive_Historical_Drafts/**/*.pdf
+/_tools/bin/py-spy.exe
 
 # ============================================================
 # IDE & 编辑器
@@ -78,6 +96,7 @@ Desktop.ini
 # ============================================================
 tests/outputs/*.txt
 .pytest_cache/
+.pytest-tmp-*/
 
 # ============================================================
 # 虚拟环境
@@ -94,3 +113,56 @@ env/
 .env
 .env.local
 *.secret
+
+# LaTeX
+*.aux
+*.log
+*.out
+*.synctex*
+*.fls
+*.fdb_latexmk
+
+# ============================================================
+# 本地实验产出与临时草稿（精选轻量放行：控制 main 总体积 < 90 MB 以直接导入网页版 Gemini）
+# ============================================================
+/output/*
+!/output/figure_study_15/
+/output/figure_study_15/*
+!/output/figure_study_15/assets/
+!/output/figures_reference_revision/
+/output/figures_reference_revision/*
+!/output/figures_reference_revision/A1_source.csv
+!/output/figures_reference_revision/A1_preview.png
+!/output/figures_reference_revision/B4_preview.png
+!/output/figures_english_from_17/
+/output/figures_english_from_17/*
+!/output/figures_english_from_17/科研配图优化_给下一位AI.md
+!/output/figures_english_from_17/HANDOFF_PROMPT_FOR_WEB_GEMINI.md
+!/output/figures_english_from_17/refined_v8/
+/output/figures_english_from_17/refined_v8/*
+!/output/figures_english_from_17/refined_v8/scripts/
+!/output/figures_english_from_17/refined_v8/previews_refined_v8/
+!/output/figures_english_from_17/refined_v8/assets/
+/output/figures_english_from_17/refined_v8/assets/*
+!/output/figures_english_from_17/refined_v8/assets/b1_apal_workcell_v4_ccby2.png
+!/output/figures_english_from_17/refined_v8/assets/PHOTO_LICENSE_ATTRIBUTION.md
+!/output/figures_english_from_17/refined_v8/PAPER_TERMINOLOGY_AUDIT_AND_INTEGRATION_ROADMAP.md
+!/output/figures_english_from_17/refined_v8/CHANGELOG_v8.md
+!/output/figures_english_from_17/paper_integrated_v1/
+/output/figures_english_from_17/paper_integrated_v1/*
+!/output/figures_english_from_17/paper_integrated_v1/scripts/
+!/output/figures_english_from_17/paper_integrated_v1/previews/
+!/output/figures_english_from_17/paper_integrated_v1/pdf/
+!/output/figures_english_from_17/paper_integrated_v1/LATEX_INTEGRATION_GUIDE.md
+!/output/figures_english_from_17/paper_integrated_v1/qa_report_v1.json
+!/output/figures_english_from_17/reference_study_v2/
+/output/figures_english_from_17/reference_study_v2/*
+!/output/figures_english_from_17/reference_study_v2/boards/
+!/output/figures_english_from_17/reference_study_v2/scripts/
+!/output/figures_english_from_17/reference_study_v2/crop_manifest_v2.json
+!/output/figures_english_from_17/reference_study_v2/REFERENCE_CATALOG_AND_REDESIGN_PROPOSALS.md
+*_repaired_schedule*.csv
+!/data/r5_task_delay_v1/real_283_medium_early_repaired_schedule.csv
+*baseline_mes.csv
+scratch_drawing_plan.txt
+

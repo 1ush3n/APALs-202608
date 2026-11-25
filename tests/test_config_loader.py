@@ -201,10 +201,225 @@ def test_training_config_selects_linux_profile() -> None:
     assert Path(paths[-1]).name == "linux_server.yaml"
 
 
+def test_worker_pointer_v2_linux_config_keeps_256_by_16_training_semantics() -> None:
+    cfg = Config()
+    _, paths = load_training_config(
+        [
+            str(
+                PROJECT_ROOT
+                / "conf"
+                / "experiment"
+                / "initial_worker_pointer_v2_exploratory.yaml"
+            )
+        ],
+        target=cfg,
+        system_name="Linux",
+    )
+
+    assert cfg.batch_size == 256
+    assert cfg.accumulation_steps == 16
+    assert cfg.worker_pointer_v2_behavior_replay is True
+    assert cfg.worker_pointer_v2_replay_mode == "behavior_group_exact_v1"
+    assert cfg.worker_pointer_v2_logical_batch_cap == 256
+    assert cfg.worker_pointer_v2_rollout_group_upper_bound == 4
+    assert cfg.async_eval_enabled is True
+    assert cfg.async_eval_submit_every_episodes == 3
+    assert cfg.async_eval_worker_count == 2
+    assert cfg.checkpoint_selection_protocol == "multiscale_manifest"
+    assert cfg.checkpoint_selection_manifest_path == (
+        "data/initial_selection_manifests/real_four_instances_temperature0_v1.json"
+    )
+    # Linux 硬件层仍可给出 16；正式启动命令须最终覆盖为 4。
+    assert cfg.num_envs == 16
+    assert Path(paths[-1]).name == "linux_server.yaml"
+
+
+def test_batched_v2_exploratory_config_resolves_without_async_gpu_evaluation() -> None:
+    """批量 v2 实验配置必须保持轻量本地验证语义。"""
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_batched_exploratory"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.team_selection_mode == "autoregressive_pressure_v2"
+    assert cfg.worker_pointer_v2_replay_mode == "batched_vectorized_v2"
+    assert cfg.worker_pointer_v2_behavior_replay is False
+    assert cfg.worker_pointer_v2_strict_gpu_replay is False
+    assert cfg.async_eval_enabled is False
+    assert cfg.batch_size == 16
+    assert cfg.accumulation_steps == 16
+    assert cfg.worker_pointer_v2_dynamic_eft_features is False
+    assert cfg.worker_pointer_v2_explicit_team_state is False
+    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "off"
+    assert cfg.conditional_head_value_coef == 1.0
+
+
+@pytest.mark.parametrize(
+    "experiment_name",
+    [
+        "reschedule_task_delay_r5_operation_only_strict",
+        "reschedule_task_delay_r5_operation_station_strict",
+        "reschedule_task_delay_r5_homogeneous_graphsage_strict",
+    ],
+)
+def test_strict_reschedule_configs_load_with_isolated_protocol(
+    experiment_name: str,
+) -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        [f"experiment={experiment_name}"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Windows",
+        create_run_context=False,
+    )
+
+    assert cfg.reschedule_baseline_identity_conditioning is False
+    assert cfg.ablation_protocol == "strict_v1"
+    assert cfg.graph_input_scope != "match_policy"
+    if experiment_name.endswith("operation_only_strict"):
+        assert cfg.policy_action_scope == "operation"
+        assert cfg.policy_observation_scope == "task"
+        assert cfg.critic_observation_scope == "match_policy"
+        assert cfg.task_feature_scope == "intrinsic"
+        assert cfg.action_completion_mode == "min_wait"
+        assert cfg.task_mask_mode == "precedence_release_only"
+        assert cfg.station_mask_mode == "structural_only"
+    elif experiment_name.endswith("operation_station_strict"):
+        assert cfg.policy_action_scope == "operation_station"
+        assert cfg.policy_observation_scope == "task_station"
+        assert cfg.action_completion_mode == "min_wait"
+        assert cfg.station_mask_mode == "structural_only"
+    else:
+        assert cfg.graph_encoder_mode == "homogeneous_graphsage_strict"
+        assert cfg.homogeneous_use_type_embedding is False
+
+
+def test_batched_v2_dynamic_eft_feature_can_be_enabled_from_hydra_cli() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        [
+            "experiment=initial_worker_pointer_v2_batched_exploratory",
+            "model.worker_pointer_v2_dynamic_eft_features=true",
+        ],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_dynamic_eft_features is True
+    assert cfg.worker_pointer_v2_dynamic_eft_feature_clip == 10.0
+
+
+@pytest.mark.parametrize(
+    ("experiment", "explicit_team_state", "marginal_scarcity"),
+    [
+        ("initial_worker_pointer_v2_v0", False, False),
+        ("initial_worker_pointer_v2_v1", True, False),
+        ("initial_worker_pointer_v2_v2", True, True),
+    ],
+)
+def test_worker_pointer_v2_v0_v1_hydra_diffs_select_only_a1(
+    experiment: str,
+    explicit_team_state: bool,
+    marginal_scarcity: bool,
+) -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        [f"experiment={experiment}"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_explicit_team_state is explicit_team_state
+    assert cfg.worker_pointer_v2_marginal_scarcity is marginal_scarcity
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "off"
+
+
 def test_experiments_do_not_embed_hardware_profiles() -> None:
     experiment_dir = PROJECT_ROOT / "conf" / "experiment"
     for path in experiment_dir.glob("*.yaml"):
         assert "../hardware/" not in path.read_text(encoding="utf-8")
+
+
+def test_worker_pointer_v2_v3_hydra_diff_enables_a1_a2_a3_only() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_v3"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_explicit_team_state is True
+    assert cfg.worker_pointer_v2_marginal_scarcity is True
+    assert cfg.worker_pointer_v2_interaction_residual is True
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "off"
+
+
+def test_worker_pointer_v2_b0_hydra_diff_enables_diagnostic_heads_only() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_b0"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_explicit_team_state is False
+    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "diagnostic"
+
+
+def test_worker_pointer_v2_b1_hydra_diff_enables_factorized_heads_only() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_b1"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_explicit_team_state is False
+    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is False
+    assert cfg.conditional_head_baseline_mode == "factorized"
+
+
+def test_worker_pointer_v2_c1_hydra_diff_enables_next_frontier_only() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_c1"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.worker_pointer_v2_explicit_team_state is False
+    assert cfg.worker_pointer_v2_marginal_scarcity is False
+    assert cfg.worker_pointer_v2_interaction_residual is False
+    assert cfg.worker_pointer_v2_next_frontier_pressure is True
+    assert cfg.conditional_head_baseline_mode == "off"
 
 
 def test_unsupported_platform_is_rejected() -> None:
@@ -291,6 +506,125 @@ def test_initialize_runtime_cli_leaf_override_wins_nested_experiment_defaults() 
     assert cfg.batch_size == 64
     assert args.batch_size == 64
     assert cfg.train_data_path_or_dir == "data/scale_400_800_datasets"
+
+
+@pytest.mark.parametrize(
+    "batch_args",
+    [
+        ["--batch_size", "256"],
+        ["--batch_size=256"],
+        ["--batch-size", "256"],
+    ],
+)
+def test_compat_batch_size_cli_has_final_priority(batch_args: list[str]) -> None:
+    cfg = Config()
+    args = initialize_hydra_runtime(
+        [
+            "experiment=initial_worker_pointer_v2_exploratory",
+            "train.batch_size=16",
+            *batch_args,
+        ],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.batch_size == 256
+    assert args.batch_size == 256
+    assert "batch_size" in args.explicit_config_fields
+
+
+def test_compat_async_cadence_cli_has_final_priority() -> None:
+    cfg = Config()
+    args = initialize_hydra_runtime(
+        [
+            "experiment=initial_worker_pointer_v2_exploratory",
+            "train.async_eval_submit_every_episodes=5",
+            "--async_eval_submit_every_episodes",
+            "2",
+        ],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert cfg.async_eval_submit_every_episodes == 2
+    assert args.async_eval_submit_every_episodes == 2
+    assert "async_eval_submit_every_episodes" in args.explicit_config_fields
+
+
+def test_hydra_accepts_explicit_resume_checkpoint_path() -> None:
+    from runtime.hydra_config import parse_hydra_args
+
+    args = parse_hydra_args(
+        [
+            "experiment=initial_worker_pointer_v2_exploratory",
+            "resume=true",
+            "runtime.resume_checkpoint_path=checkpoints/best.ckpt",
+        ],
+        system_name="Linux",
+    )
+
+    assert args.resume is True
+    assert args.resume_checkpoint_path == "checkpoints/best.ckpt"
+
+
+def test_compat_batch_size_cli_disables_windows_platform_cap() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        [
+            "experiment=initial_worker_pointer_v2_exploratory",
+            "--batch_size",
+            "256",
+        ],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Windows",
+        create_run_context=False,
+    )
+
+    assert cfg.batch_size == 256
+    assert cfg.ppo_batch_size_cap == 0
+
+
+def test_v2_default_batch_is_256_on_windows_hardware_profile() -> None:
+    cfg = Config()
+    initialize_hydra_runtime(
+        ["experiment=initial_worker_pointer_v2_exploratory"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Windows",
+        create_run_context=False,
+    )
+
+    assert cfg.batch_size == 256
+
+
+def test_ctg_margin2_experiment_loads_through_actual_training_entry() -> None:
+    """独立敏感度配置必须经训练入口保留正式 CTG 协议，仅改变先验间隔。"""
+    cfg = Config()
+    args = initialize_hydra_runtime(
+        ["experiment=initial_conditional_team_gate_prior_margin2"],
+        target=cfg,
+        project_root=PROJECT_ROOT,
+        system_name="Linux",
+        create_run_context=False,
+    )
+
+    assert args.hydra_experiment == "initial_conditional_team_gate_prior_margin2"
+    assert cfg.policy_action_scope == "operation_station_gated_team"
+    assert cfg.conditional_team_scoring_mode == "relative_heuristic_prior_v1"
+    assert cfg.conditional_team_prior_margin == 2.0
+    assert cfg.conditional_team_prior_weight == 1.0
+    assert cfg.conditional_team_gate_bias == -4.0
+    assert cfg.training_manifest_path == (
+        "data/scale_400_800_datasets/manifest_ctg_160_explicit_fiveskill_v1.json"
+    )
+    assert cfg.checkpoint_selection_manifest_path == (
+        "data/initial_selection_manifests/real_four_instances_temperature0_v1.json"
+    )
 
 
 def test_script_extra_arguments_do_not_enter_hydra_config() -> None:

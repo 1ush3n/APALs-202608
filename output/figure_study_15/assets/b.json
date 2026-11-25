@@ -1,0 +1,67 @@
+[
+  {
+    "id": "b1",
+    "title": "Alpa: Automating Inter- and Intra-Operator Parallelism for Distributed Deep Learning",
+    "author": "Lianmin Zheng et al.",
+    "venue": "OSDI",
+    "year": 2022,
+    "figure": 1,
+    "page": 3,
+    "url": "https://www.usenix.org/conference/osdi22/presentation/zheng-lianmin",
+    "pdfurl": "https://www.usenix.org/system/files/osdi22-zheng-lianmin.pdf",
+    "label": "同一张图怎样对照四种资源划分",
+    "note": "五个面板反复使用 A–D 四个节点。填色表示设备，虚线框表示阶段。读者可以只看颜色和边界，就能追踪同一计算图的分配变化。"
+  },
+  {
+    "id": "b2",
+    "title": "Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity",
+    "author": "William Fedus et al.",
+    "venue": "JMLR",
+    "year": 2022,
+    "figure": 2,
+    "page": 4,
+    "url": "https://www.jmlr.org/papers/v23/21-0998.html",
+    "pdfurl": "https://www.jmlr.org/papers/volume23/21-0998/21-0998.pdf",
+    "label": "把路由选择放大给读者看",
+    "note": "左侧只保留四个模块，两条虚线引出右侧细节。黑色实线显示两个词元各自选中的专家，虚线保留其余候选，概率直接标在相应路径旁。"
+  },
+  {
+    "id": "b3",
+    "title": "GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding",
+    "author": "Dmitry Lepikhin et al.",
+    "venue": "ICLR",
+    "year": 2021,
+    "figure": 2,
+    "page": 3,
+    "url": "https://openreview.net/forum?id=qrwe7XHTmYb",
+    "pdfurl": "https://openreview.net/pdf?id=qrwe7XHTmYb",
+    "label": "用位置对齐呈现结构变化",
+    "note": "三个面板按基线编码器、引入专家层、跨设备放置依次展开。对应层保持同色与近似高度，右侧两列之间的跨设备通信集中在红框标出的专家层。"
+  },
+  {
+    "id": "b4",
+    "title": "PipeDream: Generalized Pipeline Parallelism for DNN Training",
+    "author": "Deepak Narayanan et al.",
+    "venue": "SOSP",
+    "year": 2019,
+    "figure": 5,
+    "page": 4,
+    "url": "https://doi.org/10.1145/3341301.3359646",
+    "pdfurl": "https://www.microsoft.com/en-us/research/wp-content/uploads/2019/08/pipedream.pdf",
+    "label": "把资源分配与执行时间对齐",
+    "note": "上半图用四个竖框划分计算资源，下半图把其中一个资源的执行过程展开成时间带。不同纹理区分前向、反向和通信，灰度下仍能辨读。"
+  },
+  {
+    "id": "b5",
+    "title": "EvoPrompting: Language Models for Code-Level Neural Architecture Search",
+    "author": "Angelica Chen et al.",
+    "venue": "NeurIPS",
+    "year": 2023,
+    "figure": 1,
+    "page": 2,
+    "url": "https://proceedings.nips.cc/paper_files/paper/2023/hash/184c1e18d00d7752805324da48ad25be-Abstract-Conference.html",
+    "pdfurl": "https://proceedings.neurips.cc/paper_files/paper/2023/file/184c1e18d00d7752805324da48ad25be-Paper-Conference.pdf",
+    "label": "用同一个候选对象串起生成与反馈",
+    "note": "代码旁的彩色点阵随候选方案出现于生成、评估和筛选三个位置，使人能追踪同一个对象。左侧单列首次初始化，底部细线标示后续迭代回路。"
+  }
+]

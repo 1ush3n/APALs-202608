@@ -727,6 +727,7 @@ def command_plan_rows(config: PaperExperimentConfig) -> list[dict[str, Any]]:
                 f"seed={seed}",
                 f"run_id={variant}_seed{seed}",
                 *overrides,
+                "reschedule_baseline_identity_conditioning=false",
             ]
             rows.append(
                 {

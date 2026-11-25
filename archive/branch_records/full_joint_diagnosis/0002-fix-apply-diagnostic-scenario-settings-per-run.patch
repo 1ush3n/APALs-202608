@@ -1,0 +1,295 @@
+From 87ca4f8fb1db8f6e378cb4ad1b55489e8a349f07 Mon Sep 17 00:00:00 2001
+From: 1ush3n <281842176lu@gmail.com>
+Date: Fri, 28 Aug 2026 14:52:56 +0800
+Subject: [PATCH 2/3] fix: apply diagnostic scenario settings per run
+
+---
+ scripts/diagnose_full_joint.py | 264 ++++++++++++++++-----------------
+ 1 file changed, 127 insertions(+), 137 deletions(-)
+
+diff --git a/scripts/diagnose_full_joint.py b/scripts/diagnose_full_joint.py
+index 3bd39e1..8370dfe 100644
+--- a/scripts/diagnose_full_joint.py
++++ b/scripts/diagnose_full_joint.py
+@@ -537,47 +537,51 @@ def run_worker_ab(
+     try:
+         for data_path in data_paths:
+             for scenario in scenarios:
+-                for seed in seeds:
+-                    apply_initial_worker_mapping(
+-                        configs, data_path, explicit_fields=set()
+-                    )
+-                    set_seed(int(seed))
+-                    learned_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
+-                    learned_metrics, learned_events = _run_learned_episode(
+-                        agent, learned_env, scenario, int(seed)
+-                    )
+-                    set_seed(int(seed))
+-                    eft_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
+-                    eft_metrics, eft_events = _run_forced_eft_episode(
+-                        eft_env, scenario, int(seed), learned_events
+-                    )
+-                    sequence_rate, set_rate = _pair_rates(learned_events, eft_events)
+-                    rows.append(
+-                        {
+-                            "data": str(data_path),
+-                            "scenario": scenario["name"],
+-                            "seed": int(seed),
+-                            "learned": learned_metrics,
+-                            "eft_fixed_pair": eft_metrics,
+-                            "makespan_improvement_rate": (
+-                                (learned_metrics["makespan"] - eft_metrics["makespan"])
+-                                / learned_metrics["makespan"]
+-                                if learned_metrics["makespan"] > 0
+-                                else float("nan")
+-                            ),
+-                            "team_sequence_difference_rate": sequence_rate,
+-                            "team_set_difference_rate": set_rate,
+-                        }
+-                    )
+-                    traces.append(
+-                        {
+-                            "data": str(data_path),
+-                            "scenario": scenario["name"],
+-                            "seed": int(seed),
+-                            "learned_events": learned_events,
+-                            "eft_events": eft_events,
+-                        }
+-                    )
++                scenario_backup = _set_scenario(configs, scenario)
++                try:
++                    for seed in seeds:
++                        apply_initial_worker_mapping(
++                            configs, data_path, explicit_fields=set()
++                        )
++                        set_seed(int(seed))
++                        learned_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
++                        learned_metrics, learned_events = _run_learned_episode(
++                            agent, learned_env, scenario, int(seed)
++                        )
++                        set_seed(int(seed))
++                        eft_env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
++                        eft_metrics, eft_events = _run_forced_eft_episode(
++                            eft_env, scenario, int(seed), learned_events
++                        )
++                        sequence_rate, set_rate = _pair_rates(learned_events, eft_events)
++                        rows.append(
++                            {
++                                "data": str(data_path),
++                                "scenario": scenario["name"],
++                                "seed": int(seed),
++                                "learned": learned_metrics,
++                                "eft_fixed_pair": eft_metrics,
++                                "makespan_improvement_rate": (
++                                    (learned_metrics["makespan"] - eft_metrics["makespan"])
++                                    / learned_metrics["makespan"]
++                                    if learned_metrics["makespan"] > 0
++                                    else float("nan")
++                                ),
++                                "team_sequence_difference_rate": sequence_rate,
++                                "team_set_difference_rate": set_rate,
++                            }
++                        )
++                        traces.append(
++                            {
++                                "data": str(data_path),
++                                "scenario": scenario["name"],
++                                "seed": int(seed),
++                                "learned_events": learned_events,
++                                "eft_events": eft_events,
++                            }
++                        )
++                finally:
++                    _restore_values(configs, scenario_backup)
+     finally:
+         _restore_values(configs, backups)
+     report = {
+@@ -605,103 +609,89 @@ def run_identity(
+     try:
+         for data_path in data_paths:
+             for scenario in scenarios:
+-                for seed in seeds:
+-                    apply_initial_worker_mapping(
+-                        configs, data_path, explicit_fields=set()
+-                    )
+-                    set_seed(int(seed))
+-                    env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
+-                    state = env.reset(
+-                        randomize_duration=bool(scenario["rand_dur"]),
+-                        randomize_workers=bool(scenario["rand_w"]),
+-                        seed=int(seed),
+-                    )
+-                    action_count = 0
+-                    while action_count < max_actions:
+-                        task_mask, station_mask, worker_mask = env.get_masks()
+-                        if bool(task_mask.all()):
+-                            if env.try_wait_for_resources():
+-                                state = refresh_env_observation(env)
+-                                continue
+-                            failures.append({"data": str(data_path), "scenario": scenario["name"], "seed": int(seed), "reason": "deadlock"})
+-                            break
+-                        trace: dict[str, Any] = {}
+-                        result = agent.select_action(
+-                            state.to(agent.device),
+-                            mask_task=task_mask.to(agent.device),
+-                            mask_station_matrix=station_mask.to(agent.device),
+-                            mask_worker=worker_mask.to(agent.device),
+-                            deterministic=False,
+-                            temperature=1.0,
+-                            is_eval=True,
+-                            diagnostic_trace=trace,
+-                        )
+-                        if result[0] is None:
+-                            failures.append({"data": str(data_path), "scenario": scenario["name"], "seed": int(seed), "reason": "no_action"})
+-                            break
+-                        action = canonicalize_action(result[0])
+-                        replay = agent.diagnose_action_logprobs(
+-                            state.to(agent.device),
+-                            action,
+-                            mask_task=task_mask.to(agent.device),
+-                            mask_station_matrix=station_mask.to(agent.device),
+-                            mask_worker=worker_mask.to(agent.device),
+-                            temperature=1.0,
+-                            is_eval=True,
+-                        )
+-                        old_workers = [float(value) for value in trace.get("worker_logprobs", [])]
+-                        new_workers = [float(value) for value in replay.get("worker_logprobs", [])]
+-                        worker_error = max(
+-                            [abs(a - b) for a, b in zip(old_workers, new_workers)]
+-                            + [abs(len(old_workers) - len(new_workers))],
++                scenario_backup = _set_scenario(configs, scenario)
++                try:
++                    for seed in seeds:
++                        apply_initial_worker_mapping(configs, data_path, explicit_fields=set())
++                        set_seed(int(seed))
++                        env = AirLineEnv_Graph(data_path_or_dir=str(data_path), seed=int(seed))
++                        state = env.reset(
++                            randomize_duration=bool(scenario["rand_dur"]),
++                            randomize_workers=bool(scenario["rand_w"]),
++                            seed=int(seed),
+                         )
+-                        old_total = float(trace.get("total_logprob", result[1]))
+-                        actual_task_error = abs(float(trace.get("task_logprob", 0.0)) - replay["task"])
+-                        actual_station_error = abs(float(trace.get("station_logprob", 0.0)) - replay["station"])
+-                        total_error = abs(old_total - replay["total"])
+-                        before_len = len(env.assigned_tasks)
+-                        state, _reward, done, info = env.step(action)
+-                        actuals = [
+-                            _canonicalize_assigned(row)
+-                            for row in env.assigned_tasks[before_len:]
+-                        ]
+-                        row = {
+-                            "data": str(data_path),
+-                            "scenario": scenario["name"],
+-                            "seed": int(seed),
+-                            "step": int(action_count),
+-                            "team_size": int(len(action[2])),
+-                            "task": actual_task_error,
+-                            "station": actual_station_error,
+-                            "worker": worker_error,
+-                            "total": total_error,
+-                            "action_mismatch": int(
+-                                not any(compare_actions(action, actual) for actual in actuals)
+-                            ),
+-                            "info_invalid_action": bool(info.get("invalid_action", False)),
+-                            "worker_entropy_sum": float(sum(replay.get("worker_entropy", []))),
+-                            "worker_entropy_mean": float(
+-                                np.mean(replay.get("worker_entropy", []))
+-                                if replay.get("worker_entropy")
+-                                else 0.0
+-                            ),
+-                            "worker_max_probability_mean": float(
+-                                np.mean(replay.get("worker_max_probability", []))
+-                                if replay.get("worker_max_probability")
+-                                else 0.0
+-                            ),
+-                            "legal_worker_count_mean": float(
+-                                np.mean(replay.get("legal_worker_count", []))
+-                                if replay.get("legal_worker_count")
+-                                else 0.0
+-                            ),
+-                        }
+-                        rows.append(row)
+-                        action_count += 1
+-                        if done:
+-                            break
+-                    else:
+-                        failures.append({"data": str(data_path), "scenario": scenario["name"], "seed": int(seed), "reason": "action_limit"})
++                        action_count = 0
++                        while action_count < max_actions:
++                            task_mask, station_mask, worker_mask = env.get_masks()
++                            if bool(task_mask.all()):
++                                if env.try_wait_for_resources():
++                                    state = refresh_env_observation(env)
++                                    continue
++                                failures.append({"data": str(data_path), "scenario": scenario["name"], "seed": int(seed), "reason": "deadlock"})
++                                break
++                            trace: dict[str, Any] = {}
++                            result = agent.select_action(
++                                state.to(agent.device),
++                                mask_task=task_mask.to(agent.device),
++                                mask_station_matrix=station_mask.to(agent.device),
++                                mask_worker=worker_mask.to(agent.device),
++                                deterministic=False,
++                                temperature=1.0,
++                                is_eval=True,
++                                diagnostic_trace=trace,
++                            )
++                            if result[0] is None:
++                                failures.append({"data": str(data_path), "scenario": scenario["name"], "seed": int(seed), "reason": "no_action"})
++                                break
++                            action = canonicalize_action(result[0])
++                            replay = agent.diagnose_action_logprobs(
++                                state.to(agent.device),
++                                action,
++                                mask_task=task_mask.to(agent.device),
++                                mask_station_matrix=station_mask.to(agent.device),
++                                mask_worker=worker_mask.to(agent.device),
++                                temperature=1.0,
++                                is_eval=True,
++                            )
++                            old_workers = [float(value) for value in trace.get("worker_logprobs", [])]
++                            new_workers = [float(value) for value in replay.get("worker_logprobs", [])]
++                            worker_error = max(
++                                [abs(a - b) for a, b in zip(old_workers, new_workers)]
++                                + [abs(len(old_workers) - len(new_workers))],
++                            )
++                            old_total = float(trace.get("total_logprob", result[1]))
++                            task_error = abs(float(trace.get("task_logprob", 0.0)) - replay["task"])
++                            station_error = abs(float(trace.get("station_logprob", 0.0)) - replay["station"])
++                            total_error = abs(old_total - replay["total"])
++                            before_len = len(env.assigned_tasks)
++                            state, _reward, done, info = env.step(action)
++                            actuals = [_canonicalize_assigned(row) for row in env.assigned_tasks[before_len:]]
++                            rows.append(
++                                {
++                                    "data": str(data_path),
++                                    "scenario": scenario["name"],
++                                    "seed": int(seed),
++                                    "step": int(action_count),
++                                    "team_size": int(len(action[2])),
++                                    "task": task_error,
++                                    "station": station_error,
++                                    "worker": worker_error,
++                                    "total": total_error,
++                                    "action_mismatch": int(not any(compare_actions(action, actual) for actual in actuals)),
++                                    "info_invalid_action": bool(info.get("invalid_action", False)),
++                                    "worker_entropy_sum": float(sum(replay.get("worker_entropy", []))),
++                                    "worker_entropy_mean": float(np.mean(replay.get("worker_entropy", []))) if replay.get("worker_entropy") else 0.0,
++                                    "worker_max_probability_mean": float(np.mean(replay.get("worker_max_probability", []))) if replay.get("worker_max_probability") else 0.0,
++                                    "legal_worker_count_mean": float(np.mean(replay.get("legal_worker_count", []))) if replay.get("legal_worker_count") else 0.0,
++                                }
++                            )
++                            action_count += 1
++                            if done:
++                                break
++                        else:
++                            failures.append({"data": str(data_path), "scenario": scenario["name"], "seed": int(seed), "reason": "action_limit"})
++                finally:
++                    _restore_values(configs, scenario_backup)
+     finally:
+         _restore_values(configs, backups)
+     report = {
+-- 
+2.53.0.windows.1
+

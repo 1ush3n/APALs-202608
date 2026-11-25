@@ -1,0 +1,5 @@
+﻿Method,Key,283,680,2338,3182
+"HGP-PPO (Ours, Online Inference)",HGP-PPO,8.02,12.84,51.91,123.6
+BeamSearchRepair (Search),BeamSearchRepair,114.02,262.72,1787.0,3902.89
+IteratedGreedyRepair (Search),IG,147.17,410.42,2416.8,4202.01
+SimulatedAnnealingRepair (Search),SA,292.42,676.78,3445.39,4296.64

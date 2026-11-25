@@ -80,10 +80,10 @@ def test_dataset_profile_rows_use_apal_loader(tmp_path: Path) -> None:
     data_path = tmp_path / "mini.csv"
     pd.DataFrame(
         [
-            {"AO号": "A", "类型": 1, "工种": -1, "紧前工序AO号": "", "需求人数": 0, "加工时间/h": 0.0, "限定站位": ""},
-            {"AO号": "A-1", "类型": 1, "工种": -1, "紧前工序AO号": "", "需求人数": 0, "加工时间/h": 0.0, "限定站位": ""},
-            {"AO号": "AAQS00-0010", "类型": 2, "工种": 0, "紧前工序AO号": "", "需求人数": 2, "加工时间/h": 1.5, "限定站位": 1},
-            {"AO号": "AAQS00-0020", "类型": 2, "工种": 1, "紧前工序AO号": "AAQS00-0010", "需求人数": 1, "加工时间/h": 2.5, "限定站位": ""},
+            {"序号": 1, "AO号": "A", "类型": 1, "工种": -1, "专业编码": "", "紧前工序AO号": "", "需求人数": 0, "部位容量": 5, "加工时间/h": 0.0, "限定站位": ""},
+            {"序号": 2, "AO号": "A-1", "类型": 1, "工种": -1, "专业编码": "", "紧前工序AO号": "", "需求人数": 0, "部位容量": 5, "加工时间/h": 0.0, "限定站位": ""},
+            {"序号": 3, "AO号": "AAQS00-0010", "类型": 2, "工种": 0, "专业编码": "A", "紧前工序AO号": "", "需求人数": 2, "部位容量": 5, "加工时间/h": 1.5, "限定站位": 1},
+            {"序号": 4, "AO号": "ADQS00-0020", "类型": 2, "工种": 1, "专业编码": "D", "紧前工序AO号": "AAQS00-0010", "需求人数": 1, "部位容量": 5, "加工时间/h": 2.5, "限定站位": ""},
         ]
     ).to_csv(data_path, index=False, encoding="utf-8-sig")
 
@@ -120,6 +120,12 @@ def test_command_plan_marks_missing_checkpoints(tmp_path: Path) -> None:
     )
     config = load_paper_config(config_path, tmp_path)
     rows = command_plan_rows(config)
+    planned_rows = [row for row in rows if row.get("suite") == "ablation"]
+    assert planned_rows
+    assert all(
+        "reschedule_baseline_identity_conditioning=false" in row["command"]
+        for row in planned_rows
+    )
     eval_rows = [row for row in rows if row.get("suite") == "generalization"]
     assert eval_rows[0]["status"] == "missing_checkpoint"
 
@@ -172,6 +178,8 @@ def test_current_paper_suite_excludes_unavailable_and_replaced_methods() -> None
         "full_joint",
         "operation_station",
         "operation_only",
+        "operation_station_ea",
+        "operation_only_ea",
         "fixed_preallocation",
         "static_topq",
         "homogeneous_graphsage",
@@ -179,3 +187,52 @@ def test_current_paper_suite_excludes_unavailable_and_replaced_methods() -> None
         "mean_max_pooling",
         "local_only",
     } <= active_ablations
+
+
+def test_policy_observation_scope_is_limited_to_two_node_scope_ablations() -> None:
+    config = load_paper_config(
+        PROJECT_ROOT / "conf" / "experiment" / "paper_experiment_suite.yaml",
+        PROJECT_ROOT,
+    )
+
+    assert config.ablations["operation_only"]["overrides"] == [
+        "policy_action_scope=operation",
+        "policy_observation_scope=task",
+        "action_completion_mode=earliest_finish",
+    ]
+    assert config.ablations["operation_station"]["overrides"] == [
+        "policy_action_scope=operation_station",
+        "policy_observation_scope=task_station",
+        "action_completion_mode=earliest_finish",
+    ]
+
+    assert config.ablations["operation_only"]["overrides"] == [
+        "policy_action_scope=operation",
+        "policy_observation_scope=task",
+        "action_completion_mode=earliest_finish",
+    ]
+    assert config.ablations["operation_only_ea"]["overrides"] == [
+        "policy_action_scope=operation",
+        "policy_observation_scope=task",
+        "action_completion_mode=earliest_availability",
+    ]
+    assert config.ablations["operation_station_ea"]["overrides"] == [
+        "policy_action_scope=operation_station",
+        "policy_observation_scope=task_station",
+        "action_completion_mode=earliest_availability",
+    ]
+
+    for name, spec in config.ablations.items():
+        if name not in {
+                "operation_only",
+                "operation_station",
+                "operation_only_ea",
+                "operation_station_ea",
+                "operation_only_strict",
+                "operation_station_strict",
+                "homogeneous_graphsage_strict",
+            }:
+            assert not any(
+                str(override).startswith("policy_observation_scope=")
+                for override in spec["overrides"]
+            )

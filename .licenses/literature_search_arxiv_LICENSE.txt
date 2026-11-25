@@ -1,0 +1,4 @@
+﻿arXiv API Terms of Use Notification
+Recorded: 2026-11-25 11:26:21 +08:00
+Source: https://info.arxiv.org/help/api/index.html
+Reminder: Always check the terms at https://info.arxiv.org/help/api/index.html and verify the individual license of every paper retrieved before redistributing or reproducing figures/content.

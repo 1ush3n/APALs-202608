@@ -40,6 +40,7 @@ def check(condition, name):
     else:
         FAILED_TESTS.append(name)
         print(f"  [FAIL] {name}")
+        raise AssertionError(name)
 
 
 def _make_agent(device, total_updates=10):

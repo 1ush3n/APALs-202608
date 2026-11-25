@@ -1,7 +1,7 @@
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 import platform
 
 @dataclass
@@ -39,11 +39,97 @@ class Config:
     # 联合决策与消融实验语义（checkpoint 结构字段）
     # ------------------
     policy_action_scope: str = "operation_station_worker"
+    action_completion_mode: str = "earliest_finish"
+    # 策略网络可见节点范围；full 保持历史主方法与旧 checkpoint 语义。
+    policy_observation_scope: str = "full"
+    graph_input_scope: str = "match_policy"
+    # critic 默认跟随 actor，避免价值网络意外读取特权资源信息。
+    critic_observation_scope: str = "match_policy"
+    # task 特征默认保持旧的完整输入；strict operation-only 使用 intrinsic。
+    task_feature_scope: str = "full"
+    # station 特征默认保持旧的完整输入；strict operation_station 使用 no_worker_resource。
+    station_feature_scope: str = "full"
+    # 默认值保持旧的资源感知掩码逻辑。
+    task_mask_mode: str = "resource_aware"
+    station_mask_mode: str = "resource_aware"
+    # 站位最小前瞻贪心解码 (MES Decoding: Minimum Earliest Station)
+    enable_mes_decoding: bool = False
+    mes_penalty_lambda: float = 2.0
+    mes_max_station_jump: Optional[int] = 1
+    mes_mode: str = "soft_penalty"
+    ablation_protocol: str = "legacy"
+    conditional_team_max_candidates: int = 4
+    conditional_team_gate_bias: float = -4.0
+    conditional_team_nonbaseline_logit: float = -8.0
+    conditional_team_scoring_mode: str = "fixed_prior_v1"
+    conditional_team_prior_margin: float = 4.0
+    conditional_team_prior_weight: float = 1.0
+    conditional_head_baseline_mode: str = "off"
+    # 锚点条件式完整团队提议 + 反事实门控（APCF）：仅服务 operation_station_anchor_proposal_team。
+    anchor_proposal_mode: str = "full_team_v1"
+    anchor_proposal_prior_margin: float = 4.0
+    anchor_proposal_gate_bias: float = -4.0
+    anchor_proposal_train_branch_floor_start: float = 0.20
+    anchor_proposal_train_branch_floor_end: float = 0.02
+    anchor_proposal_branch_floor_decay_fraction: float = 0.40
+    anchor_proposal_require_difference: bool = True
+    anchor_proposal_pretrain_checkpoint_path: str = ""
+    anchor_proposal_cf_manifest_path: str = ""
+    anchor_proposal_pretrain_source_sha256: str = ""
+    # APCF 反事实预训练（独立入口 pretrain_anchor_proposal_cf.py）。
+    apcf_pretrain_lr: float = 1.0e-4          # 预训练学习率
+    apcf_pretrain_epochs: int = 10            # 预训练轮数
+    apcf_pretrain_loss_huber_weight: float = 1.0   # 相对收益 Huber 回归权重
+    apcf_pretrain_loss_bce_weight: float = 1.0     # 排序 BCE 权重
+    apcf_pretrain_loss_gate_weight: float = 1.0    # 门控分支 CE 权重
+    apcf_pretrain_loss_bc_weight: float = 1.0      # 正收益加权 BC 权重
+    apcf_pretrain_device: str = "auto"        # auto|cpu|cuda
+    apcf_pretrain_val_split: str = "frozen_diagnostic"  # 冻结诊断验证集
+    # Best-anchor 策略蒸馏仅服务于条件式团队门控实验分支；默认关闭，
+    # 不能影响既有主方法、消融或对比算法。
+    best_anchor_distill_enabled: bool = False
+    best_anchor_distill_external_checkpoint_path: str = ""
+    best_anchor_distill_external_selection_score: float = float("nan")
+    best_anchor_distill_external_protocol_id: str = ""
+    best_anchor_distill_external_manifest_sha256: str = ""
+    best_anchor_distill_temperature: float = 1.0
+    best_anchor_distill_lambda_start: float = 0.02
+    best_anchor_distill_lambda_end: float = 0.08
+    best_anchor_distill_ramp_updates: int = 2
+    best_anchor_distill_min_improvement: float = 0.0
     workforce_binding_mode: str = "endogenous"
     workforce_preallocation_ratio: float = 1.0
     team_selection_mode: str = "autoregressive"
+    worker_pointer_context_version: str = "pressure_v2_normwork_headcount_physicalwait_v1"
+    worker_pointer_pressure_temperature: float = 1.0
+    worker_pointer_supply_epsilon: float = 1.0e-6
+    worker_pointer_wait_discount_mode: str = "physical_wait_exponential_v1"
+    worker_pointer_v2_init_seed_offset: int = 1009
+    worker_pointer_v2_dynamic_eft_features: bool = False
+    worker_pointer_v2_dynamic_eft_feature_clip: float = 10.0
+    worker_pointer_v2_explicit_team_state: bool = False
+    worker_pointer_v2_marginal_scarcity: bool = False
+    worker_pointer_v2_marginal_scarcity_clip: float = 10.0
+    worker_pointer_v2_interaction_residual: bool = False
+    worker_pointer_v2_next_frontier_pressure: bool = False
+    # WorkerPointer v2 默认批量向量化重放；exact 模式仅供诊断与对照实验。
+    worker_pointer_v2_behavior_replay: bool = False
+    worker_pointer_v2_logical_batch_cap: int = 64
+    worker_pointer_v2_replay_mode: str = "batched_vectorized_v2"
+    worker_pointer_v2_fast_replay_batching: str = "physical_group"
+    worker_pointer_v2_fast_replay_encoder_batch_cap: int = 16
+    worker_pointer_v2_rollout_group_upper_bound: int = 4
+    worker_pointer_v2_fast_exact_profile: bool = False
+    # WorkerPointer v2 Fast-Exact：正式训练严禁自动降级，GPU 模板失败/OOM/组不完整
+    # 必须在 optimizer.step 前终止并报告（覆盖 skip_update_on_oom 的静默跳过分支）。
+    worker_pointer_v2_strict_gpu_replay: bool = False
+    # Fast-Exact 平台默认环境数；由 conf/hardware/*.yaml 覆盖（Windows 4 / Linux 16）。
+    # 仅在新模式且 CLI 未显式 --num_envs 时生效。
+    worker_pointer_v2_fast_default_num_envs: int = 4
     graph_encoder_mode: str = "hetero_gat"
     actor_context_mode: str = "attention"
+    homogeneous_use_type_embedding: bool = True
+    homogeneous_shared_input_projection: bool = False
     
     # ------------------
     # 模型超参数 (Model Hyperparameters)
@@ -70,6 +156,8 @@ class Config:
     # 泛化性与域随机化 (Domain Randomization)
     # ------------------
     train_data_path_or_dir: str = "data/generated/initial_283"
+    # 所有正式初始调度训练必须由 explicit_fiveskill_v1 manifest 精确绑定。
+    training_manifest_path: str = ""
     switch_dataset_every_updates: int = 1                 # 频繁切换以增强泛化能力
     random_sample_dataset: bool = True                   # 是否启用随机抽取数据集图纸，默认开启，可配置为 false 恢复顺序轮询
     dataset_context_cache_size: int = 2                   # 每个环境最多缓存的完整图上下文数量
@@ -126,6 +214,7 @@ class Config:
     # 预测-反应式重调度 (Baseline-guided Rescheduling)
     # ------------------
     enable_reschedule_mode: bool = False
+    reschedule_baseline_identity_conditioning: bool = False
     reschedule_manifest_path: str = ""
     reschedule_eval_instance_id: str = ""
     reschedule_baseline_schedule_path: str = "results/final_schedule.csv"
@@ -133,7 +222,20 @@ class Config:
     reschedule_scenario_path: str = ""
     reschedule_eval_scenario_path: str = "results/reschedule_eval_scenarios.csv"
     reschedule_eval_scenario_seed: int = 42
+    reschedule_async_protocol: str = ""
     reschedule_train_scenario_mode: str = "config"
+    r5_early_start_ratio: float = 0.225
+    r5_middle_start_ratio: float = 0.400
+    r5_late_start_ratio: float = 0.575
+    r5_low_task_ratio: float = 0.05
+    r5_low_delay_min: float = 5.0
+    r5_low_delay_max: float = 15.0
+    r5_medium_task_ratio: float = 0.10
+    r5_medium_delay_min: float = 10.0
+    r5_medium_delay_max: float = 35.0
+    r5_high_task_ratio: float = 0.18
+    r5_high_delay_min: float = 20.0
+    r5_high_delay_max: float = 60.0
     reschedule_start_time_min_ratio: float = 0.15
     reschedule_start_time_max_ratio: float = 0.65
     reschedule_delay_task_prob: float = 0.08
@@ -159,9 +261,15 @@ class Config:
     async_eval_device: str = "cpu"
     async_eval_cpu_threads: int = 4
     async_eval_queue_capacity: int = 4
+    async_eval_worker_count: int = 1
+    async_eval_submit_every_episodes: int = 1
     async_eval_initial_data_path: str = "data/680.csv"
+    checkpoint_selection_protocol: str = "single_standard"
+    checkpoint_selection_manifest_path: str = ""
     async_eval_instance_id: str = "real_680"
     async_eval_scenario_id: str = "medium_000"
+    async_eval_scenario_ids: list[str] = field(default_factory=list)
+    async_eval_allow_cpu_fallback: bool = True
     async_eval_wait_on_finish: bool = True
     async_eval_failure_policy: str = "fail"
     async_eval_max_retries: int = 1
@@ -217,6 +325,7 @@ class Config:
     
     c_policy: float = 1.0                  # Policy Loss 权重
     c_value: float = 0.5                   # Critic 价值损失权重
+    conditional_head_value_coef: float = 1.0  # 条件 value head 损失权重
     
     r_coef_makespan: float = 1.0           # 宏观目标：Makespan 下班时间推移惩罚
     deadlock_penalty_multiplier: float = 1.5 # 死锁惩罚项 (相对于理想总完工时间的倍数)
@@ -305,12 +414,16 @@ class Config:
     # ------------------
     log_dir: str = "/root/tf-logs"
     experiment_name: str = "default"
+    initialization: str = "random"
     checkpoint_root: str = "checkpoints"
     runs_root: str = "runs"
     run_id: str = ""
     run_dir: str = ""
     artifact_layout: str = "runs"          # "runs" 使用统一运行目录；"legacy" 保持旧 checkpoints/results 结构
+    evaluation_protocol: str = "standard"
     config_paths: tuple[str, ...] = field(default_factory=tuple)
+    apcf_smoke_guard_root: str = ""
+    apcf_pretrain_loaded_model_key_count: int = 0
     
     # 报告生成 (Report Generation)
     generate_report_every_episodes: int = 100

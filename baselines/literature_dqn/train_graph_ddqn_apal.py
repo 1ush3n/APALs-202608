@@ -47,7 +47,9 @@ from baselines.literature_dqn.replay import DatasetReplayBuffer, DatasetUTDSched
 from baselines.literature.common import (
     evaluate_graph_policy,
     export_best_schedule,
+    is_r5_learning_protocol,
     load_training_metrics,
+    LiteratureCheckpointSaver,
     make_eval_env,
     make_training_env,
     prepare_literature_output,
@@ -61,6 +63,7 @@ from configs import configs
 from env_wrapper import standardize_env_step
 from runtime.hydra_config import ExtraArgument, HydraCliError, hydra_help, initialize_hydra_runtime, should_show_help
 from runtime.seed import set_seed
+from training.async_evaluation import AsyncEvaluationManager
 from training.observation import refresh_env_observation
 from utils.device_utils import clear_torch_cache, get_available_device
 from utils.gpu_graph_manager import GPUBatchGraphManager
@@ -824,6 +827,7 @@ def _train_vectorized(
     progress_interval_steps: int,
     exact_resume_enabled: bool,
     exact_checkpoint_interval: int,
+    async_manager: AsyncEvaluationManager | None,
 ) -> tuple[list[dict[str, Any]], float]:
     seed = int(getattr(configs, "seed", 42))
     requested_envs = max(1, int(getattr(args, "ddqn_num_envs", 1)))
@@ -1097,7 +1101,15 @@ def _train_vectorized(
                 agent.target_model.load_state_dict(agent.model.state_dict())
 
             eval_boundaries = [episode for episode in wave_episodes if episode % eval_freq == 0]
-            if eval_boundaries:
+            if eval_boundaries and async_manager is not None:
+                episode = int(eval_boundaries[-1])
+                async_manager.submit(
+                    LiteratureCheckpointSaver(
+                        lambda path: _save_checkpoint(path, agent, best_makespan, args, episode=episode)
+                    ),
+                    episode=episode,
+                )
+            if eval_boundaries and async_manager is None:
                 eval_metrics, eval_schedule, _eval_runs = evaluate_graph_policy(
                     agent.model,
                     eval_env,
@@ -1157,6 +1169,9 @@ def train(args: Any) -> None:
     output_dir = prepare_literature_output(args, method_name=METHOD_NAME, entrypoint=ENTRYPOINT)
     start_time = time.time()
     device = get_available_device()
+    r5_protocol = is_r5_learning_protocol(configs)
+    if r5_protocol and device.type != "cuda":
+        raise RuntimeError("r5 Graph-DDQN 训练期异步验证必须使用 CUDA")
     train_env = make_training_env(args, seed=seed)
     eval_env = make_eval_env(args, seed=seed)
     agent = GraphDDQNAgent(args, device)
@@ -1182,6 +1197,11 @@ def train(args: Any) -> None:
     final_path = output_dir / "graph_ddqn_apal_final.pth"
     start_episode = 1
     best_makespan = float("inf")
+    async_manager = (
+        AsyncEvaluationManager(config=configs, latest_path=latest_path, best_path=best_path, project_root=PROJECT_ROOT)
+        if r5_protocol
+        else None
+    )
 
     if bool(getattr(args, "resume", False)):
         exact_state = (
@@ -1253,6 +1273,7 @@ def train(args: Any) -> None:
             progress_interval_steps=progress_interval_steps,
             exact_resume_enabled=exact_resume_enabled,
             exact_checkpoint_interval=exact_checkpoint_interval,
+            async_manager=async_manager,
         )
         _save_checkpoint(final_path, agent, best_makespan, args, episode=max_episodes)
         if exact_resume_enabled:
@@ -1264,6 +1285,8 @@ def train(args: Any) -> None:
                 args,
                 episode=max_episodes,
             )
+        if async_manager is not None:
+            async_manager.finalize(wait=True)
         write_training_metrics(output_dir, rows)
         print(
             f"[{METHOD_NAME}] done elapsed={time.time() - start_time:.1f}s "
@@ -1393,7 +1416,14 @@ def train(args: Any) -> None:
         if episode % target_update_episodes == 0:
             agent.target_model.load_state_dict(agent.model.state_dict())
 
-        if episode % int(getattr(configs, "eval_freq", 1)) == 0:
+        if async_manager is not None and episode % int(getattr(configs, "async_eval_submit_every_episodes", 2)) == 0:
+            async_manager.submit(
+                LiteratureCheckpointSaver(
+                    lambda path: _save_checkpoint(path, agent, best_makespan, args, episode=episode)
+                ),
+                episode=episode,
+            )
+        if episode % int(getattr(configs, "eval_freq", 1)) == 0 and async_manager is None:
             eval_metrics, eval_schedule, _eval_runs = evaluate_graph_policy(
                 agent.model,
                 eval_env,
@@ -1445,6 +1475,8 @@ def train(args: Any) -> None:
             clear_torch_cache()
 
     _save_checkpoint(final_path, agent, best_makespan, args, episode=max_episodes)
+    if async_manager is not None:
+        async_manager.finalize(wait=True)
     if exact_resume_enabled and max_episodes >= start_episode:
         _save_exact_resume_state(
             output_dir,

@@ -18,6 +18,7 @@ train:
   oom_transactional_updates: true
   c_policy: 1.0
   c_value: 0.5
+  conditional_head_value_coef: 1.0
   c_entropy: 0.0002
   c_entropy_end: 0.00005
   entropy_decay_episodes: 300

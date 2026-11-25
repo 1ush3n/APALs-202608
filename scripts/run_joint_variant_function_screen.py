@@ -24,8 +24,14 @@ from runtime.hydra_config import ExtraArgument, initialize_hydra_runtime, initia
 
 VARIANTS: dict[str, tuple[str, ...]] = {
     "full_joint": (),
-    "operation_station": ("policy_action_scope=operation_station",),
-    "operation_only": ("policy_action_scope=operation",),
+    "operation_station": (
+        "policy_action_scope=operation_station",
+        "policy_observation_scope=task_station",
+    ),
+    "operation_only": (
+        "policy_action_scope=operation",
+        "policy_observation_scope=task",
+    ),
     "fixed_preallocation": (
         "workforce_binding_mode=preallocated",
         "workforce_preallocation_ratio=1.0",

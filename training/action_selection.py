@@ -11,6 +11,7 @@ def select_actions_batch_compat(
     deterministic: bool,
     temperature: float,
     is_eval: bool,
+    baseline_snapshots=None,
 ):
     """兼容旧版 PPOAgent：缺少批量动作接口时退回逐环境采样。"""
     batch_selector = getattr(agent, "select_actions_batch", None)
@@ -23,6 +24,7 @@ def select_actions_batch_compat(
             deterministic=deterministic,
             temperature=temperature,
             is_eval=is_eval,
+            baseline_snapshots=baseline_snapshots,
         )
 
     if not getattr(agent, "_warned_missing_batch_selector", False):
@@ -30,12 +32,12 @@ def select_actions_batch_compat(
         setattr(agent, "_warned_missing_batch_selector", True)
 
     results = []
-    for obs, task_mask, station_mask, worker_mask in zip(
+    for index, (obs, task_mask, station_mask, worker_mask) in enumerate(zip(
         obs_list,
         mask_task_list,
         mask_station_matrix_list,
         mask_worker_list,
-    ):
+    )):
         results.append(
             agent.select_action(
                 obs,
@@ -45,6 +47,11 @@ def select_actions_batch_compat(
                 deterministic=deterministic,
                 temperature=temperature,
                 is_eval=is_eval,
+                baseline_snapshot=(
+                    baseline_snapshots[index]
+                    if baseline_snapshots is not None
+                    else None
+                ),
             )
         )
     return results

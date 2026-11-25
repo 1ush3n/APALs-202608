@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from configs import configs
 from tests.runtime_safety import seed_everything, temporary_config
-from utils.vector_env import EnvCreator, VectorEnv
+from utils.vector_env import EnvCreator, VectorEnv, VectorEnvWorkerError
 from worker_feature_layout import resolve_worker_feature_layout
 
 
@@ -32,6 +32,21 @@ pytestmark = pytest.mark.vector_safe
 class _FailingEnvCreator:
     def __call__(self, index: int):
         raise RuntimeError(f"worker-{index}-init-failure")
+
+
+class _ResetFailureEnvCreator:
+    def __call__(self, index: int) -> object:
+        env = EnvCreator(
+            str(PROJECT_ROOT / "data" / "283.csv"),
+            seed_offset=1000,
+        )(index)
+        if index == 0:
+            def fail_reset(**_kwargs: object) -> None:
+                raise RuntimeError("worker-0-reset-failure")
+
+            env.reset = fail_reset
+        return env
+
 
 
 def _pick_simple_actions(obs_list, masks_list):
@@ -127,6 +142,33 @@ def test_vector_env_initialization_failure_is_reported_without_hanging() -> None
     assert after_children <= before_children, (
         f"VectorEnv close 后仍有多余子进程: before={before_children}, after={after_children}"
     )
+
+
+def test_vector_env_worker_failure_closes_and_forbids_reuse() -> None:
+    vector_env = VectorEnv(
+        _ResetFailureEnvCreator(),
+        num_envs=2,
+        start_method="spawn",
+        worker_threads=1,
+        init_timeout_sec=30.0,
+        command_timeout_sec=30.0,
+    )
+    try:
+        with pytest.raises(
+            VectorEnvWorkerError,
+            match="worker-0-reset-failure",
+        ):
+            vector_env.reset_all()
+
+        assert vector_env.closed
+        assert all(not process.is_alive() for process in vector_env.processes)
+        with pytest.raises(
+            VectorEnvWorkerError,
+            match="不可复用",
+        ):
+            vector_env.reset_all()
+    finally:
+        vector_env.close()
 
 
 def _assert_masks_equal(left, right) -> None:
@@ -280,6 +322,43 @@ def test_vector_env_fused_rollout_matches_legacy_state_queries() -> None:
                 vec_env.close()
 
 
+def test_vector_env_snapshot_rebuild_preserves_per_worker_duration_noise() -> None:
+    """代理端重建必须使用各子进程快照中的扰动工时，而非共享静态上下文。"""
+    seed_everything(461)
+    overrides = {
+        "n_w": 40,
+        "n_m": 5,
+        "randomize_durations": True,
+        "enable_dynamic_events": False,
+        "enable_station_breakdown": False,
+        "enable_material_delay": False,
+    }
+
+    vec_env = None
+    with temporary_config(configs, overrides):
+        make_env = EnvCreator(str(PROJECT_ROOT / "data" / "283.csv"), seed_offset=461)
+        vec_env = VectorEnv(make_env, num_envs=2)
+        try:
+            _masks, snapshots = vec_env.reset_rollout_all(
+                randomize_duration=True,
+                randomize_workers=False,
+            )
+            assert all("base_task_x" in snapshot for snapshot in snapshots)
+            assert not np.array_equal(
+                np.asarray(snapshots[0]["base_task_x"])[:, 0],
+                np.asarray(snapshots[1]["base_task_x"])[:, 0],
+            )
+            for proxy, snapshot in zip(vec_env.envs, snapshots, strict=True):
+                rebuilt = proxy.rebuild_state_from_snapshot(snapshot)
+                np.testing.assert_allclose(
+                    rebuilt["task"].x[:, 0].detach().cpu().numpy(),
+                    np.asarray(snapshot["base_task_x"])[:, 0],
+                )
+        finally:
+            if vec_env is not None:
+                vec_env.close()
+
+
 def test_vector_env_fused_wait_preserves_event_driven_queue_semantics() -> None:
     """融合等待必须先推进到未来事件，不能把暂时无资源误报为死锁。"""
     seed_everything(47)
@@ -359,6 +438,44 @@ def test_vector_env_indexed_reset_step_and_switch() -> None:
                 assert isinstance(info, dict)
                 rebuilt = vec_env.envs[index].rebuild_state_from_snapshot(snapshot)
                 assert rebuilt["task"].x.shape[0] == vec_env.envs[index].num_tasks
+        finally:
+            if vec_env is not None:
+                vec_env.close()
+
+
+def test_snapshot_rebuild_loads_dataset_context_locally() -> None:
+    """重建图时不得通过 Pipe 接收包含 Tensor 的数据集上下文。"""
+    seed_everything(45)
+    overrides = {
+        "n_w": 40,
+        "n_m": 5,
+        "max_slots_per_station": 3,
+        "randomize_durations": False,
+        "enable_dynamic_events": False,
+        "enable_station_breakdown": False,
+        "enable_material_delay": False,
+    }
+
+    vec_env = None
+    with temporary_config(configs, overrides):
+        make_env = EnvCreator(str(PROJECT_ROOT / "data" / "283.csv"), seed_offset=425)
+        vec_env = VectorEnv(make_env, num_envs=1)
+        try:
+            _, snapshots = vec_env.reset_rollout_all(
+                randomize_duration=False, randomize_workers=False
+            )
+            proxy = vec_env.envs[0]
+
+            original_recv = proxy._recv
+
+            def reject_dataset_context_ipc(operation: str):
+                if operation == "initialize_dataset_context":
+                    raise AssertionError("数据集上下文不得通过 Pipe 返回 Tensor")
+                return original_recv(operation)
+
+            proxy._recv = reject_dataset_context_ipc
+            rebuilt = proxy.rebuild_state_from_snapshot(snapshots[0])
+            assert rebuilt["task"].x.shape[0] == proxy.num_tasks
         finally:
             if vec_env is not None:
                 vec_env.close()

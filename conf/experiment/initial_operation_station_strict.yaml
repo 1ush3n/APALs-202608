@@ -1,0 +1,33 @@
+# @package _global_
+defaults:
+  - /experiment/initial_strict_common@_global_
+  - _self_
+
+experiment:
+  experiment_name: initial_operation_station_strict
+
+model:
+  ablation_protocol: strict_v1
+  policy_action_scope: operation_station
+  policy_observation_scope: task_station
+  graph_input_scope: task_station
+  critic_observation_scope: match_policy
+
+  # 关键信息物理隔离（彻底清零 Station 节点的 Worker 宏观统计）
+  task_feature_scope: intrinsic
+  station_feature_scope: no_worker_resource
+  task_mask_mode: precedence_release_only
+  station_mask_mode: structural_only
+
+  # 弱化补全器：纯 (worker_wait, worker_id) 补全工人
+  action_completion_mode: min_wait
+  team_selection_mode: autoregressive
+  conditional_head_baseline_mode: off
+  reschedule_baseline_identity_conditioning: false
+
+  # 消融实验严禁使用 Dynamic EFT
+  worker_pointer_v2_dynamic_eft_features: false
+
+train:
+  worker_pointer_v2_behavior_replay: false
+  worker_pointer_v2_strict_gpu_replay: false

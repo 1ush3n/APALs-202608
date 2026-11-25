@@ -9,7 +9,7 @@ import pandas as pd
 import heapq
 import hashlib
 from collections import OrderedDict
-from typing import Tuple, List, Dict, Optional, Any, Iterable
+from typing import Tuple, List, Dict, Optional, Any, Iterable, Sequence
 from pathlib import Path
 
 from data_loader import load_data
@@ -19,6 +19,7 @@ from core.event_engine import Event, EventType, EventQueue
 from core.action_masker import ActionMasker
 from core.constraints import Assignment, ConstraintEngine, ScheduleValidationReport
 from core.time_comparison import release_time_tolerance, time_reached_scalar
+from models.worker_pointer_context import PHYSICAL_PREDECESSOR_EDGE
 from utils.resource_graph import (
     SkillHubTopology,
     apply_resource_graph,
@@ -39,7 +40,9 @@ from utils.reschedule import (
     sample_task_delay_load_scenario,
     sample_task_delay_scenario,
 )
+from utils.reschedule_r5 import sample_r5_training_scenario
 from runtime.reschedule_manifest import resolve_manifest_entry_for_data
+from utils.baseline_identity import build_baseline_team_edge_index
 
 Action = Tuple[int, int, List[int]]
 
@@ -95,18 +98,29 @@ class AirLineEnv_Graph(gym.Env):
         self._context_lru: OrderedDict[int, None] = OrderedDict()
         self._context_cache_size = max(1, int(getattr(configs, "dataset_context_cache_size", 2)))
 
-        data_source = Path(data_path_or_dir)
-        if data_source.is_dir():
-            files = sorted(
-                path for path in data_source.iterdir()
-                if path.suffix.lower() in {".csv", ".xlsx"}
-            )
+        if isinstance(data_path_or_dir, Sequence) and not isinstance(data_path_or_dir, (str, bytes, Path)):
+            files = [Path(path).resolve() for path in data_path_or_dir]
             if not files:
-                raise ValueError(f"目录 {data_source} 中未找到任何 csv 或 xlsx 文件。")
+                raise ValueError("显式训练文件列表不能为空")
+            if len(set(files)) != len(files):
+                raise ValueError("显式训练文件列表存在重复 CSV")
+            if any(path.suffix.lower() != ".csv" or not path.is_file() for path in files):
+                raise ValueError("显式训练文件列表只能包含存在的 CSV 文件")
             for file_path in files:
                 self._register_dataset(file_path)
         else:
-            self._register_dataset(data_source)
+            data_source = Path(data_path_or_dir)
+            if data_source.is_dir():
+                files = sorted(
+                    path for path in data_source.iterdir()
+                    if path.suffix.lower() in {".csv", ".xlsx"}
+                )
+                if not files:
+                    raise ValueError(f"目录 {data_source} 中未找到任何 csv 或 xlsx 文件。")
+                for file_path in files:
+                    self._register_dataset(file_path)
+            else:
+                self._register_dataset(data_source)
             
         # 初始化激活索引
         self.active_dataset_idx = 0
@@ -120,6 +134,7 @@ class AirLineEnv_Graph(gym.Env):
         # 事件队列 (Priority Queue Engine)
         self.event_queue = EventQueue(max_size=10000)
         self.baseline_schedule: BaselineSchedule | None = None
+        self._baseline_team_edge_index: np.ndarray | None = None
         self.reschedule_scenario: RescheduleScenario | None = None
         self.reschedule_start_time = 0.0
         self.reschedule_lower_bound = 0.0
@@ -195,6 +210,7 @@ class AirLineEnv_Graph(gym.Env):
         self.constraint_engine = ctx['constraint_engine']
         self.is_critical = ctx['is_critical']
         self.baseline_schedule = None
+        self._baseline_team_edge_index = None
         self.reschedule_scenario = None
         
         # 状态变量初始化
@@ -217,23 +233,6 @@ class AirLineEnv_Graph(gym.Env):
             "file_path": str(ctx["file_path"]),
             "num_tasks": None if "num_tasks" not in ctx else int(ctx["num_tasks"]),
         }
-
-    def export_dataset_context(self, idx: int) -> dict[str, Any]:
-        """按需导出主进程重建 observation 所需的静态上下文。"""
-        ctx = self._ensure_dataset_context(idx)
-        required = (
-            "file_path",
-            "num_tasks",
-            "base_data",
-            "base_task_x",
-            "base_station_x",
-            "task_skill_edge_index",
-            "full_can_do_edge_index",
-            "mean_task_time",
-            "ideal_station_load",
-        )
-        return {key: ctx[key] for key in required}
-
     def _skill_hub_topology(
         self,
         task_skill_edge_index: torch.Tensor,
@@ -366,6 +365,9 @@ class AirLineEnv_Graph(gym.Env):
             sample = sorted(missing)[:5]
             raise ValueError(f"baseline 调度缺少当前数据集任务: {sample}")
         self.baseline_schedule = baseline
+        self._baseline_team_edge_index = build_baseline_team_edge_index(
+            baseline, num_tasks=self.num_tasks
+        )
         return baseline
 
     def _build_reschedule_scenario(self, baseline: BaselineSchedule) -> RescheduleScenario:
@@ -375,6 +377,34 @@ class AirLineEnv_Graph(gym.Env):
         scenario_path = str(getattr(configs, "reschedule_scenario_path", "") or "").strip()
         if scenario_path:
             return load_reschedule_scenario(self._resolve_project_path(scenario_path))
+        if str(getattr(configs, "reschedule_train_scenario_mode", "config")) == "r5_task_delay_v1":
+            _scenario_id, scenario = sample_r5_training_scenario(
+                baseline,
+                rng=self.np_random,
+                stage_ratios={
+                    "early": float(getattr(configs, "r5_early_start_ratio", 0.225)),
+                    "middle": float(getattr(configs, "r5_middle_start_ratio", 0.400)),
+                    "late": float(getattr(configs, "r5_late_start_ratio", 0.575)),
+                },
+                severity_specs={
+                    "low": (
+                        float(getattr(configs, "r5_low_task_ratio", 0.05)),
+                        float(getattr(configs, "r5_low_delay_min", 5.0)),
+                        float(getattr(configs, "r5_low_delay_max", 15.0)),
+                    ),
+                    "medium": (
+                        float(getattr(configs, "r5_medium_task_ratio", 0.10)),
+                        float(getattr(configs, "r5_medium_delay_min", 10.0)),
+                        float(getattr(configs, "r5_medium_delay_max", 35.0)),
+                    ),
+                    "high": (
+                        float(getattr(configs, "r5_high_task_ratio", 0.18)),
+                        float(getattr(configs, "r5_high_delay_min", 20.0)),
+                        float(getattr(configs, "r5_high_delay_max", 60.0)),
+                    ),
+                },
+            )
+            return scenario
         if str(getattr(configs, "reschedule_train_scenario_mode", "config")) == "uniform_load":
             _level, scenario = sample_task_delay_load_scenario(
                 baseline,
@@ -649,6 +679,18 @@ class AirLineEnv_Graph(gym.Env):
         data['worker'].x = self.base_worker_x.clone()
         data['station'].x = self.base_station_x.clone()
         data['task', 'precedes', 'task'].edge_index = self.raw_data['precedence_edges'].clone().long()
+        physical_edges = [
+            (pred, task_id)
+            for task_id, predecessors in enumerate(
+                self.constraint_engine.physical_predecessors
+            )
+            for pred in predecessors
+        ]
+        data[PHYSICAL_PREDECESSOR_EDGE].edge_index = (
+            torch.tensor(physical_edges, dtype=torch.long).t().contiguous()
+            if physical_edges
+            else torch.empty((2, 0), dtype=torch.long)
+        )
         initial_topology = build_skill_hub_topology(
             self.base_task_x,
             self.base_worker_x,
@@ -673,10 +715,9 @@ class AirLineEnv_Graph(gym.Env):
         super().reset(seed=seed, options=options)
         # 新版 gymnasium 会将 np_random 覆盖为 np.random.Generator，
         # 但环境内部大量使用 RandomState API（如 .rand()），因此显式回退
+        # seed=None 时保留当前 RandomState，确保随机流连续推进。
         if seed is not None:
             self.np_random = np.random.RandomState(seed)
-        else:
-            self.np_random = np.random.RandomState()
              
         # ====================
         # [Domain Randomization] Worker Pool Sampling
@@ -1876,6 +1917,8 @@ class AirLineEnv_Graph(gym.Env):
             'station_wall_clock': self.station_wall_clock.copy(),
             'current_time': self.current_time,
             'assigned_tasks': list(self.assigned_tasks),
+            # 每个向量环境可具有独立的工时扰动；PPO 重建时必须保留该副本。
+            'base_task_x': self.base_task_x.clone(),
             'base_worker_x': self.base_worker_x.clone(),
             'dataset_idx': getattr(self, 'active_dataset_idx', 0),
             'worker_topology_key': self._active_worker_topology_key,
@@ -1906,6 +1949,7 @@ class AirLineEnv_Graph(gym.Env):
                 'baseline_station': base_station,
                 'baseline_team_size': base_team_size,
                 'baseline_frozen': base_frozen,
+                'baseline_team_edge_index': self._baseline_team_edge_index,
             })
         return snapshot
         
@@ -1983,7 +2027,17 @@ class AirLineEnv_Graph(gym.Env):
         else:
             data = ctx['base_data'].clone()
         
-        task_x = ctx['base_task_x'].clone()
+        snapshot_task_x = snapshot.get('base_task_x')
+        task_x = (
+            torch.as_tensor(snapshot_task_x).clone()
+            if snapshot_task_x is not None
+            else ctx['base_task_x'].clone()
+        )
+        if task_x.shape != ctx['base_task_x'].shape:
+            raise ValueError(
+                "快照 task 特征形状与数据集上下文不一致: "
+                f"snapshot={tuple(task_x.shape)}, context={tuple(ctx['base_task_x'].shape)}"
+            )
         task_x[:, 1:5] = 0.0
         task_x[torch.arange(ctx['num_tasks']), snapshot['task_status'] + 1] = 1.0
         

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +53,7 @@ def _config() -> SimpleNamespace:
         batch_size=4,
         ppo_batch_size_cap=0,
         random_sample_dataset=True,
+        switch_dataset_every_updates=1,
     )
 
 
@@ -89,6 +91,72 @@ def test_l2d_collect_is_one_update_with_shared_dataset(monkeypatch):
     assert service._last_dataset_idx is not None
     assert service.num_envs == 2
     assert vector_env.switches == [service._last_dataset_idx]
+
+
+def test_rollout_service_honors_dataset_switch_interval_in_serial_mode(monkeypatch):
+    """同一训练图必须在一个配置块内连续用于多个 PPO 更新。"""
+    config = _config()
+    config.random_sample_dataset = False
+    config.switch_dataset_every_updates = 4
+    vector_env = _FakeVectorEnv(num_envs=2)
+    service = APALRolloutService(
+        agent=SimpleNamespace(batch_size=4),
+        vector_env=vector_env,
+        eval_env=None,
+        config=config,
+        device=SimpleNamespace(type="cpu"),
+    )
+    monkeypatch.setattr(APALRolloutService, "_collect_episode", _fake_collect)
+
+    for update_index in range(1, 5):
+        service.collect(update_index)
+
+    assert vector_env.switches == [0]
+
+    service.collect(5)
+
+    assert vector_env.switches == [0, 1]
+
+
+def test_rollout_service_keeps_legacy_per_update_switch_when_interval_is_one(monkeypatch):
+    """默认 N=1 必须继续按每次更新顺序轮转，保持既有实验行为。"""
+    config = _config()
+    config.random_sample_dataset = False
+    config.switch_dataset_every_updates = 1
+    vector_env = _FakeVectorEnv(num_envs=2)
+    service = APALRolloutService(
+        agent=SimpleNamespace(batch_size=4),
+        vector_env=vector_env,
+        eval_env=None,
+        config=config,
+        device=SimpleNamespace(type="cpu"),
+    )
+    monkeypatch.setattr(APALRolloutService, "_collect_episode", _fake_collect)
+
+    for update_index in range(1, 4):
+        service.collect(update_index)
+
+    assert vector_env.switches == [0, 1, 2]
+
+
+def test_random_dataset_selection_matches_legacy_rng_when_interval_is_one() -> None:
+    """N=1 的随机抽图序列必须与原有进程内 RandomState 完全一致。"""
+    config = _config()
+    config.random_sample_dataset = True
+    config.switch_dataset_every_updates = 1
+    service = APALRolloutService(
+        agent=SimpleNamespace(batch_size=4),
+        vector_env=_FakeVectorEnv(num_envs=2),
+        eval_env=None,
+        config=config,
+        device=SimpleNamespace(type="cpu"),
+    )
+
+    expected_rng = np.random.RandomState(config.seed)
+    expected = [int(expected_rng.randint(0, 5)) for _ in range(6)]
+    actual = [service._dataset_index_for_update(index, 5) for index in range(1, 7)]
+
+    assert actual == expected
 
 
 def test_l2d_serial_mode_is_explicit_and_rng_resume_is_exact(monkeypatch):

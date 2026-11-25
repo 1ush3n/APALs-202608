@@ -1,0 +1,30 @@
+# @package _global_
+defaults:
+  - /experiment/reschedule_task_delay_r5_full_x@_global_
+  - _self_
+
+experiment:
+  experiment_name: reschedule_task_delay_r5_homogeneous_graphsage_strict
+  model:
+    ablation_protocol: strict_v1
+    team_selection_mode: autoregressive_pressure_v2_fast_exact
+    policy_action_scope: operation_station_worker
+    policy_observation_scope: full
+    graph_input_scope: full
+    critic_observation_scope: full
+    graph_encoder_mode: homogeneous_graphsage_strict
+    homogeneous_use_type_embedding: false
+    homogeneous_shared_input_projection: false
+
+model:
+  ablation_protocol: strict_v1
+  policy_action_scope: operation_station_worker
+  policy_observation_scope: full
+  graph_input_scope: full
+  critic_observation_scope: full
+  graph_encoder_mode: homogeneous_graphsage_strict
+  homogeneous_use_type_embedding: false
+  homogeneous_shared_input_projection: false
+
+reschedule_task_delay:
+  reschedule_baseline_identity_conditioning: false

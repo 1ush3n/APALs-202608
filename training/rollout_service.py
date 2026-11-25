@@ -9,6 +9,11 @@ import torch
 from configs import Config
 from environment import AirLineEnv_Graph
 from runtime.evaluation import compute_apal_rollout_diagnostics, evaluate_model
+from runtime.modes import (
+    is_fast_exact_mode,
+    is_worker_pointer_v2_mode,
+    uses_behavior_group_exact_replay,
+)
 from runtime.multiscale import BenchmarkScore, parse_reference_makespans, score_multi_benchmark
 from runtime.paths import resolve_workspace_path
 from runtime.reschedule_eval import evaluate_reschedule_model
@@ -16,6 +21,8 @@ from training.heartbeat import RolloutHeartbeat
 from training.lightning_module import RolloutMetrics, RolloutUpdate
 from training.memory import Memory
 from training.observation import refresh_env_observation
+from training.v2_fast_exact_batch import GPUExactBatchBuilder
+from training.worker_pointer_v2_behavior import make_behavior_traces
 
 
 class APALRolloutService:
@@ -39,8 +46,32 @@ class APALRolloutService:
         self.episodes_per_update = max(1, int(config.update_every_episodes))
         self._last_dataset_idx: int | None = None
         self._last_effective_batch_size: int | None = None
+        # L2D checkpoint 兼容层仍序列化该 RNG；主方法的数据集选择不依赖其进程内状态。
         self._rng = np.random.RandomState(int(config.seed))
         self.use_ipc_fusion = bool(getattr(config, "enable_rollout_ipc_fusion", False))
+        # Fast-Exact：训练 rollout 使用 GPU 常驻模板，不逐环境 CPU rebuild。
+        self._fast_exact_builder = None
+        if is_fast_exact_mode(config):
+            self._fast_exact_builder = GPUExactBatchBuilder(
+                config=config,
+                env=vector_env.envs[0],
+                device=device,
+            )
+
+    def _dataset_index_for_update(self, update_index: int, dataset_count: int) -> int:
+        """返回 PPO 更新所属的训练图，支持跨进程恢复时的确定性重建。"""
+        if dataset_count < 1:
+            raise ValueError("训练数据集数量必须大于等于 1")
+        if update_index < 1:
+            raise ValueError("PPO 更新编号必须从 1 开始")
+        interval = max(1, int(getattr(self.config, "switch_dataset_every_updates", 1)))
+        block_index = (int(update_index) - 1) // interval
+        if not bool(getattr(self.config, "random_sample_dataset", True)):
+            return int(block_index % dataset_count)
+
+        # 使用块编号重建伪随机序列，而非依赖进程内 RNG 状态；resume 落在块中间时仍选中同一图。
+        rng = np.random.RandomState(int(self.config.seed))
+        return int(rng.randint(0, dataset_count, size=block_index + 1)[-1])
 
     def _adaptive_batch_for_task_count(self, num_tasks: int) -> tuple[int | None, str]:
         if not bool(getattr(self.config, "adaptive_ppo_batch_by_tasks", False)):
@@ -101,6 +132,11 @@ class APALRolloutService:
         logprob: Any,
         value: Any,
         masks: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        gated_team_trace: Any = None,
+        anchor_proposal_trace: Any = None,
+        worker_pointer_v2_behavior_trace: Any = None,
+        component_behavior_logprobs: tuple[float, float, float] | None = None,
+        conditional_values: tuple[float, float, float] | None = None,
     ) -> None:
         memory.states.append(state)
         memory.actions.append(action)
@@ -112,13 +148,81 @@ class APALRolloutService:
         memory.values.append(
             value if torch.is_tensor(value) else torch.tensor(value, device=self.device)
         )
+        if component_behavior_logprobs is None:
+            memory.old_task_logprob.append(None)
+            memory.old_station_logprob.append(None)
+            memory.old_team_logprob.append(None)
+        else:
+            task_lp, station_lp, team_lp = component_behavior_logprobs
+            memory.old_task_logprob.append(float(task_lp))
+            memory.old_station_logprob.append(float(station_lp))
+            memory.old_team_logprob.append(float(team_lp))
+        if conditional_values is None:
+            memory.old_V_task.append(None)
+            memory.old_V_station.append(None)
+            memory.old_V_worker.append(None)
+        else:
+            task_value, station_value, worker_value = conditional_values
+            memory.old_V_task.append(float(task_value))
+            memory.old_V_station.append(float(station_value))
+            memory.old_V_worker.append(float(worker_value))
         memory.masks.append(masks)
+        memory.gated_team_traces.append(gated_team_trace)
+        memory.anchor_proposal_traces.append(anchor_proposal_trace)
+        memory.worker_pointer_v2_behavior_traces.append(worker_pointer_v2_behavior_trace)
+
+    @staticmethod
+    def _baseline_identity_metrics(memories: list[Memory]) -> dict[str, float]:
+        station_total = 0
+        station_preserved = 0
+        worker_total = 0
+        worker_member = 0
+        for memory in memories:
+            for state, action in zip(memory.states, memory.actions, strict=True):
+                if not isinstance(state, dict) or action is None:
+                    continue
+                task_id, station_id, team = action
+                baseline_stations = state.get("baseline_station")
+                if baseline_stations is not None and 0 <= int(task_id) < len(baseline_stations):
+                    baseline_station = int(baseline_stations[int(task_id)])
+                    if int(station_id) >= 0 and baseline_station >= 0:
+                        station_total += 1
+                        station_preserved += int(int(station_id) == baseline_station)
+                edge_index = state.get("baseline_team_edge_index")
+                if edge_index is None:
+                    continue
+                edge_array = np.asarray(edge_index, dtype=np.int64)
+                if edge_array.ndim != 2 or edge_array.shape[0] != 2:
+                    raise ValueError("baseline_team_edge_index 形状必须为 [2,E]")
+                baseline_team = set(
+                    int(worker_id)
+                    for worker_id in edge_array[1, edge_array[0] == int(task_id)]
+                )
+                for worker_id in team:
+                    worker_total += 1
+                    worker_member += int(int(worker_id) in baseline_team)
+        return {
+            "BaselineIdentity/SelectedStationPreservedRate": (
+                float(station_preserved) / max(1, station_total)
+            ),
+            "BaselineIdentity/SelectedWorkerMemberRate": (
+                float(worker_member) / max(1, worker_total)
+            ),
+        }
 
     def _collect_episode(
         self,
         episode: int,
     ) -> tuple[list[Memory], RolloutMetrics]:
         self.agent.policy.train()
+        v2_mode = is_worker_pointer_v2_mode(self.config)
+        fast_exact = self._fast_exact_builder is not None
+        if self.device.type == "cuda":
+            # 每个 rollout 独立统计峰值，供 v2 与 legacy 使用相同口径比较。
+            torch.cuda.reset_peak_memory_stats(self.device)
+        if v2_mode:
+            self.agent.reset_worker_pointer_v2_diagnostics()
+        rollout_call_index = 0
         heartbeat = RolloutHeartbeat(
             episode,
             self.num_envs,
@@ -161,10 +265,13 @@ class APALRolloutService:
                 randomize_duration=apply_noise,
                 randomize_workers=apply_noise,
             )
-            states: list[Any] = [
-                self.vector_env.envs[index].rebuild_state_from_snapshot(snapshots[index])
-                for index in range(self.num_envs)
-            ]
+            if fast_exact:
+                states: list[Any] = [None] * self.num_envs
+            else:
+                states = [
+                    self.vector_env.envs[index].rebuild_state_from_snapshot(snapshots[index])
+                    for index in range(self.num_envs)
+                ]
         else:
             states = self.vector_env.reset_all(
                 randomize_duration=apply_noise,
@@ -220,11 +327,12 @@ class APALRolloutService:
                         continue
                     if wait_results[idx]:
                         masks_list[idx], snapshots[idx] = refreshed_states[idx]
-                        stage_started = time.perf_counter()
-                        states[idx] = self.vector_env.envs[
-                            idx
-                        ].rebuild_state_from_snapshot(snapshots[idx])
-                        rebuild_seconds += time.perf_counter() - stage_started
+                        if not fast_exact:
+                            stage_started = time.perf_counter()
+                            states[idx] = self.vector_env.envs[
+                                idx
+                            ].rebuild_state_from_snapshot(snapshots[idx])
+                            rebuild_seconds += time.perf_counter() - stage_started
                     else:
                         dones[idx] = True
                         if memories[idx].rewards:
@@ -252,18 +360,35 @@ class APALRolloutService:
                     and step % max(1, int(self.vector_env.envs[0].num_tasks) // 4) == 0
                 )
                 with torch.inference_mode():
-                    results = self.agent.select_actions_batch(
-                        obs_list=[states[idx] for idx in active],
-                        mask_task_list=[masks_list[idx][0] for idx in active],
-                        mask_station_matrix_list=[
-                            masks_list[idx][1] for idx in active
-                        ],
-                        mask_worker_list=[masks_list[idx][2] for idx in active],
-                        deterministic=False,
-                        temperature=float(self.config.sample_temperature),
-                        is_eval=False,
-                        profile_breakdown=profile_breakdown,
-                    )
+                    if fast_exact:
+                        results = self.agent.select_actions_batch(
+                            [],
+                            mask_task_list=[masks_list[idx][0] for idx in active],
+                            mask_station_matrix_list=[
+                                masks_list[idx][1] for idx in active
+                            ],
+                            mask_worker_list=[masks_list[idx][2] for idx in active],
+                            deterministic=False,
+                            temperature=float(self.config.sample_temperature),
+                            is_eval=False,
+                            profile_breakdown=profile_breakdown,
+                            snapshots=[snapshots[idx] for idx in active],
+                            fast_exact_builder=self._fast_exact_builder,
+                        )
+                    else:
+                        results = self.agent.select_actions_batch(
+                            obs_list=[states[idx] for idx in active],
+                            mask_task_list=[masks_list[idx][0] for idx in active],
+                            mask_station_matrix_list=[
+                                masks_list[idx][1] for idx in active
+                            ],
+                            mask_worker_list=[masks_list[idx][2] for idx in active],
+                            deterministic=False,
+                            temperature=float(self.config.sample_temperature),
+                            is_eval=False,
+                            profile_breakdown=profile_breakdown,
+                            baseline_snapshots=[snapshots[idx] for idx in active],
+                        )
                 forward_seconds += time.perf_counter() - stage_started
                 if profile_breakdown:
                     detailed_profile_samples += 1
@@ -272,13 +397,34 @@ class APALRolloutService:
                             detailed_profile_sums.get(key, 0.0) + float(value)
                         )
 
+                # WorkerPointer v2 行为组：本次 select_actions_batch 的 active env 顺序即 group 成员。
+                behavior_traces = []
+                if v2_mode and uses_behavior_group_exact_replay(self.config):
+                    behavior_traces = make_behavior_traces(
+                        group_id=(episode, rollout_call_index),
+                        env_indices=list(active),
+                        behavior_logprobs=self.agent.last_v2_behavior_logprobs,
+                    )
+                    rollout_call_index += 1
+                behavior_trace_by_env = {
+                    trace.env_index: trace for trace in behavior_traces
+                }
+
                 actions = [None] * self.num_envs
+                deadlocked_in_step = []
                 for result_idx, env_idx in enumerate(active):
                     action, logprob, value, _, is_invalid = results[result_idx]
-                    if is_invalid:
-                        raise RuntimeError(
-                            f"训练阶段产生非法动作: env={env_idx}, action={action}"
-                        )
+                    if is_invalid or action is None:
+                        dones[env_idx] = True
+                        deadlocked_in_step.append(env_idx)
+                        if memories[env_idx].rewards:
+                            memories[env_idx].rewards[-1] -= (
+                                self.config.deadlock_penalty_constant
+                                * self.config.r_coef_makespan
+                                * self.config.reward_scale
+                            )
+                            memories[env_idx].is_terminals[-1] = True
+                        continue
                     actions[env_idx] = action
                     self._append_action(
                         memories[env_idx],
@@ -287,24 +433,37 @@ class APALRolloutService:
                         logprob=logprob,
                         value=value,
                         masks=masks_list[env_idx],
+                        gated_team_trace=self.agent.last_gated_team_traces[result_idx],
+                        anchor_proposal_trace=self.agent.last_anchor_proposal_traces[result_idx],
+                        worker_pointer_v2_behavior_trace=behavior_trace_by_env.get(
+                            env_idx
+                        ),
+                        component_behavior_logprobs=self.agent.last_v2_behavior_logprobs[
+                            result_idx
+                        ],
+                        conditional_values=self.agent.last_v2_behavior_values[result_idx],
                     )
+
+                step_active = [env_idx for env_idx in active if env_idx not in deadlocked_in_step]
+                if not step_active:
+                    break
 
                 heartbeat.update(
                     "environment_step",
                     step,
-                    len(active),
-                    self.num_envs - len(active),
+                    len(step_active),
+                    self.num_envs - len(step_active),
                 )
                 stage_started = time.perf_counter()
                 if self.use_ipc_fusion:
                     fused_steps = self.vector_env.step_rollout_indices(
-                        {index: actions[index] for index in active}
+                        {index: actions[index] for index in step_active}
                     )
                     next_snapshots = list(snapshots)
                     rewards = [0.0] * self.num_envs
                     step_dones = list(dones)
                     step_infos: list[dict | None] = [None] * self.num_envs
-                    for index in active:
+                    for index in step_active:
                         next_masks, next_snapshot, reward, step_done, step_info = (
                             fused_steps[index]
                         )
@@ -314,13 +473,23 @@ class APALRolloutService:
                         step_dones[index] = step_done
                         step_infos[index] = step_info
                 else:
-                    next_snapshots, rewards, step_dones, step_infos = (
-                        self.vector_env.step_snapshot_all(actions)
+                    step_results = self.vector_env.step_snapshot_indices(
+                        {index: actions[index] for index in step_active}
                     )
+                    next_snapshots = list(snapshots)
+                    rewards = [0.0] * self.num_envs
+                    step_dones = list(dones)
+                    step_infos: list[dict | None] = [None] * self.num_envs
+                    for index in step_active:
+                        snap, reward, step_done, step_info = step_results[index]
+                        next_snapshots[index] = snap
+                        rewards[index] = reward
+                        step_dones[index] = step_done
+                        step_infos[index] = step_info
                 environment_step_seconds += time.perf_counter() - stage_started
-                environment_steps += len(active)
+                environment_steps += len(step_active)
 
-                for env_idx in active:
+                for env_idx in step_active:
                     step_info = step_infos[env_idx] or {}
                     if step_info.get("invalid_action", False):
                         action = actions[env_idx]
@@ -347,7 +516,7 @@ class APALRolloutService:
                     memories[env_idx].is_terminals.append(bool(step_dones[env_idx]))
                     memories[env_idx].is_truncated.append(False)
                     dones[env_idx] = bool(step_dones[env_idx])
-                    if actions[env_idx] is not None:
+                    if actions[env_idx] is not None and not fast_exact:
                         stage_started = time.perf_counter()
                         states[env_idx] = self.vector_env.envs[
                             env_idx
@@ -396,6 +565,24 @@ class APALRolloutService:
             extra_metrics["Rollout/Profile/SampleCount"] = float(
                 detailed_profile_samples
             )
+        if str(self.config.policy_action_scope) == "operation_station_anchor_proposal_team":
+            merged = Memory()
+            self._merge_memories(merged, memories)
+            apcf_metrics = self.agent._anchor_proposal_rollout_metrics(merged)
+            extra_metrics.update(apcf_metrics)
+        if bool(
+            getattr(self.config, "reschedule_baseline_identity_conditioning", False)
+        ):
+            extra_metrics.update(self._baseline_identity_metrics(memories))
+        if v2_mode:
+            extra_metrics.update(self.agent.finalize_worker_pointer_v2_diagnostics())
+        if self.device.type == "cuda":
+            peak_memory_mib = float(
+                torch.cuda.max_memory_allocated(self.device) / (1024.0**2)
+            )
+            extra_metrics["Memory/PeakAllocatedMiB"] = peak_memory_mib
+            if v2_mode:
+                extra_metrics["PointerV2/PeakMemoryMiB"] = peak_memory_mib
         metrics = RolloutMetrics(
             episode=int(episode),
             average_reward=float(np.mean([sum(memory.rewards) for memory in memories])),
@@ -423,13 +610,21 @@ class APALRolloutService:
             target.is_truncated.extend(source.is_truncated)
             target.masks.extend(source.masks)
             target.values.extend(source.values)
+            target.old_task_logprob.extend(source.old_task_logprob)
+            target.old_station_logprob.extend(source.old_station_logprob)
+            target.old_team_logprob.extend(source.old_team_logprob)
+            target.old_V_task.extend(source.old_V_task)
+            target.old_V_station.extend(source.old_V_station)
+            target.old_V_worker.extend(source.old_V_worker)
+            target.gated_team_traces.extend(source.gated_team_traces)
+            target.anchor_proposal_traces.extend(source.anchor_proposal_traces)
+            target.worker_pointer_v2_behavior_traces.extend(
+                source.worker_pointer_v2_behavior_traces
+            )
 
     def collect(self, update_index: int) -> RolloutUpdate:
         dataset_count = int(self.vector_env.envs[0].dataset_count)
-        if getattr(self.config, "random_sample_dataset", True):
-            dataset_idx = self._rng.randint(0, max(1, dataset_count))
-        else:
-            dataset_idx = (int(update_index) - 1) % max(1, dataset_count)
+        dataset_idx = self._dataset_index_for_update(int(update_index), dataset_count)
 
         if dataset_idx != self._last_dataset_idx:
             self.vector_env.switch_dataset_all(dataset_idx)
@@ -638,6 +833,7 @@ class APALRolloutService:
                         deterministic=True,
                         temperature=0.0,
                         is_eval=True,
+                        baseline_snapshot=env.get_state_snapshot(),
                     )
                     if action_ret[0] is None:
                         invalid_step_count += 1

@@ -1,0 +1,198 @@
+From 7a227f9b014e2e220edcf35af2aecf3df4c66521 Mon Sep 17 00:00:00 2001
+From: 1ush3n <281842176lu@gmail.com>
+Date: Tue, 18 Aug 2026 22:37:51 +0800
+Subject: [PATCH] chore: record local performance validation
+
+---
+ ...2026-08-18-local-performance-validation.md |  66 +++++++++++
+ ...2026-08-18-local-performance-validation.md | 105 ++++++++++++++++++
+ 2 files changed, 171 insertions(+)
+ create mode 100644 docs/superpowers/plans/2026-08-18-local-performance-validation.md
+ create mode 100644 performance_validation/2026-08-18-local-performance-validation.md
+
+diff --git a/docs/superpowers/plans/2026-08-18-local-performance-validation.md b/docs/superpowers/plans/2026-08-18-local-performance-validation.md
+new file mode 100644
+index 0000000..d6a3239
+--- /dev/null
++++ b/docs/superpowers/plans/2026-08-18-local-performance-validation.md
+@@ -0,0 +1,66 @@
++# 本地性能验证计划
++
++> **For agentic workers:** 本计划仅用于当前隔离分支的本地验证，不修改原分支。
++
++**Goal:** 验证 rollout 的逐环境 v2 解码与 PPO replay 重建是否分别构成主要耗时，并确认显存指标口径。
++
++**Architecture:** 优先复用仓库已有的 WorkerPointer v2 测试、详细 rollout profiler 和 TensorBoard 指标。只有现有指标无法区分阶段时，才增加最小计时字段；不改变模型语义和训练超参数。
++
++**Tech Stack:** Python、PyTorch、PyTorch Geometric、PyTorch Lightning、pytest、TensorBoard 日志。
++
++## Global Constraints
++
++- 所有命令使用 `D:\\Conda\\envs\\rag_env\\python.exe`。
++- 所有验证内容只存在于 `codex/local-performance-validation` 分支。
++- 不修改 Actor LR、PPO 目标函数或 WorkerPointer v2 语义。
++- 验证结束后切回 `codex/operation-node-scope-ablation`，并检查工作区状态。
++
++---
++
++### Task 1: 建立基线
++
++**Files:**
++- Read: `configs.py`
++- Read: `training/rollout_service.py`
++- Read: `ppo_agent.py`
++
++- [ ] 记录当前 Git 分支、工作区状态、Python/PyTorch/CUDA 版本和 GPU 显存容量。
++- [ ] 确认 `ForwardMs`、`ContextHostMs`、`BatchedReplayUpdateSeconds` 的计时范围。
++
++### Task 2: 运行已有回归测试
++
++**Files:**
++- Test: `tests/test_worker_pointer_v2.py`
++- Test: `tests/test_worker_pointer_v2_batched_replay.py`
++- Test: `tests/test_worker_pointer_v2_fast_exact_replay.py`
++
++- [ ] 使用 rag_env 运行相关测试。
++- [ ] 记录通过、失败和跳过数量，不因性能验证修改测试语义。
++
++### Task 3: 运行短程 rollout profiler
++
++**Files:**
++- Modify only if required: `conf/rollout/fastpath.yaml`
++- Read: `training/rollout_service.py`
++- Read: `ppo_agent.py`
++
++- [ ] 临时开启 `enable_rollout_detailed_profiler`。
++- [ ] 使用最短可复现 rollout，收集 `BatchBuildMs`、`H2dMs`、`ActorEncoderMs`、`CriticEncoderMs` 和 `ActionDecodeMs`。
++- [ ] 确认 profiler 的 CUDA 同步开销不被当作正式吞吐结果。
++
++### Task 4: 核查 PPO replay
++
++**Files:**
++- Read: `ppo_agent.py`
++- Read: `utils/gpu_graph_manager.py`
++
++- [ ] 检查 GPU batch rebuild 是否发生 CPU fallback。
++- [ ] 分别记录 snapshot 重建、模型计算和 optimizer 更新的耗时；没有现成指标时只添加最小诊断计时。
++- [ ] 对照 `Memory/Allocated_GB`、`Memory/Reserved_GB` 与设备总显存，确认显存数据没有混源或单位错误。
++
++### Task 5: 收尾与隔离确认
++
++- [ ] 保存验证产物和结论到隔离分支。
++- [ ] 运行最终状态检查。
++- [ ] 切回 `codex/operation-node-scope-ablation`。
++- [ ] 确认原分支工作区与验证前一致。
+diff --git a/performance_validation/2026-08-18-local-performance-validation.md b/performance_validation/2026-08-18-local-performance-validation.md
+new file mode 100644
+index 0000000..9164f9e
+--- /dev/null
++++ b/performance_validation/2026-08-18-local-performance-validation.md
+@@ -0,0 +1,105 @@
++# 本地性能验证报告
++
++验证分支：`codex/local-performance-validation`
++
++原始分支：`codex/operation-node-scope-ablation`
++
++执行环境：`D:\\Conda\\envs\\rag_env\\python.exe`
++
++GPU：NVIDIA GeForce RTX 4060 Laptop GPU，约 7.996 GiB
++
++## 结果
++
++### 回归测试
++
++命令：
++
++```text
++python -m pytest tests/test_worker_pointer_v2.py tests/test_worker_pointer_v2_batched_replay.py tests/test_worker_pointer_v2_fast_exact_replay.py -q
++```
++
++结果：49 passed。
++
++### Rollout profiler
++
++使用 `data/680.csv`、4 个环境、256 步、详细 profiler：
++
++```text
++environment_steps = 1024
++total_seconds = 84.987
++sps = 12.049
++forward_ms = 303.640
++ipc_mask_ms = 3.958
++rebuild_ms = 12.188
++environment_step_ms = 11.350
++```
++
++详细 profiler 采样 2 个点，平均值为：
++
++```text
++BatchBuildMs = 4.933
++H2DMs = 2.485
++ActorEncoderMs = 597.697
++CriticEncoderMs = 122.603
++ActionDecodeMs = 113.747
++```
++
++第一个采样点包含 CUDA 冷启动，因此不把 ActorEncoderMs 与 ActionDecodeMs 的平均值直接当作稳态占比。可以确认的是，ActionDecode 已经是可观测的主要阶段，不能把整个 ForwardMs 等同于 GNN 编码。
++
++### WorkerPointer v2 decode benchmark
++
++使用 `data/scale_400_800_datasets/manifest.json`，warmup=3，repeats=10：
++
++```text
++pressure_cpu_upload CUDA mean = 4.116 ms
++pressure_gpu_reuse CUDA mean = 2.974 ms
++decode_cached_without_legacy_mean CUDA mean = 6.226 ms
++decode_uncached_without_legacy_mean CUDA mean = 6.064 ms
++```
++
++当前小基准中 cache 没有收益，不能把压力 context 本身认定为主瓶颈。
++
++### Replay profiler
++
++已有 Fast-Exact replay profiler 结果：
++
++```text
++Self CPU time total = 958.704 ms
++Self CUDA time total = 56.628 ms
++```
++
++主要 CPU 热点包括：`index_put_`、`scatter_add_`、`index_select_backward`、`to/_to_copy`、`empty` 和 `fill_`。这支持 replay 存在 host/indexing/temporary tensor 开销，但该脚本使用 Fast-Exact 路径，不能直接替代普通 batched-v2 的阶段计时。
++
++### Legacy v2 replay 短程验证
++
++256 步、4 环境、batch size=64：
++
++```text
++GPU OOM，更新被事务性回滚并跳过
++peak_allocated = 3458.4 MiB
++peak_reserved = 3598.0 MiB
++```
++
++256 步、4 环境、batch size=16：
++
++```text
++rollout_sps = 10.760
++update_seconds = 95.347
++replay_samples_per_sec = 21.479
++peak_allocated = 2510.5 MiB
++peak_reserved = 2656.0 MiB
++GPU fallback = 0
++```
++
++## 结论
++
++1. Rollout 与 replay 确实是双瓶颈；不能只优化其中一个。
++2. Rollout 的 `ForwardMs` 包含逐环境 WorkerPointer v2 解码；GNN 编码不能代表全部前向成本。
++3. `ContextHostMs` 本身不是 100 秒级热点；当前小基准中压力 context 约 3 ms，cache 也没有明显收益。
++4. Replay 的 CPU/indexing/临时张量开销真实存在，但普通 batched-v2 仍需要进一步拆分 snapshot rebuild、forward、backward 和 optimizer step。
++5. batch size=64 在本机触发 OOM；当前 8GB 显存不应直接增大 batch size。
++6. 本次本机实验没有复现 12–16 GiB reserved 显存；该现象需要重新核对来源、设备和单位。
++
++## 后续最小动作
++
++优先对 `ActionDecodeMs` 做稳态多点采样，并在普通 batched-v2 update 内增加阶段计时。暂不改 Actor LR、动态 EFT 定义或 PPO 目标函数。
+-- 
+2.53.0.windows.1
+
