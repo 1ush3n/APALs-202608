@@ -1,0 +1,67 @@
+[
+  {
+    "id": "a1",
+    "title": "Learning to Dispatch for Job Shop Scheduling via Deep Reinforcement Learning",
+    "venue": "NeurIPS",
+    "year": 2020,
+    "figure": 3,
+    "page": 6,
+    "url": "https://proceedings.neurips.cc/paper/2020/hash/11958dfee29b6709f48a9ba0387a2431-Abstract.html",
+    "pdfurl": "https://proceedings.neurips.cc/paper_files/paper/2020/file/11958dfee29b6709f48a9ba0387a2431-Paper.pdf",
+    "note": "三幅小图保持节点位置、编号和底色一致，仅通过边的方向与增减表达改变。可借鉴这种固定参照，比较工人绑定前后的可选动作。",
+    "label": "同一张图怎样画出三种决策状态",
+    "author": "Cong Zhang et al."
+  },
+  {
+    "id": "a2",
+    "title": "RESCHED: Rethinking Flexible Job Shop Scheduling from a Transformer-based Architecture with Simplified States",
+    "venue": "ICLR",
+    "year": 2026,
+    "figure": 2,
+    "page": 6,
+    "url": "https://proceedings.iclr.cc/paper_files/paper/2026/hash/467e109270678b3e2b3c2e7fa6b3d575-Abstract-Conference.html",
+    "pdfurl": "https://openreview.net/pdf?id=s5pWbwf2tk",
+    "note": "底部三组括线给密集图划出了状态、特征提取和决策三段。左侧成组的小色块进入中段两条支路，在右侧汇合，可沿颜色和连线追踪同一输入。",
+    "label": "从状态矩阵追踪到动作得分",
+    "author": "Xiangjie Xiao et al."
+  },
+  {
+    "id": "a3",
+    "title": "Heterogeneous Graph Attention Networks for Scalable Multi-Robot Scheduling with Temporospatial Constraints",
+    "venue": "RSS",
+    "year": 2020,
+    "figure": 1,
+    "page": 1,
+    "url": "https://www.roboticsproceedings.org/rss16/p094.html",
+    "pdfurl": "https://www.roboticsproceedings.org/rss16/p094.pdf",
+    "note": "工位照片上只点出机器人、共享资源和时序约束，构图步骤接在照片右侧，随后用窄列竖排注意力层与输出。照片承担变量溯源，图注注明来自 KUKA Robotics。",
+    "label": "让一张现场图解释异构图的来源",
+    "author": "Zheyuan Wang and Matthew Gombolay"
+  },
+  {
+    "id": "a4",
+    "title": "Flexible Job Shop Scheduling via Dual Attention Network-Based Reinforcement Learning",
+    "venue": "IEEE TNNLS",
+    "year": 2024,
+    "figure": 3,
+    "page": 6,
+    "url": "https://ieeexplore.ieee.org/document/10246328/",
+    "pdfurl": "https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=10246328",
+    "note": "底部圆形与方形标出两类输入，顶部沿用相同形状呈现更新后的表示。中间两条通路共用纵向层次，交互箭头集中在分支内部，适合观察双路图的排布。",
+    "label": "两条注意力分支如何既对称又有区别",
+    "author": "Runqing Wang et al."
+  },
+  {
+    "id": "a5",
+    "title": "Neural Combinatorial Optimization for Stochastic Flexible Job Shop Scheduling Problems",
+    "venue": "AAAI",
+    "year": 2025,
+    "figure": 1,
+    "page": 4,
+    "url": "https://ojs.aaai.org/index.php/AAAI/article/view/34870",
+    "pdfurl": "https://ojs.aaai.org/index.php/AAAI/article/download/34870/37025",
+    "note": "左面板展开单个场景处理模块，借局部放大框解释注意力块。右面板反复使用同一缩写，将多个模块接入双注意力网络。整图由这两种粒度组织。",
+    "label": "一个模块和它在完整模型中的位置",
+    "author": "Igor G. Smit et al."
+  }
+]
